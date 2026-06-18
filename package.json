@@ -1,0 +1,14 @@
+{
+  "name": "agimia-erp-shell",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "\"C:\\Program Files\\nodejs\\node.exe\" server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^4.19.2",
+    "pg": "^8.21.0"
+  }
+}
