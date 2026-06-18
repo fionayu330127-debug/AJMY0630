@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>达人管理系统 - TikTok Shop</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;background:#f5f5f5;color:#1a1a1a;font-size:14px}
+.layout{display:flex;min-height:100vh}
+
+/* ─ Sidebar ─ */
+.sidebar{width:220px;background:#fff;border-right:1px solid #e8e8e8;flex-shrink:0;display:flex;flex-direction:column}
+.sb-logo{padding:16px;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;gap:10px}
+.sb-logo-icon{width:32px;height:32px;background:#000;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sb-logo-icon svg{width:20px;height:20px;fill:#fff}
+.sb-logo-text{font-size:13px;font-weight:600;line-height:1.3}
+.sb-logo-sub{font-size:11px;color:#999}
+
+/* Topbar store switcher */
+.store-switcher{display:flex;align-items:center;gap:2px;background:#f5f5f5;border-radius:8px;padding:3px;border:1px solid #ebebeb}
+.sw-btn{display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:6px;cursor:pointer;font-size:12px;color:#666;transition:all .15s;white-space:nowrap;font-weight:500;border:none;background:transparent}
+.sw-btn:hover{color:#1a1a1a;background:rgba(255,255,255,.7)}
+.sw-btn.active{background:#fff;color:#1a1a1a;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.sw-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.sw-cnt{font-size:10px;background:#f0f0f0;color:#999;padding:1px 5px;border-radius:6px;font-weight:400}
+.sw-btn.active .sw-cnt{background:#f5f5f5}
+
+.nav-sec{padding:8px 0;border-bottom:1px solid #f0f0f0}
+.nav-lbl{font-size:11px;color:#bbb;padding:4px 16px 6px;letter-spacing:.5px}
+.nav-item{display:flex;align-items:center;gap:8px;padding:9px 16px;cursor:pointer;color:#555;font-size:13px;transition:background .15s;border-left:3px solid transparent}
+.nav-item:hover{background:#f8f8f8;color:#1a1a1a}
+.nav-item.active{background:#fff3f3;color:#fe2c55;border-left-color:#fe2c55;font-weight:500}
+.nav-item svg{width:16px;height:16px;opacity:.7;flex-shrink:0}
+.nav-item.active svg{opacity:1}
+.nbadge{margin-left:auto;background:#fe2c55;color:#fff;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
+
+/* ─ Main ─ */
+.main{flex:1;overflow:auto;min-width:0}
+.page{display:none}
+.page.visible{display:block}
+
+/* Topbar */
+.topbar{background:#fff;border-bottom:1px solid #e8e8e8;padding:0 24px;height:56px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.tb-left{display:flex;align-items:center;gap:10px}
+.page-title{font-size:16px;font-weight:600}
+.sync-pill{font-size:12px;color:#52c41a;display:flex;align-items:center;gap:5px}
+.sync-dot{width:6px;height:6px;border-radius:50%;background:#52c41a;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.tb-right{display:flex;align-items:center;gap:10px}
+.btn{padding:7px 14px;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .15s;display:flex;align-items:center;gap:5px;white-space:nowrap}
+.btn-primary{background:#fe2c55;color:#fff}
+.btn-primary:hover{background:#e0243d}
+.btn-outline{background:#fff;color:#555;border:1px solid #d9d9d9}
+.btn-outline:hover{border-color:#fe2c55;color:#fe2c55}
+.btn-ghost{background:transparent;color:#555;border:1px solid transparent}
+.btn-ghost:hover{background:#f5f5f5}
+.notif-btn{position:relative;width:34px;height:34px;border-radius:8px;border:1px solid #e8e8e8;background:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px}
+.notif-btn:hover{background:#f5f5f5}
+.notif-bdg{position:absolute;top:-4px;right:-4px;width:16px;height:16px;background:#fe2c55;border-radius:50%;font-size:9px;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;border:1.5px solid #fff}
+
+/* Content */
+.content{padding:20px 24px}
+.stats-row{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px}
+.stat-card{background:#fff;border-radius:8px;padding:14px 16px;border:1px solid #f0f0f0}
+.stat-lbl{font-size:12px;color:#999;margin-bottom:5px}
+.stat-val{font-size:22px;font-weight:600}
+.stat-card.hl .stat-val{color:#fe2c55}
+.stat-delta{font-size:11px;color:#52c41a;margin-top:2px}
+
+/* Filter bar */
+.filter-bar{background:#fff;border-radius:8px;padding:12px 16px;margin-bottom:14px;border:1px solid #f0f0f0;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.fl{font-size:12px;color:#999;white-space:nowrap}
+.fi{border:1px solid #e8e8e8;border-radius:6px;padding:6px 10px;font-size:13px;outline:none;background:#fafafa;transition:border .15s;color:#1a1a1a}
+.fi:focus{border-color:#fe2c55;background:#fff}
+.fdiv{width:1px;height:20px;background:#f0f0f0;flex-shrink:0}
+.fright{margin-left:auto;display:flex;gap:8px}
+
+/* Tabs */
+.tab-bar{display:flex;background:#fff;border-radius:8px 8px 0 0;border:1px solid #f0f0f0;border-bottom:none;padding:0 16px}
+.tab-item{padding:11px 14px;font-size:13px;color:#666;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;transition:all .15s;display:flex;align-items:center;gap:5px}
+.tab-item:hover{color:#1a1a1a}
+.tab-item.active{color:#fe2c55;border-bottom-color:#fe2c55;font-weight:500}
+.tab-cnt{font-size:11px;background:#f5f5f5;color:#999;padding:1px 6px;border-radius:10px}
+.tab-item.active .tab-cnt{background:#fff0f2;color:#fe2c55}
+
+/* Table */
+.table-wrap{background:#fff;border-radius:0 0 8px 8px;border:1px solid #f0f0f0;overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th{background:#fafafa;border-bottom:1px solid #f0f0f0;padding:9px 12px;text-align:left;font-size:12px;color:#999;font-weight:500;white-space:nowrap}
+td{padding:12px 12px;border-bottom:1px solid #f8f8f8;font-size:13px;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#fdfeff}
+.cc{display:flex;align-items:center;gap:10px}
+.av{width:36px;height:36px;border-radius:50%;cursor:pointer;flex-shrink:0;border:1.5px solid #f0f0f0;transition:border-color .15s}
+.av:hover{border-color:#fe2c55}
+.cn{font-weight:500;font-size:13px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px}
+.cn:hover{color:#fe2c55}
+.cm{font-size:11px;color:#999;margin-top:2px}
+.pc{display:flex;align-items:center;gap:8px}
+.pe{width:34px;height:34px;border-radius:4px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.pn{font-size:12px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ps{font-size:11px;color:#999;margin-top:1px}
+
+/* Tags */
+.tag{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500;white-space:nowrap}
+.tag-open{background:#e6f7ff;color:#0958d9}
+.tag-targeted{background:#fff7e6;color:#d46b08}
+.tag-affiliate{background:#f9f0ff;color:#722ed1}
+.tag-unset{background:#f5f5f5;color:#999;cursor:pointer;border:1px dashed #d9d9d9}
+.tag-unset:hover{border-color:#fe2c55;color:#fe2c55}
+
+/* Shop tags */
+.shop-tag{display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:500}
+.st-oku{background:#e8f4ff;color:#0072c6}
+.st-mir{background:#f0faf0;color:#1a7a3a}
+.st-both{background:#f5f0ff;color:#6b3fa0}
+
+/* Status */
+.status{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:3px 8px;border-radius:4px}
+.sdot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.s-pending{background:#fffbe6;color:#ad8b00}.s-pending .sdot{background:#faad14}
+.s-approved{background:#f6ffed;color:#389e0d}.s-approved .sdot{background:#52c41a}
+.s-rejected{background:#fff2f0;color:#cf1322}.s-rejected .sdot{background:#ff4d4f}
+.s-assigned{background:#e6f4ff;color:#0958d9}.s-assigned .sdot{background:#1677ff}
+.s-shipped{background:#f0f5ff;color:#2f54eb}.s-shipped .sdot{background:#597ef7}
+.s-published{background:#f6ffed;color:#389e0d}.s-published .sdot{background:#52c41a}
+
+.assign-btn{font-size:11px;color:#fe2c55;cursor:pointer;border:1px dashed #fe2c55;border-radius:4px;padding:2px 8px;background:transparent}
+.assign-btn:hover{background:#fff0f2}
+.abtns{display:flex;gap:5px}
+.abtn{padding:4px 9px;border-radius:4px;font-size:12px;cursor:pointer;border:1px solid #e8e8e8;background:#fff;color:#555;transition:all .15s}
+.abtn:hover{border-color:#fe2c55;color:#fe2c55}
+.abtn.ok{border-color:#52c41a;color:#52c41a}.abtn.ok:hover{background:#f6ffed}
+.abtn.ng{border-color:#ff4d4f;color:#ff4d4f}.abtn.ng:hover{background:#fff2f0}
+.abtn.bl{border-color:#1677ff;color:#1677ff}.abtn.bl:hover{background:#e6f4ff}
+
+/* Pager */
+.pager{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-top:1px solid #f0f0f0}
+.pager-info{font-size:12px;color:#999}
+
+/* ─ Library ─ */
+.lib-card{background:#fff;border:1px solid #f0f0f0;border-bottom:none;overflow:hidden}
+.lib-card:first-child{border-radius:8px 8px 0 0}
+.lib-card:last-child{border-bottom:1px solid #f0f0f0;border-radius:0 0 8px 8px}
+.lib-card:only-child{border-radius:8px;border-bottom:1px solid #f0f0f0}
+.lib-head{display:flex;align-items:center;gap:12px;padding:14px 16px;cursor:pointer;transition:background .15s}
+.lib-head:hover{background:#fdfeff}
+.lib-info{flex:1;min-width:0}
+.lib-name{font-weight:600;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.lib-meta{font-size:12px;color:#999;margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.lib-stats{display:flex;gap:20px;flex-shrink:0}
+.lib-stat-val{font-size:15px;font-weight:600;text-align:center}
+.lib-stat-lbl{font-size:10px;color:#999;text-align:center}
+.lib-expand{font-size:11px;color:#999;transition:transform .2s;margin-left:8px;flex-shrink:0}
+.lib-card.open .lib-expand{transform:rotate(180deg)}
+.lib-body{display:none;border-top:1px solid #f8f8f8}
+.lib-card.open .lib-body{display:block}
+
+/* Stars */
+.stars{display:flex;gap:2px}
+.star{font-size:16px;cursor:pointer;line-height:1;transition:transform .1s}
+.star.on{color:#faad14}
+.star.off{color:#e0e0e0}
+.star:hover{transform:scale(1.25)}
+
+/* Star badge */
+.sb{display:inline-flex;align-items:center;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600}
+.sb-5{background:#fff7e6;color:#d46b08;border:1px solid #ffd591}
+.sb-4{background:#e6f7ff;color:#0958d9;border:1px solid #91caff}
+.sb-3{background:#f6ffed;color:#389e0d;border:1px solid #95de64}
+.sb-2{background:#fff0f6;color:#c41d7f;border:1px solid #ffadd2}
+.sb-1{background:#f5f5f5;color:#666;border:1px solid #d9d9d9}
+
+/* Sub-table in library */
+.sub-table{width:100%;border-collapse:collapse;font-size:12px}
+.sub-table th{background:#fafafa;padding:7px 16px;color:#bbb;font-weight:500;font-size:11px;border-bottom:1px solid #f0f0f0;text-align:left}
+.sub-table td{padding:9px 16px;border-bottom:1px solid #f8f8f8;vertical-align:middle}
+.sub-table tr:last-child td{border-bottom:none}
+.sub-table tr:hover td{background:#fdfeff}
+
+/* BD note */
+.bd-note{margin:10px 16px 14px;background:#fafafa;border-radius:6px;border:1px solid #f0f0f0;padding:10px 12px}
+.bd-note-lbl{font-size:11px;color:#999;margin-bottom:6px}
+.bd-note-ta{width:100%;border:1px solid #e8e8e8;border-radius:6px;padding:7px 10px;font-size:12px;resize:vertical;min-height:58px;outline:none;background:#fff;color:#1a1a1a;font-family:inherit}
+.bd-note-ta:focus{border-color:#fe2c55}
+.bd-note-save{margin-top:6px;padding:4px 12px;border-radius:4px;font-size:12px;cursor:pointer;border:1px solid #fe2c55;background:#fff;color:#fe2c55}
+.bd-note-save:hover{background:#fff0f2}
+
+/* Modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100;display:none;align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:#fff;border-radius:12px;width:560px;max-width:95vw;max-height:88vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.2)}
+.modal-sm{width:340px}
+.modal-hd{padding:16px 20px;border-bottom:1px solid #f0f0f0;display:flex;align-items:center;justify-content:space-between}
+.modal-title{font-size:15px;font-weight:600}
+.modal-close{width:28px;height:28px;border-radius:6px;border:none;background:#f5f5f5;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;color:#666}
+.modal-close:hover{background:#ffe8ec;color:#fe2c55}
+.modal-bd{padding:20px;overflow-y:auto;flex:1}
+
+/* Creator modal internals */
+.cpt{display:flex;gap:14px;align-items:flex-start;margin-bottom:18px}
+.cpa{width:68px;height:68px;border-radius:50%;border:2px solid #f0f0f0;flex-shrink:0}
+.cpn{font-size:16px;font-weight:600;margin-bottom:3px}
+.cph{font-size:13px;color:#999;margin-bottom:8px}
+.cpstats{display:flex;gap:18px}
+.cpstat-val{font-size:15px;font-weight:600}
+.cpstat-lbl{font-size:10px;color:#999}
+.info-sec{margin-bottom:14px}
+.info-sec-t{font-size:11px;color:#bbb;margin-bottom:8px;font-weight:500;letter-spacing:.5px;text-transform:uppercase}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.info-lbl{font-size:11px;color:#999;margin-bottom:2px}
+.info-val{font-size:13px;font-weight:500}
+
+/* Assign/collab modal */
+.assign-list{display:flex;flex-direction:column;gap:8px}
+.assign-opt{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;border:1px solid #f0f0f0;cursor:pointer;transition:all .15s}
+.assign-opt:hover{border-color:#fe2c55;background:#fff8f9}
+.assign-opt-info{flex:1}
+.assign-opt-name{font-weight:500;font-size:13px}
+.assign-opt-meta{font-size:11px;color:#999;margin-top:2px}
+.assign-opt-load{font-size:11px;color:#999;background:#f5f5f5;padding:2px 8px;border-radius:10px}
+.collab-picker{display:flex;flex-direction:column;gap:8px}
+.collab-opt{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;border:1px solid #f0f0f0;cursor:pointer;transition:all .15s}
+.collab-opt:hover{border-color:#ccc}
+.col-sel-open{border-color:#0958d9;background:#e6f7ff}
+.col-sel-targeted{border-color:#d46b08;background:#fff7e6}
+.col-sel-affiliate{border-color:#722ed1;background:#f9f0ff}
+.cdot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.cd-open{background:#0958d9}.cd-targeted{background:#d46b08}.cd-affiliate{background:#722ed1}
+
+.checkbox{width:14px;height:14px;cursor:pointer;accent-color:#fe2c55}
+.empty-state{text-align:center;padding:56px 24px;color:#999}
+.empty-icon{font-size:36px;margin-bottom:10px;opacity:.35}
+
+/* Toast */
+.toast{position:fixed;bottom:24px;right:24px;background:#1a1a1a;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;z-index:999;opacity:0;transform:translateY(8px);transition:all .25s;pointer-events:none;display:flex;align-items:center;gap:8px}
+.toast.show{opacity:1;transform:translateY(0)}
+
+/* New sample modal */
+.form-row{margin-bottom:12px}
+.form-label{font-size:12px;color:#666;margin-bottom:5px;display:block}
+.form-input{width:100%;border:1px solid #e8e8e8;border-radius:6px;padding:8px 10px;font-size:13px;outline:none;font-family:inherit}
+.form-input:focus{border-color:#fe2c55}
+.form-row-2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- ══ Sidebar ══ -->
+<aside class="sidebar">
+  <div class="sb-logo">
+    <div class="sb-logo-icon">
+      <svg viewBox="0 0 24 24"><path d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.33 6.33 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.33-6.34V8.69a8.18 8.18 0 004.78 1.52V6.76a4.85 4.85 0 01-1.01-.07z"/></svg>
+    </div>
+    <div>
+      <div class="sb-logo-text">达人管理系统</div>
+      <div class="sb-logo-sub">TikTok Shop Japan</div>
+    </div>
+  </div>
+
+  <div class="nav-sec">
+    <div class="nav-lbl">主要功能</div>
+    <div class="nav-item active" id="nav-sample" onclick="showPage('sample')">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 3a1 1 0 011-1h10a1 1 0 011 1v2a1 1 0 01-1 1H3a1 1 0 01-1-1V3zm0 6a1 1 0 011-1h10a1 1 0 011 1v2a1 1 0 01-1 1H3a1 1 0 01-1-1V9z"/></svg>
+      样品中心 <span class="nbadge" id="sample-badge">0</span>
+    </div>
+    <div class="nav-item" id="nav-lib" onclick="showPage('lib')">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H3z"/></svg>
+      合作达人库
+    </div>
+    <div class="nav-item" id="nav-data" onclick="showPage('data')">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M1 11a1 1 0 011-1h2a1 1 0 011 1v3H2a1 1 0 01-1-1v-3zm5-4a1 1 0 011-1h2a1 1 0 011 1v7H6V7zm5-5a1 1 0 011-1h2a1 1 0 011 1v12h-4V2z"/></svg>
+      数据中心
+    </div>
+  </div>
+  <div class="nav-sec">
+    <div class="nav-lbl">设置</div>
+    <div class="nav-item" onclick="showPage('bdmgmt')">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-5 6s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H3z"/></svg>
+      BD 成员管理
+    </div>
+    <div class="nav-item">
+      <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a2 2 0 012 2v1h2a1 1 0 011 1v9H3V5a1 1 0 011-1h2V3a2 2 0 012-2zm0 1a1 1 0 00-1 1v1h2V3a1 1 0 00-1-1z"/></svg>
+      API 配置
+    </div>
+  </div>
+</aside>
+
+<!-- ══ Main ══ -->
+<div class="main">
+
+  <!-- 样品中心 -->
+  <div class="page visible" id="page-sample">
+    <div class="topbar">
+      <div class="tb-left">
+        <span class="page-title">样品中心</span>
+        <div class="sync-pill"><div class="sync-dot"></div>已连接数据库</div>
+      </div>
+      <div class="tb-right">
+        <div class="store-switcher" id="store-switcher-sample"></div>
+        <div class="notif-btn" onclick="toast('✅ 暂无新通知')">🔔<div class="notif-bdg">3</div></div>
+        <button class="btn btn-outline" onclick="manualSyncShops()">↻ 同步店铺数据</button>
+        <button class="btn btn-primary" onclick="openNewSampleModal()">+ 新建样品申请</button>
+      </div>
+    </div>
+    <div class="content">
+      <div class="stats-row" id="stats-row"></div>
+      <div class="filter-bar">
+        <span class="fl">搜索</span>
+        <input class="fi" type="text" placeholder="达人名称 / TikTok ID" style="width:175px" oninput="onSampleSearch(this.value)">
+        <div class="fdiv"></div>
+        <span class="fl">合作类型</span>
+        <select class="fi" onchange="setTypeFilter(this.value)">
+          <option value="">全部</option><option value="open">公开合作</option>
+          <option value="targeted">定向合作</option><option value="affiliate">联盟合作</option>
+          <option value="unset">未标记</option>
+        </select>
+        <div class="fright">
+          <button class="btn btn-ghost" style="font-size:12px" onclick="resetFilters()">重置</button>
+        </div>
+      </div>
+      <div class="tab-bar" id="tab-bar"></div>
+      <div class="table-wrap">
+        <table id="sample-table">
+          <thead><tr id="sample-thead">
+            <th><input type="checkbox" class="checkbox" onchange="selAll(this)"></th>
+            <th>达人信息</th><th>申请样品</th><th>粉丝量</th><th>申请时间</th>
+            <th>合作类型</th><th>状态</th><th>分配 BD</th><th>操作</th>
+          </tr></thead>
+          <tbody id="sample-tbody"></tbody>
+        </table>
+        <div class="pager">
+          <div class="pager-info" id="pager-info">共 0 条</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 合作达人库 -->
+  <div class="page" id="page-lib">
+    <div class="topbar">
+      <div class="tb-left">
+        <span class="page-title">合作达人库</span>
+        <div class="sync-pill"><div class="sync-dot"></div>已连接数据库</div>
+      </div>
+      <div class="tb-right">
+        <div class="store-switcher" id="store-switcher-lib"></div>
+        <div class="notif-btn" onclick="toast('✅ 暂无新通知')">🔔<div class="notif-bdg">3</div></div>
+        <button class="btn btn-outline" onclick="manualSyncShops()">↻ 同步店铺数据</button>
+      </div>
+    </div>
+    <div class="content">
+      <div class="filter-bar">
+        <span class="fl">搜索</span>
+        <input class="fi" type="text" placeholder="达人名称 / UID" style="width:175px" oninput="onLibSearch(this.value)">
+        <div class="fdiv"></div>
+        <span class="fl">星级</span>
+        <select class="fi" onchange="filterLibStar(this.value)">
+          <option value="">全部</option><option value="5">★★★★★ 5星</option>
+          <option value="4">★★★★ 4星</option><option value="3">★★★ 3星</option>
+          <option value="2">★★ 2星</option><option value="1">★ 1星</option>
+        </select>
+        <span class="fl">负责 BD</span>
+        <select class="fi" id="lib-bd-sel" onchange="filterLibBD(this.value)">
+          <option value="">全部 BD</option>
+        </select>
+      </div>
+      <div id="lib-grid"></div>
+    </div>
+  </div>
+
+  <!-- 数据中心 (placeholder) -->
+  <div class="page" id="page-data">
+    <div class="topbar"><div class="tb-left"><span class="page-title">数据中心</span></div></div>
+    <div class="content"><div class="empty-state"><div class="empty-icon">📊</div><div>数据中心开发中，敬请期待</div></div></div>
+  </div>
+
+  <!-- BD成员管理 -->
+  <div class="page" id="page-bdmgmt">
+    <div class="topbar">
+      <div class="tb-left"><span class="page-title">BD 成员管理</span></div>
+      <div class="tb-right"><button class="btn btn-primary" onclick="openAddBDModal()">+ 新增 BD</button></div>
+    </div>
+    <div class="content">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>姓名</th><th>当前负责达人数</th></tr></thead>
+          <tbody id="bd-mgmt-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /main -->
+</div><!-- /layout -->
+
+<!-- Modals -->
+<div class="modal-overlay" id="m-creator" onclick="closeModal('m-creator')">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-hd"><span class="modal-title">达人详情</span><button class="modal-close" onclick="closeModal('m-creator')">×</button></div>
+    <div class="modal-bd" id="m-creator-body"></div>
+  </div>
+</div>
+<div class="modal-overlay" id="m-assign" onclick="closeModal('m-assign')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-hd"><span class="modal-title">分配 BD 成员</span><button class="modal-close" onclick="closeModal('m-assign')">×</button></div>
+    <div class="modal-bd">
+      <p style="font-size:12px;color:#999;margin-bottom:12px">分配后 BD 将收到站内通知。</p>
+      <div class="assign-list" id="assign-list"></div>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="m-collab" onclick="closeModal('m-collab')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-hd"><span class="modal-title">标记合作类型</span><button class="modal-close" onclick="closeModal('m-collab')">×</button></div>
+    <div class="modal-bd"><div class="collab-picker" id="collab-picker"></div></div>
+  </div>
+</div>
+<div class="modal-overlay" id="m-new-sample" onclick="closeModal('m-new-sample')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-hd"><span class="modal-title">新建样品申请</span><button class="modal-close" onclick="closeModal('m-new-sample')">×</button></div>
+    <div class="modal-bd">
+      <div class="form-row"><label class="form-label">店铺</label>
+        <select class="form-input" id="ns-shop"></select>
+      </div>
+      <div class="form-row"><label class="form-label">达人 UID（唯一标识，跨店铺合作请使用相同UID）</label>
+        <input class="form-input" id="ns-uid" placeholder="例如 u3001">
+      </div>
+      <div class="form-row-2">
+        <div class="form-row"><label class="form-label">达人昵称</label><input class="form-input" id="ns-name"></div>
+        <div class="form-row"><label class="form-label">TikTok Handle</label><input class="form-input" id="ns-handle" placeholder="@xxx"></div>
+      </div>
+      <div class="form-row-2">
+        <div class="form-row"><label class="form-label">粉丝量</label><input class="form-input" id="ns-fans" type="number" placeholder="例如 500000"></div>
+        <div class="form-row"><label class="form-label">分类</label><input class="form-input" id="ns-category" placeholder="美妆/时尚/家居…"></div>
+      </div>
+      <div class="form-row"><label class="form-label">申请样品</label>
+        <select class="form-input" id="ns-product"></select>
+      </div>
+      <button class="btn btn-primary" style="width:100%;justify-content:center;margin-top:6px" onclick="submitNewSample()">提交申请</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="m-add-bd" onclick="closeModal('m-add-bd')">
+  <div class="modal modal-sm" onclick="event.stopPropagation()">
+    <div class="modal-hd"><span class="modal-title">新增 BD 成员</span><button class="modal-close" onclick="closeModal('m-add-bd')">×</button></div>
+    <div class="modal-bd">
+      <div class="form-row"><label class="form-label">姓名</label><input class="form-input" id="bd-name" placeholder="例如 小林 Kobayashi"></div>
+      <button class="btn btn-primary" style="width:100%;justify-content:center" onclick="submitNewBD()">添加</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast-el"><span id="toast-msg"></span></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

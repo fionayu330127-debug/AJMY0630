@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { Pool } = require('pg');
 
-const TK_DIR = path.join(__dirname, '..', 'tk-creator-system');
+const TK_DIR = path.join(__dirname, 'modules', 'tk-creator-system');
 const express = require(path.join(TK_DIR, 'node_modules', 'express'));
 const tkApp = require(path.join(TK_DIR, 'server.js'));
 

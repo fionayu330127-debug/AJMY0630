@@ -4,3 +4,10 @@ node_modules/
 data/*.db
 data/*.db-wal
 data/*.db-shm
+modules/*/node_modules/
+modules/*/.env
+modules/*/*.log
+modules/*/data/*.db
+modules/*/data/*.db-wal
+modules/*/data/*.db-shm
+modules/*/cloudflared-windows-amd64.exe

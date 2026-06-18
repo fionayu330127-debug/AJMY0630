@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.log
+data/*.db
+data/*.db-wal
+data/*.db-shm
+cloudflared-windows-amd64.exe
