@@ -15,3 +15,4 @@ modules/*/data/*.db-wal
 modules/*/data/*.db-shm
 modules/*/cloudflared-windows-amd64.exe
 tk-creator-system/
+modules/product-test-system/
