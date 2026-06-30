@@ -11,9 +11,9 @@ npm install --omit=dev
 $listeners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
   Select-Object -ExpandProperty OwningProcess -Unique
 
-foreach ($pid in $listeners) {
-  if ($pid -and $pid -ne $PID) {
-    Stop-Process -Id $pid -Force
+foreach ($listenerPid in $listeners) {
+  if ($listenerPid -and $listenerPid -ne $PID) {
+    Stop-Process -Id $listenerPid -Force
   }
 }
 
