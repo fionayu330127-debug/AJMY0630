@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS bd_members (
   id    INTEGER PRIMARY KEY AUTOINCREMENT,
   name  TEXT NOT NULL,
   email TEXT,
+  external_user_id TEXT,
+  source TEXT DEFAULT 'local',
   active INTEGER DEFAULT 1
 );
 
@@ -63,9 +65,25 @@ CREATE TABLE IF NOT EXISTS samples (
 CREATE TABLE IF NOT EXISTS creator_library (
   uid   TEXT PRIMARY KEY,
   star  INTEGER DEFAULT 0,
-  note  TEXT DEFAULT ''
+  note  TEXT DEFAULT '',
+  bd_id INTEGER,
+  FOREIGN KEY (bd_id) REFERENCES bd_members(id)
 );
 `);
+
+try { db.exec('ALTER TABLE creator_library ADD COLUMN bd_id INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE samples ADD COLUMN library_added_at TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE bd_members ADD COLUMN wecom_userid TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE bd_members ADD COLUMN external_user_id TEXT'); } catch (_) {}
+try { db.exec("ALTER TABLE bd_members ADD COLUMN source TEXT DEFAULT 'local'"); } catch (_) {}
+try {
+  db.exec(`
+    UPDATE samples
+    SET library_added_at = COALESCE(library_added_at, applied_at, datetime('now'))
+    WHERE library_added_at IS NULL
+      AND status IN ('approved', 'shipped', 'published')
+  `);
+} catch (_) {}
 
 // ──────────────────────────────────────────
 // 初始数据填充（仅首次运行时）

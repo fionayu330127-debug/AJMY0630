@@ -3,9 +3,7 @@
   "version": "1.0.0",
   "description": "TikTok达人管理系统 - 样品中心与合作达人库",
   "main": "server.js",
-  "scripts": {
-    "start": "node --no-warnings server.js"
-  },
+  "scripts": {},
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^4.19.2"

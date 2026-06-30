@@ -5,9 +5,10 @@
 require('dotenv').config();
 const https = require('https');
 const crypto = require('crypto');
+const { getActiveAppSecret, getAppSecretStatus } = require('./tiktokSecrets');
 
 const APP_KEY = process.env.TK_APP_KEY;
-const APP_SECRET = process.env.TK_APP_SECRET;
+const APP_SECRET = getActiveAppSecret();
 const ACCESS_TOKEN = process.env.TK_ACCESS_TOKEN;
 
 if (!APP_KEY || !APP_SECRET || !ACCESS_TOKEN) {
@@ -36,6 +37,8 @@ function generateSign(path, params, appSecret) {
 const timestamp = Math.floor(Date.now() / 1000).toString();
 const baseParams = { app_key: APP_KEY, timestamp };
 const sign = generateSign(PATH, baseParams, APP_SECRET);
+
+console.log('App Secret 状态:', getAppSecretStatus());
 
 const query = new URLSearchParams({ ...baseParams, sign }).toString();
 

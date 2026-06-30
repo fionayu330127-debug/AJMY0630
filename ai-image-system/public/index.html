@@ -1,0 +1,1233 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 作图工作台 · ai-image-system</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F6F4EF;
+    --paper-raised:#FFFFFF;
+    --ink:#262420;
+    --ink-soft:#6B6860;
+    --hairline:#DCD8CC;
+    --proof:#1F4FA3;
+    --proof-fill:#E4ECF8;
+    --ok:#4F7A56;
+    --ok-fill:#E7F0E5;
+    --warn:#A3552B;
+    --warn-fill:#F6E9DE;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'IBM Plex Sans',sans-serif;
+    line-height:1.6;
+  }
+  .frame-tick{
+    height:6px;
+    background-image:repeating-linear-gradient(90deg, var(--ink) 0 2px, transparent 2px 14px);
+    opacity:.18;
+  }
+  header{
+    padding:28px 32px 18px;
+    max-width:980px;
+    margin:0 auto;
+  }
+  .headerbar{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:20px;
+  }
+  .mode-switch{
+    display:flex;
+    gap:8px;
+    border:0.5px solid var(--hairline);
+    border-radius:10px;
+    padding:4px;
+    background:var(--paper-raised);
+  }
+  .mode-btn{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600;
+    font-size:13px;
+    border:0;
+    border-radius:7px;
+    padding:9px 14px;
+    color:var(--ink-soft);
+    background:transparent;
+    cursor:pointer;
+  }
+  .mode-btn.active{
+    background:var(--ink);
+    color:var(--paper);
+  }
+  header .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;
+    letter-spacing:.08em;
+    color:var(--ink-soft);
+    text-transform:uppercase;
+  }
+  header h1{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600;
+    font-size:26px;
+    margin:6px 0 0;
+  }
+  main{
+    max-width:980px;
+    margin:0 auto;
+    padding:8px 32px 80px;
+  }
+  .stepper{
+    display:flex;
+    gap:8px;
+    margin:24px 0 32px;
+  }
+  .stepper .pip{
+    flex:1;
+    border:0.5px solid var(--hairline);
+    border-radius:10px;
+    padding:10px 14px;
+    background:var(--paper-raised);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;
+    color:var(--ink-soft);
+    transition:background .2s,border-color .2s,color .2s;
+  }
+  .stepper .pip b{
+    display:block;
+    font-family:'Space Grotesk',sans-serif;
+    font-size:14px;
+    font-weight:600;
+    color:var(--ink);
+    margin-top:2px;
+  }
+  .stepper .pip.active{border-color:var(--proof);background:var(--proof-fill);}
+  .stepper .pip.active b{color:var(--proof);}
+  .stepper .pip.done{border-color:var(--ok);}
+  .stepper .pip.done b{color:var(--ok);}
+
+  .panel{
+    background:var(--paper-raised);
+    border:0.5px solid var(--hairline);
+    border-radius:14px;
+    padding:28px 28px 30px;
+    margin-bottom:20px;
+  }
+  .panel[hidden]{display:none;}
+  .single-workflow[hidden], .multi-workflow[hidden]{display:none;}
+  .panel h2{
+    font-family:'Space Grotesk',sans-serif;
+    font-size:18px;
+    font-weight:600;
+    margin:0 0 4px;
+  }
+  .panel .sub{color:var(--ink-soft);font-size:14px;margin:0 0 22px;}
+
+  .dropzone{
+    border:1.5px dashed var(--hairline);
+    border-radius:12px;
+    padding:36px 20px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .2s,background .2s;
+  }
+  .dropzone:hover, .dropzone.drag{border-color:var(--proof);background:var(--proof-fill);}
+  .dropzone input{display:none;}
+  .dropzone .hint{color:var(--ink-soft);font-size:13px;margin-top:6px;}
+
+  .thumbs{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;}
+  .thumb{
+    width:82px;
+    border:0.5px solid var(--hairline);
+    border-radius:8px;
+    overflow:hidden;
+    background:var(--paper);
+  }
+  .thumb img{width:100%;height:72px;object-fit:cover;display:block;}
+  .thumb .thumb-tools{display:flex;gap:2px;padding:4px;justify-content:center;}
+  .thumb .thumb-tools button{font-size:11px;padding:2px 5px;border-radius:5px;}
+  .thumbs img{width:72px;height:72px;object-fit:cover;border-radius:8px;border:0.5px solid var(--hairline);}
+  label.field{display:block;margin-top:18px;}
+  label.field span{font-size:13px;font-weight:500;display:block;margin-bottom:6px;}
+  label.field .key{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-soft);margin-left:6px;}
+  textarea, input[type=text]{
+    width:100%;
+    border:0.5px solid var(--hairline);
+    border-radius:8px;
+    padding:10px 12px;
+    font-family:'IBM Plex Sans',sans-serif;
+    font-size:14px;
+    color:var(--ink);
+    background:var(--paper);
+    resize:vertical;
+  }
+  textarea:focus, input:focus{outline:2px solid var(--proof);outline-offset:1px;}
+
+  .btn{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600;
+    font-size:14px;
+    border-radius:9px;
+    padding:11px 20px;
+    border:0.5px solid var(--ink);
+    background:var(--ink);
+    color:var(--paper);
+    cursor:pointer;
+    transition:opacity .15s,transform .1s;
+  }
+  .btn:hover{opacity:.85;}
+  .btn:active{transform:translateY(1px);}
+  .btn:disabled{opacity:.35;cursor:not-allowed;}
+  .btn.ghost{background:transparent;color:var(--ink);}
+  .btn.ok{background:var(--ok);border-color:var(--ok);}
+  .btn.warn{background:transparent;color:var(--warn);border-color:var(--warn);}
+  .btn.small{padding:6px 12px;font-size:12px;border-radius:7px;}
+
+  .row{display:flex;gap:10px;align-items:center;margin-top:22px;flex-wrap:wrap;}
+
+  .error{
+    margin-top:16px;
+    border:0.5px solid var(--warn);
+    background:var(--warn-fill);
+    color:var(--warn);
+    border-radius:8px;
+    padding:10px 14px;
+    font-size:13px;
+  }
+  .error[hidden]{display:none;}
+
+  .spinner{
+    width:14px;height:14px;border-radius:50%;
+    border:2px solid rgba(0,0,0,.15);border-top-color:var(--ink);
+    display:inline-block;margin-right:8px;vertical-align:-2px;
+    animation:spin .7s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce){.spinner{animation:none;}}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  .sheet{
+    display:grid;
+    grid-template-columns:repeat(auto-fit, minmax(190px,1fr));
+    gap:16px;
+    margin-top:6px;
+  }
+  .frame{
+    border:0.5px solid var(--hairline);
+    border-radius:10px;
+    overflow:hidden;
+    background:var(--paper);
+    position:relative;
+  }
+  .frame .no{
+    position:absolute;top:8px;left:8px;
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    background:rgba(38,36,32,.72);
+    color:#fff;
+    padding:2px 6px;
+    border-radius:5px;
+  }
+  .frame img{width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--hairline);}
+  .frame .cap{padding:8px 10px 4px;font-size:12.5px;font-weight:500;}
+  .frame .status{padding:0 10px 8px;font-size:12px;color:var(--ink-soft);}
+  .frame.failed{border-color:var(--warn);background:var(--warn-fill);}
+  .frame.failed .status{color:var(--warn);}
+  .frame.pending img{opacity:.35;}
+  .frame .tools{display:flex;gap:6px;padding:0 10px 10px;}
+  .frame .editbox{padding:0 10px 10px;display:none;}
+  .frame .editbox.open{display:block;}
+  .frame .editbox input{font-size:12.5px;padding:7px 9px;margin-bottom:6px;}
+  .single-result{margin-top:22px;}
+  .single-result[hidden]{display:none;}
+  .task-home[hidden], .task-modal[hidden], .workbench[hidden]{display:none;}
+  .task-toolbar{
+    display:flex;
+    justify-content:space-between;
+    gap:14px;
+    align-items:center;
+    margin-bottom:18px;
+  }
+  .task-toolbar h2{margin:0;font-family:'Space Grotesk',sans-serif;font-size:20px;}
+  .task-table{
+    width:100%;
+    border-collapse:collapse;
+    border:0.5px solid var(--hairline);
+    border-radius:12px;
+    overflow:hidden;
+    background:var(--paper-raised);
+  }
+  .task-table th,.task-table td{
+    text-align:left;
+    border-bottom:0.5px solid var(--hairline);
+    padding:13px 14px;
+    font-size:14px;
+  }
+  .task-table th{font-size:12px;color:var(--ink-soft);background:var(--paper);font-weight:600;}
+  .task-table tr:last-child td{border-bottom:0;}
+  .task-actions{display:flex;gap:8px;flex-wrap:wrap;}
+  .task-empty{
+    border:0.5px dashed var(--hairline);
+    border-radius:12px;
+    padding:36px 20px;
+    text-align:center;
+    color:var(--ink-soft);
+    background:var(--paper-raised);
+  }
+  .task-modal{
+    position:fixed;
+    inset:0;
+    background:rgba(38,36,32,.35);
+    display:grid;
+    place-items:center;
+    z-index:20;
+    padding:20px;
+  }
+  .task-dialog{
+    width:min(460px,100%);
+    background:var(--paper-raised);
+    border:0.5px solid var(--hairline);
+    border-radius:14px;
+    padding:22px;
+    box-shadow:0 18px 60px rgba(38,36,32,.18);
+  }
+  .task-dialog h2{margin:0 0 14px;font-family:'Space Grotesk',sans-serif;font-size:18px;}
+  .workbench-head{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    margin-bottom:14px;
+  }
+  .workbench-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;}
+  .workbench-head .label{font-size:12px;color:var(--ink-soft);margin-bottom:2px;}
+  .workbench-head .name{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:16px;}
+
+  .decision{
+    margin-top:26px;
+    border-top:0.5px solid var(--hairline);
+    padding-top:22px;
+    display:flex;
+    gap:12px;
+    flex-wrap:wrap;
+    align-items:center;
+  }
+  .decision .hint{color:var(--ink-soft);font-size:13px;flex:1 1 100%;}
+
+  footer{
+    text-align:center;
+    font-family:'IBM Plex Mono',monospace;
+    font-size:11px;
+    color:var(--ink-soft);
+    padding:30px 0 50px;
+  }
+  @media (max-width:720px){
+    .headerbar{flex-direction:column;}
+    .mode-switch{width:100%;}
+    .mode-btn{flex:1;}
+  }
+</style>
+</head>
+<body>
+
+<div class="frame-tick"></div>
+<header>
+  <div class="headerbar">
+    <div>
+      <div class="eyebrow">AI-IMAGE-SYSTEM · 内部工作台</div>
+      <h1>AI 作图工作台</h1>
+    </div>
+    <div class="mode-switch" role="group" aria-label="作图模式">
+      <button class="mode-btn" id="modeSingle" type="button">单图模式</button>
+      <button class="mode-btn active" id="modeMulti" type="button">多图模式</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="task-home panel" id="taskHome">
+    <div class="task-toolbar">
+      <div>
+        <h2>作图任务清单</h2>
+        <p class="sub" id="taskScopeText">加载中...</p>
+      </div>
+      <button class="btn" id="btnNewTask" type="button">+ 新增作图任务</button>
+    </div>
+    <div id="taskList"></div>
+    <div class="error" id="taskErr" hidden></div>
+  </section>
+
+  <section class="task-modal" id="taskModal" hidden>
+    <div class="task-dialog">
+      <h2 id="taskModalTitle">新增作图任务</h2>
+      <label class="field">
+        <span>任务名称 <span class="key">TASK_NAME</span></span>
+        <input type="text" id="taskNameInput" placeholder="例如：冷感呼啦圈主图优化">
+      </label>
+      <div class="row">
+        <button class="btn" id="btnSaveTask" type="button">保存并开始作图</button>
+        <button class="btn ghost" id="btnCancelTask" type="button">取消</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="workbench" id="workbench" hidden>
+  <div class="workbench-head">
+    <div>
+      <div class="label">当前作图任务</div>
+      <div class="name" id="currentTaskName">未选择任务</div>
+    </div>
+    <div class="workbench-actions">
+      <button class="btn small" id="btnSaveDraft" type="button">保存任务</button>
+      <button class="btn ghost small" id="btnBackTasks" type="button">返回清单</button>
+    </div>
+  </div>
+  <div class="single-workflow" id="singleWorkflow" hidden>
+    <section class="panel">
+      <h2>单图模式</h2>
+      <p class="sub">上传素材，输入作图需求，直接生成一张图片；不满意可继续修改。</p>
+
+      <div class="dropzone" id="singleDropzone">
+        <div>点击选择图片，或把图片拖到这里</div>
+        <div class="hint">可上传参考素材，JPG / PNG，单张不超过 15MB</div>
+        <input type="file" id="singleFileInput" accept="image/*" multiple>
+      </div>
+      <div class="thumbs" id="singleThumbs"></div>
+
+      <label class="field">
+        <span>作图需求 <span class="key">PROMPT</span></span>
+        <textarea id="singlePrompt" rows="4" placeholder="例如：保留产品主体，改成蓝色背景，光线干净，突出质感"></textarea>
+      </label>
+
+      <div class="row">
+        <button class="btn" id="btnSingleGenerate">生成图片 →</button>
+      </div>
+      <div class="error" id="singleErr" hidden></div>
+
+      <div class="single-result" id="singleResult" hidden>
+        <div class="sheet" id="singleSheet"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="multi-workflow" id="multiWorkflow">
+    <div class="stepper">
+      <div class="pip active" id="pip-1"><span>01</span><b>提炼卖点</b></div>
+      <div class="pip" id="pip-2"><span>02</span><b>核对文案</b></div>
+      <div class="pip" id="pip-3"><span>03</span><b>成果一览</b></div>
+    </div>
+
+    <section class="panel" id="step-1">
+      <h2>01 — 上传素材</h2>
+      <p class="sub">上传产品或竞品参考图，也可以补充产品/竞品链接。多图模式会基于上传的参考图做图生图。</p>
+
+      <div class="dropzone" id="dropzone">
+        <div>点击选择图片，或把图片拖到这里</div>
+        <div class="hint">支持多张，JPG / PNG，单张不超过 15MB</div>
+        <input type="file" id="fileInput" accept="image/*" multiple>
+      </div>
+      <div class="thumbs" id="thumbs"></div>
+
+      <label class="field">
+        <span>产品/竞品链接 <span class="key">PRODUCT_LINK</span></span>
+        <input type="text" id="productLink" placeholder="可选：粘贴产品页、竞品页或素材来源链接">
+      </label>
+
+      <div class="row">
+        <button class="btn" id="btnExtract">提炼卖点信息 →</button>
+      </div>
+      <div class="error" id="err1" hidden></div>
+    </section>
+
+    <section class="panel" id="step-2" hidden>
+      <h2>02 — 核对提炼结果</h2>
+      <p class="sub">AI 已按下列字段提炼并译成日语，确认无误或修改后再生成图片。</p>
+
+      <div id="fields"></div>
+
+      <div class="row">
+        <button class="btn ghost" id="btnBack2">← 重新上传</button>
+        <button class="btn" id="btnGenerate">生成 7 张图 →</button>
+      </div>
+      <div class="error" id="err2" hidden></div>
+    </section>
+
+    <section class="panel" id="step-3" hidden>
+      <h2>03 — 成果一览</h2>
+      <p class="sub">系统会逐张生成图片；成功的图片会立即保留，失败不会影响其他图片继续生成。</p>
+
+      <div class="sheet" id="sheet"></div>
+
+      <div class="decision">
+        <span class="hint">满意就直接下载；不满意可以单张精修，或整体返回上一步重新生成。</span>
+        <button class="btn ok" id="btnDownloadAll">满意，下载全部</button>
+        <button class="btn warn" id="btnBack3">不满意，返回修改文案</button>
+      </div>
+      <div class="error" id="err3" hidden></div>
+    </section>
+  </div>
+  </div>
+
+</main>
+
+<footer>AI-IMAGE-SYSTEM · /api/ai-image</footer>
+<script>
+const state = {
+  mode: 'multi',
+  files: [],
+  extracted: null,
+  images: [],
+  singleFiles: [],
+  singleImage: null,
+  view: 'tasks',
+  tasks: [],
+  currentUser: null,
+  isAdmin: false,
+  editingTaskId: null,
+  currentTask: null,
+  step: 1,
+  suppressDraftSave: false,
+  taskDrafts: {}
+};
+
+const FIELD_DEFS = [
+  ['function_desc','功能表达','FUNCTION_DESC'],
+  ['target_buyer','谁在买','TARGET_BUYER'],
+  ['buy_reason','为什么买','BUY_REASON'],
+  ['trigger_scenario','什么场景触发购买','TRIGGER_SCENARIO'],
+  ['competitor_points','竞品的卖点','COMPETITOR_POINTS'],
+  ['complaint_insights','评论区抱怨 / 可视化要点','COMPLAINT_INSIGHTS'],
+  ['size_info','尺寸信息','SIZE_INFO'],
+  ['accessory_info','配件信息','ACCESSORY_INFO'],
+];
+
+function setStep(n){
+  state.step = n;
+  for(const i of [1,2,3]){
+    document.getElementById('step-'+i).hidden = i!==n;
+    const pip = document.getElementById('pip-'+i);
+    pip.classList.toggle('active', i===n);
+    pip.classList.toggle('done', i<n);
+  }
+  saveCurrentTaskDraft();
+}
+function showError(id,msg){const el=document.getElementById(id);el.textContent=msg;el.hidden=false;}
+function clearError(id){document.getElementById(id).hidden=true;}
+function setBusy(btn,busy,label){
+  btn.disabled = busy;
+  btn.innerHTML = busy ? '<span class="spinner"></span>处理中...' : label;
+}
+
+function taskDraftKey(taskId){
+  return `ai-image-task-draft:${taskId}`;
+}
+
+function collectTaskDraft(){
+  const fields = {};
+  document.querySelectorAll('#fields textarea').forEach(t=>{ fields[t.dataset.key] = t.value; });
+  return {
+    mode: state.mode,
+    step: state.step,
+    productLink: document.getElementById('productLink')?.value || '',
+    extracted: state.extracted,
+    fields,
+    images: state.images,
+    singlePrompt: document.getElementById('singlePrompt')?.value || '',
+    singleImage: state.singleImage
+  };
+}
+
+function cacheCurrentTaskDraft(){
+  if(state.suppressDraftSave) return;
+  if(!state.currentTask?.id) return;
+  const draft = collectTaskDraft();
+  state.currentTask.draft = draft;
+  state.taskDrafts[state.currentTask.id] = draft;
+  try{
+    localStorage.setItem(taskDraftKey(state.currentTask.id), JSON.stringify(draft));
+  }catch(e){
+    console.warn('save task draft failed', e);
+  }
+}
+
+function saveCurrentTaskDraft(){
+  cacheCurrentTaskDraft();
+}
+
+async function persistCurrentTaskDraft(){
+  if(!state.currentTask?.id) throw new Error('请先选择或新增一个作图任务');
+  const draft = collectTaskDraft();
+  const data = await apiJson(`${TASK_API_BASE}/${state.currentTask.id}`, {
+    method:'PATCH',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({draft})
+  });
+  state.currentTask = data.task;
+  const index = state.tasks.findIndex(task => String(task.id) === String(data.task.id));
+  if(index >= 0) state.tasks[index] = data.task;
+  state.taskDrafts[data.task.id] = draft;
+  try{
+    localStorage.setItem(taskDraftKey(data.task.id), JSON.stringify(draft));
+  }catch(e){
+    console.warn('cache task draft failed', e);
+  }
+  return data.task;
+}
+
+function resetWorkbenchDraft(){
+  state.files = [];
+  state.singleFiles = [];
+  state.extracted = null;
+  state.images = [];
+  state.singleImage = null;
+  document.getElementById('productLink').value = '';
+  document.getElementById('singlePrompt').value = '';
+  document.getElementById('thumbs').innerHTML = '';
+  document.getElementById('singleThumbs').innerHTML = '';
+  document.getElementById('fields').innerHTML = '';
+  renderSingleResult();
+  renderSheet();
+  setStep(1);
+}
+
+function restoreTaskDraft(taskId){
+  state.suppressDraftSave = true;
+  resetWorkbenchDraft();
+  if(!taskId){
+    state.suppressDraftSave = false;
+    return;
+  }
+  let draft = null;
+  try{
+    draft = state.currentTask?.draft || state.taskDrafts[taskId] || JSON.parse(localStorage.getItem(taskDraftKey(taskId)) || 'null');
+  }catch(e){
+    draft = null;
+  }
+  if(!draft){
+    state.suppressDraftSave = false;
+    return;
+  }
+  document.getElementById('productLink').value = draft.productLink || '';
+  document.getElementById('singlePrompt').value = draft.singlePrompt || '';
+  state.extracted = draft.extracted || draft.fields || null;
+  state.images = Array.isArray(draft.images) ? draft.images : [];
+  state.singleImage = draft.singleImage || null;
+  if(state.extracted){
+    renderFields();
+    if(draft.fields){
+      document.querySelectorAll('#fields textarea').forEach(t=>{
+        t.value = draft.fields[t.dataset.key] || t.value || '';
+      });
+    }
+  }
+  renderSingleResult();
+  renderSheet();
+  setMode(draft.mode === 'single' ? 'single' : 'multi');
+  setStep(draft.step || (state.images.length ? 3 : state.extracted ? 2 : 1));
+  state.suppressDraftSave = false;
+}
+
+async function apiJson(url, options){
+  const resp = await fetch(url, options);
+  const contentType = resp.headers.get('content-type') || '';
+  if(!contentType.includes('application/json')){
+    const text = await resp.text();
+    const brief = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error(`接口没有返回 JSON：${resp.status} ${resp.statusText}${brief ? ' - ' + brief : ''}`);
+  }
+  const data = await resp.json();
+  if(!resp.ok) throw new Error(data.error || `请求失败：${resp.status}`);
+  return data;
+}
+
+function loadImageFromFile(file){
+  return new Promise((resolve,reject)=>{
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = ()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('图片读取失败，请换一张 JPG / PNG 图片')); };
+    img.src = url;
+  });
+}
+
+async function normalizeImageFile(file, index){
+  const img = await loadImageFromFile(file);
+  const maxSize = 1024;
+  const scale = Math.min(1, maxSize / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
+  const width = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
+  const height = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0,0,width,height);
+  ctx.drawImage(img,0,0,width,height);
+  const blob = await new Promise(resolve=>canvas.toBlob(resolve, 'image/jpeg', 0.88));
+  if(!blob) throw new Error('图片转换失败，请换一张 JPG / PNG 图片');
+  return new File([blob], `reference-${index + 1}.jpg`, {type:'image/jpeg'});
+}
+
+async function appendImages(fd, files, fieldName){
+  for(let i=0;i<files.length;i++){
+    fd.append(fieldName, await normalizeImageFile(files[i], i));
+  }
+}
+
+const LOCAL_API_ORIGIN = 'http://127.0.0.1:3002';
+const IS_LOCAL_HOST = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
+const IS_ERP_MOUNT = window.location.pathname.startsWith('/ai-draw');
+const API_BASE = IS_ERP_MOUNT
+  ? '/ai-draw/api/ai-image'
+  : IS_LOCAL_HOST
+    ? '/api/ai-image'
+    : `${LOCAL_API_ORIGIN}/api/ai-image`;
+const TASK_API_BASE = IS_ERP_MOUNT
+  ? '/api/ai-draw/tasks'
+  : `${API_BASE}/tasks`;
+
+function fmtTime(value){
+  if(!value) return '-';
+  return String(value).replace('T',' ').slice(0,16);
+}
+
+async function loadTasks(){
+  clearError('taskErr');
+  try{
+    const data = await apiJson(TASK_API_BASE);
+    state.tasks = data.tasks || [];
+    state.currentUser = data.current_user || null;
+    state.isAdmin = Boolean(data.is_admin);
+    renderTaskHome();
+  }catch(e){
+    showError('taskErr', e.message || '任务清单加载失败');
+  }
+}
+
+function renderTaskHome(){
+  document.getElementById('taskScopeText').textContent = state.isAdmin
+    ? '管理员可查看所有人的作图任务。'
+    : '这里只显示你的作图任务。';
+  const list = document.getElementById('taskList');
+  if(!state.tasks.length){
+    list.innerHTML = '<div class="task-empty">暂无作图任务，点击右上角新增作图任务开始。</div>';
+    return;
+  }
+  list.innerHTML = `
+    <table class="task-table">
+      <thead>
+        <tr>
+          <th>提交人</th>
+          <th>任务名称</th>
+          <th>更新时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${state.tasks.map(task => `
+          <tr>
+            <td>${task.submitter_name || '-'}</td>
+            <td>${task.task_name || '-'}</td>
+            <td>${fmtTime(task.updated_at || task.created_at)}</td>
+            <td>
+              <div class="task-actions">
+                <button class="btn ghost small" data-task-open="${task.id}">开始作图</button>
+                <button class="btn ghost small" data-task-edit="${task.id}">编辑</button>
+                <button class="btn warn small" data-task-delete="${task.id}">删除</button>
+              </div>
+            </td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  list.querySelectorAll('[data-task-open]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const task = state.tasks.find(item => String(item.id) === String(btn.dataset.taskOpen));
+      enterWorkbench(task || null);
+    };
+  });
+  list.querySelectorAll('[data-task-edit]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const task = state.tasks.find(item => String(item.id) === String(btn.dataset.taskEdit));
+      openTaskModal(task || null);
+    };
+  });
+  list.querySelectorAll('[data-task-delete]').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const task = state.tasks.find(item => String(item.id) === String(btn.dataset.taskDelete));
+      if(!task) return;
+      if(!confirm(`确定删除作图任务「${task.task_name || ''}」吗？`)) return;
+      clearError('taskErr');
+      btn.disabled = true;
+      try{
+        await apiJson(`${TASK_API_BASE}/${task.id}`, {method:'DELETE'});
+        delete state.taskDrafts[task.id];
+        try{ localStorage.removeItem(taskDraftKey(task.id)); }catch(e){}
+        if(state.currentTask && String(state.currentTask.id) === String(task.id)){
+          state.currentTask = null;
+          showTaskHome();
+        }
+        await loadTasks();
+      }catch(e){
+        showError('taskErr', e.message || '删除任务失败');
+      }finally{
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+function openTaskModal(task){
+  state.editingTaskId = task?.id || null;
+  document.getElementById('taskModalTitle').textContent = task ? '编辑作图任务' : '新增作图任务';
+  document.getElementById('taskNameInput').value = task?.task_name || '';
+  document.getElementById('btnSaveTask').textContent = task ? '保存任务信息' : '保存并开始作图';
+  document.getElementById('taskModal').hidden = false;
+  setTimeout(()=>document.getElementById('taskNameInput').focus(), 0);
+}
+
+function closeTaskModal(){
+  state.editingTaskId = null;
+  document.getElementById('taskModal').hidden = true;
+}
+
+function enterWorkbench(task){
+  state.currentTask = task;
+  state.view = 'workbench';
+  document.getElementById('currentTaskName').textContent = task?.task_name || '未选择任务';
+  document.getElementById('taskHome').hidden = true;
+  document.getElementById('workbench').hidden = false;
+  restoreTaskDraft(task?.id || null);
+}
+
+function showTaskHome(){
+  state.view = 'tasks';
+  document.getElementById('taskHome').hidden = false;
+  document.getElementById('workbench').hidden = true;
+}
+
+function setMode(mode){
+  state.mode = mode;
+  document.getElementById('singleWorkflow').hidden = mode !== 'single';
+  document.getElementById('multiWorkflow').hidden = mode !== 'multi';
+  document.getElementById('modeSingle').classList.toggle('active', mode === 'single');
+  document.getElementById('modeMulti').classList.toggle('active', mode === 'multi');
+  saveCurrentTaskDraft();
+}
+
+document.getElementById('modeSingle').addEventListener('click', ()=>setMode('single'));
+document.getElementById('modeMulti').addEventListener('click', ()=>setMode('multi'));
+document.getElementById('singlePrompt').addEventListener('input', saveCurrentTaskDraft);
+document.getElementById('productLink').addEventListener('input', saveCurrentTaskDraft);
+
+// ---- Single mode ----
+const singleDropzone = document.getElementById('singleDropzone');
+const singleFileInput = document.getElementById('singleFileInput');
+singleDropzone.addEventListener('click', ()=>singleFileInput.click());
+singleDropzone.addEventListener('dragover', e=>{e.preventDefault();singleDropzone.classList.add('drag');});
+singleDropzone.addEventListener('dragleave', ()=>singleDropzone.classList.remove('drag'));
+singleDropzone.addEventListener('drop', e=>{
+  e.preventDefault();singleDropzone.classList.remove('drag');
+  addSingleFiles(e.dataTransfer.files);
+});
+singleFileInput.addEventListener('change', e=>addSingleFiles(e.target.files));
+
+function addSingleFiles(fileList){
+  for(const f of fileList) state.singleFiles.push(f);
+  renderSingleThumbs();
+  saveCurrentTaskDraft();
+}
+function renderSingleThumbs(){
+  const box = document.getElementById('singleThumbs');
+  box.innerHTML = '';
+  state.singleFiles.forEach((f,idx)=>{
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    img.title = f.name + '锛堢偣鍑荤Щ闄わ級';
+    img.style.cursor = 'pointer';
+    img.onclick = ()=>{state.singleFiles.splice(idx,1); renderSingleThumbs(); saveCurrentTaskDraft();};
+    box.appendChild(img);
+  });
+}
+
+document.getElementById('btnSingleGenerate').addEventListener('click', async ()=>{
+  clearError('singleErr');
+  const prompt = document.getElementById('singlePrompt').value.trim();
+  if(!prompt){
+    showError('singleErr','请输入作图需求。');
+    return;
+  }
+  if(!state.singleFiles.length){
+    showError('singleErr','请先上传一张参考素材。');
+    return;
+  }
+  const btn = document.getElementById('btnSingleGenerate');
+  setBusy(btn,true,'生成图片 →');
+  try{
+    const fd = new FormData();
+    await appendImages(fd, state.singleFiles, 'images');
+    fd.append('prompt', prompt);
+    const data = await apiJson(`${API_BASE}/single-generate`, {method:'POST', body:fd});
+    state.singleImage = data.image;
+    renderSingleResult();
+    saveCurrentTaskDraft();
+  }catch(e){
+    showError('singleErr', e.message || '请求失败，请检查后端服务和网络');
+  }finally{
+    setBusy(btn,false,'生成图片 →');
+  }
+});
+
+function renderSingleResult(){
+  const result = document.getElementById('singleResult');
+  const sheet = document.getElementById('singleSheet');
+  const img = state.singleImage;
+  result.hidden = !img;
+  sheet.innerHTML = '';
+  if(!img) return;
+
+  const card = document.createElement('div');
+  card.className = 'frame';
+  card.innerHTML = `
+    <span class="no">01/01</span>
+    <img src="data:image/png;base64,${img.b64}" alt="${img.label}">
+    <div class="cap">${img.label}</div>
+    <div class="tools">
+      <button class="btn ghost small" data-act="dl">导出图片</button>
+      <button class="btn ghost small" data-act="edit">继续修改</button>
+    </div>
+    <div class="editbox">
+      <input type="text" placeholder="输入新的修改需求，例如：背景换成纯白，产品更居中">
+      <button class="btn small" data-act="apply">生成修改结果</button>
+    </div>
+  `;
+  sheet.appendChild(card);
+
+  card.querySelector('[data-act=dl]').onclick = ()=>downloadImage(img);
+  card.querySelector('[data-act=edit]').onclick = ()=>{
+    card.querySelector('.editbox').classList.toggle('open');
+  };
+  card.querySelector('[data-act=apply]').onclick = async ()=>{
+    const prompt = card.querySelector('.editbox input').value.trim();
+    if(!prompt) return;
+    const applyBtn = card.querySelector('[data-act=apply]');
+    const original = applyBtn.textContent;
+    applyBtn.disabled = true;
+    applyBtn.innerHTML = '<span class="spinner"></span>修改中...';
+    clearError('singleErr');
+    try{
+      const data = await apiJson(`${API_BASE}/edit`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({prompt, image_b64: img.b64})
+      });
+      img.b64 = data.b64;
+      card.querySelector('img').src = 'data:image/png;base64,' + data.b64;
+      card.querySelector('.editbox').classList.remove('open');
+      card.querySelector('.editbox input').value = '';
+      saveCurrentTaskDraft();
+    }catch(e){
+      showError('singleErr', e.message || '修改失败：精修必须使用图片编辑接口，请确认当前图片 API 支持 images/edits');
+    }finally{
+      applyBtn.disabled = false;
+      applyBtn.textContent = original;
+    }
+  };
+}
+
+// ---- Step 1: upload ----
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+dropzone.addEventListener('click', ()=>fileInput.click());
+dropzone.addEventListener('dragover', e=>{e.preventDefault();dropzone.classList.add('drag');});
+dropzone.addEventListener('dragleave', ()=>dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', e=>{
+  e.preventDefault();dropzone.classList.remove('drag');
+  addFiles(e.dataTransfer.files);
+});
+fileInput.addEventListener('change', e=>addFiles(e.target.files));
+
+function addFiles(fileList){
+  for(const f of fileList) state.files.push(f);
+  renderThumbs();
+  saveCurrentTaskDraft();
+}
+function renderThumbs(){
+  const box = document.getElementById('thumbs');
+  box.innerHTML = '';
+  state.files.forEach((f,idx)=>{
+    const wrap = document.createElement('div');
+    wrap.className = 'thumb';
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    img.title = f.name + '锛堢偣鍑荤Щ闄わ級';
+    const tools = document.createElement('div');
+    tools.className = 'thumb-tools';
+    tools.innerHTML = `
+      <button class="btn ghost small" data-act="up">↑</button>
+      <button class="btn ghost small" data-act="down">↓</button>
+      <button class="btn ghost small" data-act="del">×</button>
+    `;
+    tools.querySelector('[data-act=up]').onclick = ()=>{ if(idx>0){ [state.files[idx-1],state.files[idx]]=[state.files[idx],state.files[idx-1]]; renderThumbs(); saveCurrentTaskDraft(); } };
+    tools.querySelector('[data-act=down]').onclick = ()=>{ if(idx<state.files.length-1){ [state.files[idx+1],state.files[idx]]=[state.files[idx],state.files[idx+1]]; renderThumbs(); saveCurrentTaskDraft(); } };
+    tools.querySelector('[data-act=del]').onclick = ()=>{state.files.splice(idx,1); renderThumbs(); saveCurrentTaskDraft();};
+    wrap.appendChild(img);
+    wrap.appendChild(tools);
+    box.appendChild(wrap);
+  });
+}
+
+document.getElementById('btnExtract').addEventListener('click', async ()=>{
+  clearError('err1');
+  const link = document.getElementById('productLink').value.trim();
+  if(!state.files.length && !link){
+    showError('err1','请至少上传一张参考图，或填写产品链接。');
+    return;
+  }
+  const btn = document.getElementById('btnExtract');
+  setBusy(btn,true,'提炼卖点信息 →');
+  try{
+    const fd = new FormData();
+    await appendImages(fd, state.files, 'images');
+    if(link) fd.append('product_link', link);
+    const data = await apiJson(`${API_BASE}/extract`, {method:'POST', body:fd});
+    state.extracted = data.extracted;
+    renderFields();
+    setStep(2);
+    saveCurrentTaskDraft();
+  }catch(e){
+    showError('err1', e.message || '请求失败，请检查后端服务和网络');
+  }finally{
+    setBusy(btn,false,'提炼卖点信息 →');
+  }
+});
+
+// ---- Step 2: edit fields ----
+function renderFields(){
+  const box = document.getElementById('fields');
+  box.innerHTML = '';
+  FIELD_DEFS.forEach(([key,label,tag])=>{
+    const wrap = document.createElement('label');
+    wrap.className = 'field';
+    wrap.innerHTML = `<span>${label}<span class="key">${tag}</span></span>
+      <textarea rows="2" data-key="${key}"></textarea>`;
+    box.appendChild(wrap);
+    wrap.querySelector('textarea').value = (state.extracted && state.extracted[key]) || '';
+    wrap.querySelector('textarea').addEventListener('input', saveCurrentTaskDraft);
+  });
+}
+document.getElementById('btnBack2').addEventListener('click', ()=>setStep(1));
+
+document.getElementById('btnGenerate').addEventListener('click', async ()=>{
+  clearError('err2');
+  const updated = {};
+  document.querySelectorAll('#fields textarea').forEach(t=>{updated[t.dataset.key]=t.value;});
+  state.extracted = updated;
+
+  const btn = document.getElementById('btnGenerate');
+  setBusy(btn,true,'生成 7 张图 →');
+  try{
+    state.images = Array.from({length: 7}, (_, idx)=>({
+      key: `shot-${idx}`,
+      label: `第 ${idx + 1} 张`,
+      status: 'pending',
+      error: ''
+    }));
+    renderSheet();
+    setStep(3);
+    saveCurrentTaskDraft();
+    await generateImagesOneByOne(updated);
+  }catch(e){
+    showError('err2', e.message || '请求失败，请检查后端服务和网络');
+  }finally{
+    setBusy(btn,false,'生成 7 张图 →');
+  }
+});
+
+function sleep(ms){
+  return new Promise(resolve=>setTimeout(resolve, ms));
+}
+
+async function generateImagesOneByOne(extracted){
+  for(let idx=0; idx<7; idx++){
+    state.images[idx].status = 'running';
+    renderSheet();
+    saveCurrentTaskDraft();
+    try{
+      const fd = new FormData();
+      await appendImages(fd, state.files, 'images');
+      fd.append('extracted', JSON.stringify(extracted));
+      fd.append('shotIndex', String(idx));
+      const data = await apiJson(`${API_BASE}/generate-one`, {method:'POST', body:fd});
+      state.images[idx] = Object.assign({}, data.image, {status:'done', error:''});
+    }catch(e){
+      state.images[idx].status = 'failed';
+      state.images[idx].error = e.message || '生成失败';
+    }
+    renderSheet();
+    saveCurrentTaskDraft();
+    if(idx < 6) await sleep(5000);
+  }
+}
+
+// ---- Step 3: review / edit / download ----
+function renderSheet(){
+  const sheet = document.getElementById('sheet');
+  sheet.innerHTML = '';
+  state.images.forEach((img,idx)=>{
+    const card = document.createElement('div');
+    const status = img.status || (img.b64 ? 'done' : 'pending');
+    card.className = `frame ${status === 'failed' ? 'failed' : ''} ${status !== 'done' ? 'pending' : ''}`;
+    const placeholderText = status === 'running' ? '生成中' : status === 'failed' ? '失败' : '等待中';
+    const src = img.b64
+      ? `data:image/png;base64,${img.b64}`
+      : 'data:image/svg+xml;utf8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><rect width="400" height="400" fill="#DCD8CC"/><text x="200" y="200" text-anchor="middle" font-size="18" fill="#6B6860">${placeholderText}</text></svg>`);
+    const statusText = status === 'running'
+      ? `第 ${idx + 1} 张生成中`
+      : status === 'done'
+        ? `第 ${idx + 1} 张成功`
+        : status === 'failed'
+          ? `第 ${idx + 1} 张失败：${img.error || '生成失败'}`
+          : `第 ${idx + 1} 张等待中`;
+    card.innerHTML = `
+      <span class="no">${String(idx+1).padStart(2,'0')}/07</span>
+      <img src="${src}" alt="${img.label}">
+      <div class="cap">${img.label}</div>
+      <div class="status">${statusText}</div>
+      ${status === 'done' ? `
+        <div class="tools">
+          <button class="btn ghost small" data-act="dl">下载</button>
+          <button class="btn ghost small" data-act="edit">精修</button>
+        </div>
+        <div class="editbox">
+          <input type="text" placeholder="输入修改提示词，例如：背景换成纯白">
+          <button class="btn small" data-act="apply">生成精修结果</button>
+        </div>
+      ` : ''}
+    `;
+    sheet.appendChild(card);
+
+    const dlBtn = card.querySelector('[data-act=dl]');
+    if(!dlBtn) return;
+    dlBtn.onclick = ()=>downloadImage(img);
+    card.querySelector('[data-act=edit]').onclick = ()=>{
+      card.querySelector('.editbox').classList.toggle('open');
+    };
+    card.querySelector('[data-act=apply]').onclick = async ()=>{
+      const prompt = card.querySelector('.editbox input').value.trim();
+      if(!prompt) return;
+      const applyBtn = card.querySelector('[data-act=apply]');
+      const original = applyBtn.textContent;
+      applyBtn.disabled = true;
+      applyBtn.innerHTML = '<span class="spinner"></span>精修中...';
+      clearError('err3');
+      try{
+        const data = await apiJson(`${API_BASE}/edit`, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({prompt, image_b64: img.b64})
+        });
+        img.b64 = data.b64;
+        img.status = 'done';
+        card.querySelector('img').src = 'data:image/png;base64,' + data.b64;
+        card.querySelector('.editbox').classList.remove('open');
+        card.querySelector('.editbox input').value = '';
+        saveCurrentTaskDraft();
+      }catch(e){
+        showError('err3', e.message || '精修失败：必须使用图片编辑接口，请确认当前图片 API 支持 images/edits');
+      }finally{
+        applyBtn.disabled = false;
+        applyBtn.textContent = original;
+      }
+    };
+  });
+}function downloadImage(img){
+  const a = document.createElement('a');
+  a.href = 'data:image/png;base64,' + img.b64;
+  a.download = img.label + '.png';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+document.getElementById('btnDownloadAll').addEventListener('click', ()=>{
+  state.images.filter(img=>img && img.b64).forEach((img,idx)=>{
+    setTimeout(()=>downloadImage(img), idx*250);
+  });
+});
+document.getElementById('btnBack3').addEventListener('click', ()=>setStep(2));
+
+document.getElementById('btnNewTask').addEventListener('click', ()=>openTaskModal(null));
+document.getElementById('btnSaveDraft').addEventListener('click', async ()=>{
+  clearError('taskErr');
+  const btn = document.getElementById('btnSaveDraft');
+  const original = btn.textContent;
+  setBusy(btn, true, original);
+  try{
+    const task = await persistCurrentTaskDraft();
+    document.getElementById('currentTaskName').textContent = task.task_name || '未选择任务';
+  }catch(e){
+    showError('taskErr', e.message || '保存任务失败');
+  }finally{
+    setBusy(btn, false, original);
+  }
+});
+document.getElementById('btnBackTasks').addEventListener('click', ()=>{
+  saveCurrentTaskDraft();
+  showTaskHome();
+  loadTasks();
+});
+document.getElementById('btnCancelTask').addEventListener('click', closeTaskModal);
+document.getElementById('taskModal').addEventListener('click', e=>{
+  if(e.target.id === 'taskModal') closeTaskModal();
+});
+document.getElementById('btnSaveTask').addEventListener('click', async ()=>{
+  clearError('taskErr');
+  const taskName = document.getElementById('taskNameInput').value.trim();
+  if(!taskName){
+    document.getElementById('taskNameInput').focus();
+    return;
+  }
+  const btn = document.getElementById('btnSaveTask');
+  const original = btn.textContent;
+  setBusy(btn, true, original);
+  try{
+    const method = state.editingTaskId ? 'PATCH' : 'POST';
+    const url = state.editingTaskId ? `${TASK_API_BASE}/${state.editingTaskId}` : TASK_API_BASE;
+    const data = await apiJson(url, {
+      method,
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        task_name: taskName,
+        ...(method === 'POST' ? {draft: null} : {})
+      })
+    });
+    closeTaskModal();
+    await loadTasks();
+    if(method === 'POST') {
+      enterWorkbench(data.task);
+    } else if(state.currentTask && String(state.currentTask.id) === String(data.task.id)) {
+      state.currentTask = data.task;
+      document.getElementById('currentTaskName').textContent = data.task.task_name || '未选择任务';
+    }
+  }catch(e){
+    showError('taskErr', e.message || '保存任务失败');
+  }finally{
+    setBusy(btn, false, original);
+  }
+});
+
+showTaskHome();
+loadTasks();
+</script>
+</body>
+</html>
+
+

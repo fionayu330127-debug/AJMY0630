@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>库存货件</title>
+  <style>
+    :root {
+      --bg: #eef3f6;
+      --panel: #ffffff;
+      --ink: #102033;
+      --muted: #66798d;
+      --line: #d9e2ea;
+      --accent: #0f766e;
+      --accent-soft: #e2f3f1;
+      --warn: #b45309;
+      --blue: #1d4ed8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    }
+
+    .page {
+      min-height: 100vh;
+      padding: 18px;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .title h1 {
+      margin: 0;
+      font-size: 22px;
+      line-height: 1.3;
+    }
+
+    .title p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .module-links {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .module-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .module-link.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    button {
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .stat {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+    }
+
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+
+    .stat strong {
+      font-size: 24px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .filters {
+      display: flex;
+      gap: 10px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      flex-wrap: wrap;
+    }
+
+    input, select {
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 10px;
+      background: #fff;
+      color: var(--ink);
+      min-width: 160px;
+    }
+
+    input {
+      flex: 1;
+      min-width: 240px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      background: #f7fafc;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .tag.warn {
+      background: #fff3df;
+      color: var(--warn);
+    }
+
+    .tag.blue {
+      background: #e8f0ff;
+      color: var(--blue);
+    }
+
+    .empty {
+      padding: 44px 16px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    @media (max-width: 900px) {
+      .toolbar { align-items: flex-start; flex-direction: column; }
+      .stats { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      table { min-width: 760px; }
+      .table-wrap { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="toolbar">
+      <div class="title">
+        <h1>库存货件</h1>
+        <p>独立模块已创建，可继续接入货件创建、入库、出库、调拨和库存同步。</p>
+      </div>
+      <div class="actions">
+        <button type="button">导入货件</button>
+        <button class="primary" type="button">新建货件</button>
+      </div>
+    </section>
+
+    <nav class="module-links" aria-label="库存子模块">
+      <a class="module-link" href="http://47.110.59.28/" target="_blank" rel="noopener">库存明细</a>
+      <a class="module-link active" href="/">库存货件</a>
+    </nav>
+
+    <section class="stats">
+      <div class="stat"><span>待入库货件</span><strong>0</strong></div>
+      <div class="stat"><span>运输中</span><strong>0</strong></div>
+      <div class="stat"><span>异常货件</span><strong>0</strong></div>
+      <div class="stat"><span>今日更新</span><strong>0</strong></div>
+    </section>
+
+    <section class="panel">
+      <div class="filters">
+        <input type="search" placeholder="搜索货件号 / SKU / 店铺 / 备注">
+        <select>
+          <option>全部状态</option>
+          <option>草稿</option>
+          <option>运输中</option>
+          <option>待入库</option>
+          <option>已完成</option>
+          <option>异常</option>
+        </select>
+        <select>
+          <option>全部仓库</option>
+          <option>FBA 仓</option>
+          <option>海外仓</option>
+          <option>本地仓</option>
+        </select>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>货件号</th>
+              <th>店铺</th>
+              <th>目的仓</th>
+              <th>SKU 数</th>
+              <th>件数</th>
+              <th>状态</th>
+              <th>预计到仓</th>
+              <th>负责人</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="8">
+                <div class="empty">暂无库存货件数据。模块目录和入口已就绪，下一步可接入真实数据表和接口。</div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

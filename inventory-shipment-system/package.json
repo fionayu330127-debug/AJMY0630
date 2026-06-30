@@ -1,0 +1,7 @@
+{
+  "name": "inventory-shipment-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "奥吉米亚 ERP - 库存货件独立模块",
+  "main": "server.js"
+}
