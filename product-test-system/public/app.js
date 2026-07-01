@@ -3,6 +3,7 @@ const app = document.getElementById('app');
 const state = {
   config: null,
   payload: null,
+  trackingPayload: null,
   currentUser: null,
   teamMembers: [],
   search: '',
@@ -10,7 +11,10 @@ const state = {
   modalOpen: false,
   editingId: null,
   importing: false,
+  noteRowId: null,
 };
+
+const isTrackingView = new URLSearchParams(window.location.search).get('view') === 'tracking';
 
 const fields = [
   { key: 'sample_status', label: '刊登流程', type: 'select', options: ['链接刊登提交', '刊登人填写ASIN', '确认是否已开广告', '刊登异常', '链接上架成功'] },
@@ -72,6 +76,10 @@ function formatDateTime(value) {
 }
 
 function render() {
+  if (isTrackingView) {
+    renderTracking();
+    return;
+  }
   const rows = state.payload?.submissions || [];
   const summary = state.payload?.summary || {};
   const tabs = [
@@ -127,10 +135,11 @@ function render() {
             <tr>
               ${tableFields.map((field) => `<th>${escapeHtml(field.label)}</th>`).join('')}
               <th>操作</th>
+              <th>亚马逊ASIN</th>
               <th>创建时间</th>
             </tr>
           </thead>
-          <tbody>${state.payload ? rowsView(rows) : '<tr><td colspan="12"><div class="empty">正在加载提交清单...</div></td></tr>'}</tbody>
+          <tbody>${state.payload ? rowsView(rows) : '<tr><td colspan="13"><div class="empty">正在加载提交清单...</div></td></tr>'}</tbody>
         </table>
       </section>
       ${state.modalOpen ? modalView() : ''}
@@ -140,11 +149,12 @@ function render() {
 }
 
 function rowsView(rows) {
-  if (!rows.length) return '<tr><td colspan="12"><div class="empty">暂无链接刊登提交记录</div></td></tr>';
+  if (!rows.length) return '<tr><td colspan="13"><div class="empty">暂无链接刊登提交记录</div></td></tr>';
   return rows.map((row) => `
     <tr>
       ${tableFields.map((field) => `<td>${readonlyCell(field, row)}</td>`).join('')}
       <td>${actionsView(row)}</td>
+      <td>${asinLinkView(row.amazon_asin)}</td>
       <td>${escapeHtml(formatDateTime(row.created_at))}</td>
     </tr>
   `).join('');
@@ -179,6 +189,144 @@ function readonlyCell(field, row) {
 
 function actionsView(row) {
   return `<div class="row-actions"><button data-edit-id="${Number(row.id)}" type="button">编辑</button></div>`;
+}
+
+function asinLinkView(value) {
+  const asin = String(value || '').trim();
+  if (!asin) return '<span class="muted">-</span>';
+  return `<a href="https://www.amazon.co.jp/dp/${encodeURIComponent(asin)}" target="_blank" rel="noopener">${escapeHtml(asin)}</a>`;
+}
+
+function renderTracking() {
+  const rows = state.trackingPayload?.submissions || [];
+  app.innerHTML = `
+    <section class="module-shell">
+      <header class="module-head">
+        <div>
+          <h1>链接跟踪</h1>
+          <p>同步链接刊登中“链接上架成功”的清单，用于星级、负责人和周维度跟踪备注。</p>
+        </div>
+        <div class="head-actions">
+          <button class="ghost-btn" id="reloadBtn" type="button">刷新清单</button>
+          <button class="ghost-btn" id="downloadTemplateBtn" type="button">下载导入模板</button>
+          <button class="ghost-btn" id="importBtn" type="button">${state.importing ? '导入中...' : '导入'}</button>
+          <input id="importFile" type="file" accept=".csv,.json,application/json,text/csv" hidden>
+        </div>
+      </header>
+
+      <input class="search-input" id="searchInput" type="search" placeholder="搜索产品 / 负责人 / 品牌 / 店铺 / ASIN / 备注" value="${escapeHtml(state.search)}">
+
+      <section class="table-wrap">
+        <table class="tracking-table">
+          <thead>
+            <tr>
+              <th>提交日期</th>
+              <th>产品图片</th>
+              <th>产品名称</th>
+              <th>负责人</th>
+              <th>品牌</th>
+              <th>店铺</th>
+              <th>售价JP</th>
+              <th>提交人</th>
+              <th>星级</th>
+              <th>亚马逊ASIN</th>
+              <th>跟踪备注</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody>${state.trackingPayload ? trackingRowsView(rows) : '<tr><td colspan="12"><div class="empty">正在加载链接跟踪清单...</div></td></tr>'}</tbody>
+        </table>
+      </section>
+    </section>
+  `;
+  bind();
+}
+
+function trackingRowsView(rows) {
+  if (!rows.length) return '<tr><td colspan="12"><div class="empty">暂无上架成功链接</div></td></tr>';
+  return rows.map((row) => {
+    const notes = Array.isArray(row.tracking_notes) ? row.tracking_notes : [];
+    const latest = notes[0] || null;
+    return `
+      <tr>
+        <td>${escapeHtml(String(row.submit_date || '').slice(0, 10) || '-')}</td>
+        <td>${readonlyCell({ key: 'product_image' }, row)}</td>
+        <td>${escapeHtml(row.product_name || row.product_keywords || '-')}</td>
+        <td>${trackingOwnerView(row)}</td>
+        <td>${escapeHtml(row.brand || '-')}</td>
+        <td>${escapeHtml(row.store_name || '-')}</td>
+        <td>${escapeHtml(row.price_jp || '-')}</td>
+        <td>${escapeHtml(row.submitter_name || '-')}</td>
+        <td>${trackingStarsView(row)}</td>
+        <td>${asinLinkView(row.amazon_asin)}</td>
+        <td>${trackingNotesView(row, latest, notes)}</td>
+        <td>${escapeHtml(formatDateTime(row.created_at))}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function canManageTracking() {
+  const user = state.trackingPayload?.user || state.currentUser || {};
+  return Boolean(state.trackingPayload?.can_manage || user.role === 'admin' || user.name === '余蓉');
+}
+
+function trackingOwnerView(row) {
+  const owner = row.tracking_owner || row.lister || '';
+  if (!canManageTracking()) return escapeHtml(owner || '-');
+  const options = [...new Set([owner, ...state.teamMembers].filter(Boolean))];
+  return `
+    <select class="tracking-owner-select" data-tracking-owner-id="${Number(row.id)}">
+      <option value="">未指定</option>
+      ${options.map((name) => `<option value="${escapeHtml(name)}" ${name === owner ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('')}
+    </select>
+  `;
+}
+
+function trackingStarsView(row) {
+  const current = Number(row.tracking_stars || 0);
+  if (!canManageTracking()) return `<span class="stars-readonly">${'★'.repeat(current)}${'☆'.repeat(5 - current)}</span>`;
+  return `
+    <select class="tracking-star-select" data-tracking-star-id="${Number(row.id)}">
+      ${[0, 1, 2, 3, 4, 5].map((value) => `<option value="${value}" ${value === current ? 'selected' : ''}>${value ? '★'.repeat(value) : '未评星'}</option>`).join('')}
+    </select>
+  `;
+}
+
+function trackingNotesView(row, latest, notes) {
+  const noteFormOpen = Number(state.noteRowId) === Number(row.id);
+  const older = notes.slice(1);
+  return `
+    <div class="tracking-notes">
+      <div class="latest-note">
+        ${latest ? `<strong>${escapeHtml(latest.week_start || '')}</strong><span>${escapeHtml(latest.content || '')}</span><em>${escapeHtml(latest.author || '')}</em>` : '<span class="muted">暂无备注</span>'}
+      </div>
+      ${older.length ? `
+        <details>
+          <summary>查看历史备注（${older.length}）</summary>
+          <div class="note-history">
+            ${older.map((note) => `<div><strong>${escapeHtml(note.week_start || '')}</strong><span>${escapeHtml(note.content || '')}</span><em>${escapeHtml(note.author || '')}</em></div>`).join('')}
+          </div>
+        </details>
+      ` : ''}
+      <button class="ghost-btn note-toggle-btn" data-note-row-id="${Number(row.id)}" type="button">${noteFormOpen ? '收起备注' : '新增本周备注'}</button>
+      ${noteFormOpen ? `
+        <form class="note-form" data-note-form-id="${Number(row.id)}">
+          <input name="week_start" type="date" value="${escapeHtml(currentWeekStart())}">
+          <textarea name="content" rows="3" placeholder="填写本周跟踪内容"></textarea>
+          <button class="primary-btn" type="submit">保存备注</button>
+        </form>
+      ` : ''}
+    </div>
+  `;
+}
+
+function currentWeekStart() {
+  const current = new Date();
+  current.setHours(0, 0, 0, 0);
+  const day = current.getDay() || 7;
+  current.setDate(current.getDate() - day + 1);
+  return current.toISOString().slice(0, 10);
 }
 
 function modalView() {
@@ -289,7 +437,7 @@ function fieldView(field, row = null) {
 }
 
 function bind() {
-  document.getElementById('reloadBtn')?.addEventListener('click', loadSubmissions);
+  document.getElementById('reloadBtn')?.addEventListener('click', isTrackingView ? loadTracking : loadSubmissions);
   document.getElementById('openModal')?.addEventListener('click', () => {
     state.modalOpen = true;
     state.editingId = null;
@@ -298,8 +446,8 @@ function bind() {
   document.getElementById('importBtn')?.addEventListener('click', () => {
     document.getElementById('importFile')?.click();
   });
-  document.getElementById('downloadTemplateBtn')?.addEventListener('click', downloadImportTemplate);
-  document.getElementById('importFile')?.addEventListener('change', importFile);
+  document.getElementById('downloadTemplateBtn')?.addEventListener('click', isTrackingView ? downloadTrackingImportTemplate : downloadImportTemplate);
+  document.getElementById('importFile')?.addEventListener('change', isTrackingView ? importTrackingFile : importFile);
   document.getElementById('closeModal')?.addEventListener('click', () => {
     state.modalOpen = false;
     state.editingId = null;
@@ -328,7 +476,9 @@ function bind() {
       timer = setTimeout(() => {
         state.search = searchInput.value.trim();
         state.payload = null;
-        loadSubmissions();
+        state.trackingPayload = null;
+        if (isTrackingView) loadTracking();
+        else loadSubmissions();
       }, 260);
     });
   }
@@ -354,6 +504,22 @@ function bind() {
   });
   document.querySelectorAll('[data-row-status-id]').forEach((select) => {
     select.addEventListener('change', () => updateRowStatus(Number(select.dataset.rowStatusId), select.value));
+  });
+  document.querySelectorAll('[data-tracking-star-id]').forEach((select) => {
+    select.addEventListener('change', () => updateTrackingMeta(Number(select.dataset.trackingStarId), { tracking_stars: select.value }));
+  });
+  document.querySelectorAll('[data-tracking-owner-id]').forEach((select) => {
+    select.addEventListener('change', () => updateTrackingMeta(Number(select.dataset.trackingOwnerId), { tracking_owner: select.value }));
+  });
+  document.querySelectorAll('[data-note-row-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = Number(button.dataset.noteRowId);
+      state.noteRowId = Number(state.noteRowId) === id ? null : id;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-note-form-id]').forEach((form) => {
+    form.addEventListener('submit', submitTrackingNote);
   });
 }
 
@@ -410,6 +576,7 @@ function parseCsv(text) {
 
 function normalizeImportHeader(header) {
   const key = String(header || '').trim();
+  const importKeys = ['tracking_owner', 'tracking_stars', 'week_start', 'tracking_note'];
   const map = {
     刊登流程: 'sample_status',
     状态: 'sample_status',
@@ -437,9 +604,16 @@ function normalizeImportHeader(header) {
     是否开广告: 'ads_enabled',
     亚马逊ASIN: 'amazon_asin',
     产品SKU: 'product_sku',
+    ASIN: 'amazon_asin',
+    负责人: 'tracking_owner',
+    星级: 'tracking_stars',
+    备注周: 'week_start',
+    跟踪周: 'week_start',
+    跟踪备注: 'tracking_note',
+    备注: 'tracking_note',
   };
   const mapped = map[key] || key;
-  return map[key] || fields.some((field) => field.key === key) ? mapped : '';
+  return map[key] || fields.some((field) => field.key === key) || importKeys.includes(key) ? mapped : '';
 }
 
 function csvCell(value) {
@@ -549,6 +723,79 @@ async function importFile(event) {
   }
 }
 
+function downloadTrackingImportTemplate() {
+  const headers = ['提交日期', '产品图片', '产品名称', '负责人', '品牌', '店铺', '星级', '亚马逊ASIN', '备注周', '跟踪备注'];
+  const example = [new Date().toISOString().slice(0, 10), '', '示例产品名称', '余蓉', '示例品牌', '示例店铺', '5', 'B0XXXXXXXX', new Date().toISOString().slice(0, 10), '本周已检查链接表现'];
+  const csv = `\uFEFF${headers.map(csvCell).join(',')}\r\n${example.map(csvCell).join(',')}\r\n`;
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = '链接跟踪导入模板.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function normalizeTrackingImportItem(item) {
+  const source = item || {};
+  const read = (...keys) => {
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) return String(source[key] || '').trim();
+    }
+    return '';
+  };
+  return {
+    submit_date: read('submit_date', '提交日期'),
+    product_image: read('product_image', '产品图片'),
+    amazon_asin: read('amazon_asin', 'asin', 'ASIN', '亚马逊ASIN'),
+    product_name: read('product_name', '产品名称', '商品名称'),
+    tracking_owner: read('tracking_owner', 'owner', '负责人'),
+    brand: read('brand', '品牌'),
+    store_name: read('store_name', '店铺', '上架店铺'),
+    tracking_stars: read('tracking_stars', 'stars', '星级'),
+    week_start: read('week_start', 'week', '备注周', '跟踪周'),
+    tracking_note: read('tracking_note', 'content', 'note', '跟踪备注', '备注'),
+  };
+}
+
+async function importTrackingFile(event) {
+  const file = event.currentTarget.files?.[0];
+  event.currentTarget.value = '';
+  if (!file || state.importing) return;
+  state.importing = true;
+  render();
+  try {
+    const text = await file.text();
+    const rawRows = file.name.toLowerCase().endsWith('.json')
+      ? JSON.parse(text)
+      : parseCsv(text);
+    const rows = (Array.isArray(rawRows) ? rawRows : rawRows?.rows || rawRows?.submissions || [])
+      .map(normalizeTrackingImportItem)
+      .filter((row) => row.amazon_asin || row.product_name);
+    if (!rows.length) throw new Error('未识别到可导入的链接跟踪数据');
+
+    const response = await fetch('./api/tracking/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rows }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || '导入失败');
+
+    await loadTracking();
+    const unmatchedText = result.unmatched?.length ? `，未匹配 ${result.unmatched.length} 条` : '';
+    const errorText = result.errors?.length ? `，错误 ${result.errors.length} 条` : '';
+    alert(`导入完成：匹配 ${result.matched || 0} 条，更新 ${result.updated || 0} 条，新增备注 ${result.notes_added || 0} 条${unmatchedText}${errorText}`);
+  } catch (error) {
+    alert(error.message || '导入失败');
+  } finally {
+    state.importing = false;
+    render();
+  }
+}
+
 function setImageField(value, message = '') {
   const form = document.getElementById('submitForm');
   if (!form) return;
@@ -640,6 +887,47 @@ async function loadSubmissions() {
   render();
 }
 
+async function loadTracking() {
+  const params = new URLSearchParams();
+  if (state.search) params.set('search', state.search);
+  const response = await fetch(`./api/tracking?${params.toString()}`);
+  state.trackingPayload = response.ok
+    ? await response.json()
+    : { user: state.currentUser, can_manage: false, submissions: [] };
+  render();
+}
+
+async function updateTrackingMeta(id, payload) {
+  const response = await fetch(`./api/tracking/${id}/meta`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) alert((await response.json().catch(() => ({}))).error || '跟踪信息保存失败');
+  await loadTracking();
+}
+
+async function submitTrackingNote(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const id = Number(form.dataset.noteFormId);
+  const formData = new FormData(form);
+  const response = await fetch(`./api/tracking/${id}/notes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      week_start: String(formData.get('week_start') || '').trim(),
+      content: String(formData.get('content') || '').trim(),
+    }),
+  });
+  if (!response.ok) {
+    alert((await response.json().catch(() => ({}))).error || '跟踪备注保存失败');
+    return;
+  }
+  state.noteRowId = null;
+  await loadTracking();
+}
+
 async function submitForm(event) {
   event.preventDefault();
   const error = document.getElementById('formError');
@@ -672,7 +960,8 @@ async function bootstrap() {
   await loadConfig();
   await loadCurrentUser();
   await loadTeamMembers();
-  await loadSubmissions();
+  if (isTrackingView) await loadTracking();
+  else await loadSubmissions();
 }
 
 bootstrap();

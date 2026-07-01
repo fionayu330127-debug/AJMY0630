@@ -438,6 +438,7 @@ app.get('/healthz', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json({ ok: true });
 });
+productTestApp.getCurrentUser = getSessionUser;
 app.use('/tk', tkApp);
 app.use('/product-test', productTestApp);
 app.use('/ai-draw', aiImageApp);

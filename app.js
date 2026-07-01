@@ -65,6 +65,7 @@ const navGroups = [
     icon: '运',
     items: [
       { id: 'sample-submit', label: '链接刊登' },
+      { id: 'link-tracking', label: '链接跟踪' },
       { id: 'amazon-ads', label: '亚马逊广告' },
       { id: 'tk-ads', label: 'TK 广告' },
       { id: 'review-table', label: '测评表' },
@@ -428,6 +429,24 @@ function modulePanel(active) {
         <div class="footer-row">
           <span>链接刊登已作为根目录独立应用接入当前 ERP 服务。</span>
           <a href="/product-test/" target="_self">打开完整链接刊登模块</a>
+        </div>
+      </section>
+    `;
+  }
+
+  if (active.id === 'link-tracking') {
+    return `
+      <section class="panel work-panel">
+        <div class="panel-head">
+          <h3>链接跟踪</h3>
+          <small>/product-test/?view=tracking</small>
+        </div>
+        <div class="module-frame">
+          <iframe src="/product-test/?view=tracking" title="链接跟踪"></iframe>
+        </div>
+        <div class="footer-row">
+          <span>链接跟踪同步链接刊登中“链接上架成功”的清单。</span>
+          <a href="/product-test/?view=tracking" target="_self">打开完整链接跟踪模块</a>
         </div>
       </section>
     `;

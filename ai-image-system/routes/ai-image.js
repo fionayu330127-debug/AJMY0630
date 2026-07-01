@@ -25,7 +25,7 @@ const IMAGE_BASE_URL = Object.prototype.hasOwnProperty.call(process.env, 'OPENAI
 
 const TEXT_MODEL = env('OPENAI_TEXT_MODEL', 'gpt-4o');
 const IMAGE_MODEL = 'gpt-image-2';
-const IMAGE_SIZE = env('OPENAI_IMAGE_SIZE', '1024x1024');
+const IMAGE_SIZE = env('OPENAI_IMAGE_SIZE');
 const TEXT_LIKE_MODEL_RE = /^(gpt-[45]|o[134]|chatgpt-|claude-|gemini-|deepseek-)/i;
 
 const SHOT_LIST = [
@@ -115,11 +115,11 @@ async function uploadableImage(buffer, filename = 'image.png', mimetype = 'image
 }
 
 function uploadableImagesFromFiles(files, defaultPrefix = 'reference') {
-  return (files || []).map((file, index) => uploadableImage(
-    file.buffer,
-    file.originalname || `${defaultPrefix}-${index + 1}.png`,
-    file.mimetype || 'image/png'
-  ));
+  return (files || []).map((file, index) => ({
+    buffer: file.buffer,
+    filename: file.originalname || `${defaultPrefix}-${index + 1}.png`,
+    mimetype: file.mimetype || 'image/png',
+  }));
 }
 
 function imageApiKey() {
@@ -135,12 +135,57 @@ function logImageEditRequest(label, images, prompt) {
   console.log('[ai-image] images/edits request', {
     label,
     model: IMAGE_MODEL,
-    size: IMAGE_SIZE,
+    size: chooseImageSize(images),
     imageCount: images.length,
     imageBytes: images.map((image) => image.buffer?.length || 0),
     filenames: images.map((image) => image.filename || 'image.png'),
     promptChars: String(prompt || '').length,
   });
+}
+
+function readPngSize(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 24) return null;
+  if (buffer.toString('hex', 0, 8) !== '89504e470d0a1a0a') return null;
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+  };
+}
+
+function readJpegSize(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    const length = buffer.readUInt16BE(offset + 2);
+    if (length < 2) return null;
+    if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+      return {
+        height: buffer.readUInt16BE(offset + 5),
+        width: buffer.readUInt16BE(offset + 7),
+      };
+    }
+    offset += 2 + length;
+  }
+  return null;
+}
+
+function readImageSize(buffer) {
+  return readPngSize(buffer) || readJpegSize(buffer);
+}
+
+function chooseImageSize(images = []) {
+  if (IMAGE_SIZE) return IMAGE_SIZE;
+  const size = readImageSize(images[0]?.buffer);
+  if (!size?.width || !size?.height) return '1024x1024';
+  const ratio = size.width / size.height;
+  if (ratio < 0.85) return '1024x1536';
+  if (ratio > 1.18) return '1536x1024';
+  return '1024x1024';
 }
 
 function buildMultipartBody(fields, images = []) {
@@ -303,11 +348,12 @@ async function withImageRetry(task, label) {
 
 async function cctqImageEdit({ prompt, images, retry = true, label = 'edit' }) {
   const finalPrompt = String(prompt || '').trim();
+  const size = chooseImageSize(images);
   logImageEditRequest(label, images, finalPrompt);
   const { body, boundary } = buildMultipartBody({
     model: IMAGE_MODEL,
     prompt: finalPrompt,
-    size: IMAGE_SIZE,
+    size,
     quality: 'auto',
   }, images);
 

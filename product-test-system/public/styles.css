@@ -307,6 +307,81 @@ tr:last-child td { border-bottom: 0; }
   font-weight: 700;
 }
 
+.tracking-table {
+  min-width: 1660px;
+}
+
+.tracking-owner-select,
+.tracking-star-select {
+  min-width: 108px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.stars-readonly {
+  color: #b45309;
+  white-space: nowrap;
+  font-weight: 800;
+}
+
+.tracking-notes {
+  display: grid;
+  gap: 8px;
+  min-width: 280px;
+  max-width: 360px;
+}
+
+.latest-note,
+.note-history div {
+  display: grid;
+  gap: 4px;
+  line-height: 1.5;
+}
+
+.latest-note strong,
+.note-history strong {
+  color: var(--accent);
+}
+
+.latest-note em,
+.note-history em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.tracking-notes details {
+  color: var(--muted);
+}
+
+.tracking-notes summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.note-toggle-btn {
+  width: fit-content;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.note-form {
+  display: grid;
+  gap: 8px;
+}
+
+.note-form input,
+.note-form textarea {
+  padding: 8px;
+  font-size: 12px;
+}
+
+.note-form button {
+  width: fit-content;
+  min-height: 30px;
+  padding: 0 12px;
+}
+
 .done {
   color: var(--muted);
   white-space: nowrap;
