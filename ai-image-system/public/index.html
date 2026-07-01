@@ -658,8 +658,14 @@ function loadImageFromFile(file){
 }
 
 async function normalizeImageFile(file, index){
+  const supportedType = /^(image\/jpeg|image\/png)$/i.test(file.type || '');
+  const maxUploadBytes = 14.5 * 1024 * 1024;
+  if(supportedType && file.size <= maxUploadBytes){
+    return file;
+  }
+
   const img = await loadImageFromFile(file);
-  const maxSize = 1024;
+  const maxSize = 2048;
   const scale = Math.min(1, maxSize / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
   const width = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
   const height = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
@@ -670,7 +676,7 @@ async function normalizeImageFile(file, index){
   ctx.fillStyle = '#fff';
   ctx.fillRect(0,0,width,height);
   ctx.drawImage(img,0,0,width,height);
-  const blob = await new Promise(resolve=>canvas.toBlob(resolve, 'image/jpeg', 0.88));
+  const blob = await new Promise(resolve=>canvas.toBlob(resolve, 'image/jpeg', 0.95));
   if(!blob) throw new Error('图片转换失败，请换一张 JPG / PNG 图片');
   return new File([blob], `reference-${index + 1}.jpg`, {type:'image/jpeg'});
 }

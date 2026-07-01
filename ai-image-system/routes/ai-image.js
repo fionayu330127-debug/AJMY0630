@@ -24,7 +24,7 @@ const IMAGE_BASE_URL = Object.prototype.hasOwnProperty.call(process.env, 'OPENAI
   : env('OPENAI_BASE_URL');
 
 const TEXT_MODEL = env('OPENAI_TEXT_MODEL', 'gpt-4o');
-const IMAGE_MODEL = env('OPENAI_IMAGE_MODEL', 'gpt-image-2');
+const IMAGE_MODEL = 'gpt-image-2';
 const IMAGE_SIZE = env('OPENAI_IMAGE_SIZE', '1024x1024');
 const TEXT_LIKE_MODEL_RE = /^(gpt-[45]|o[134]|chatgpt-|claude-|gemini-|deepseek-)/i;
 
@@ -62,13 +62,7 @@ function buildBaseInfo(extracted) {
 }
 
 function buildShotPrompt(shot, baseInfo) {
-  return [
-    `请基于上传的参考图生成一张「${shot.label}」。`,
-    `产品信息：${baseInfo}。`,
-    '必须保留参考图中的产品主体、结构、颜色和关键外观特征。',
-    '只根据当前图片类型调整场景、构图、光线或展示方式。',
-    '风格干净，适合日本市场电商详情页，画面中不要出现文字。',
-  ].join('\n');
+  return String(baseInfo || '').trim();
 }
 
 function assertImageModelConfigured() {
@@ -97,19 +91,7 @@ function sendUpstreamError(res, err, fallbackMessage) {
   const upstreamMessage = [err.error?.message || err.message || fallbackMessage, causeMessage]
     .filter(Boolean)
     .join(' - ');
-  const isImageToolChoiceError = /tool choice ['"]?image_generation['"]? not found in ['"]?tools['"]? parameter/i.test(upstreamMessage);
-  const isGatewayError = status === 502 || /bad gateway|cloudflare|socket hang up|ECONNRESET/i.test(upstreamMessage);
-  const error = isImageToolChoiceError
-    ? [
-        '图生图请求被上游拒绝：当前中转站把图片接口转成了 Responses image_generation 工具调用，但没有正确配置 tools 参数。',
-        '本项目已经调用 /v1/images/edits，并没有发送 tool_choice。',
-        '请在中转站确认 gpt-image-2 分组支持 /v1/images/edits，或改用官方 OpenAI 图片接口/支持 Images API 的中转站。',
-        `原始错误：${upstreamMessage}`,
-      ].join('\n')
-    : isGatewayError
-    ? `图生图上游服务返回 502。当前中转站可能不支持或暂时无法访问 images/edits 图片编辑接口。原始错误：${upstreamMessage}`
-    : upstreamMessage;
-  res.status(status).json({ error });
+  res.status(status).json({ error: `生成失败：${upstreamMessage}` });
 }
 
 function parseJsonField(value, fieldName) {
@@ -132,6 +114,14 @@ async function uploadableImage(buffer, filename = 'image.png', mimetype = 'image
   return { buffer, filename, mimetype };
 }
 
+function uploadableImagesFromFiles(files, defaultPrefix = 'reference') {
+  return (files || []).map((file, index) => uploadableImage(
+    file.buffer,
+    file.originalname || `${defaultPrefix}-${index + 1}.png`,
+    file.mimetype || 'image/png'
+  ));
+}
+
 function imageApiKey() {
   return env('CCTQ_IMAGE') || env('OPENAI_IMAGE_API_KEY') || env('OPENAI_API_KEY');
 }
@@ -139,6 +129,18 @@ function imageApiKey() {
 function imageApiUrl(endpoint) {
   const baseURL = IMAGE_BASE_URL || 'https://www.cctq.ai/v1';
   return `${baseURL.replace(/\/$/, '')}/${endpoint.replace(/^\//, '')}`;
+}
+
+function logImageEditRequest(label, images, prompt) {
+  console.log('[ai-image] images/edits request', {
+    label,
+    model: IMAGE_MODEL,
+    size: IMAGE_SIZE,
+    imageCount: images.length,
+    imageBytes: images.map((image) => image.buffer?.length || 0),
+    filenames: images.map((image) => image.filename || 'image.png'),
+    promptChars: String(prompt || '').length,
+  });
 }
 
 function buildMultipartBody(fields, images = []) {
@@ -276,12 +278,6 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function withPromptPrefix(prompt, prefix) {
-  const text = String(prompt || '').trim();
-  if (!text) return prefix;
-  return text.startsWith(prefix) ? text : `${prefix}${text}`;
-}
-
 function isImageEditGatewayFailure(err) {
   const message = String(err?.message || '');
   const status = err?.statusCode || err?.status || 0;
@@ -305,8 +301,9 @@ async function withImageRetry(task, label) {
   throw lastError;
 }
 
-async function cctqImageEdit({ prompt, images, retry = true }) {
-  const finalPrompt = withPromptPrefix(prompt, '根据这张图，');
+async function cctqImageEdit({ prompt, images, retry = true, label = 'edit' }) {
+  const finalPrompt = String(prompt || '').trim();
+  logImageEditRequest(label, images, finalPrompt);
   const { body, boundary } = buildMultipartBody({
     model: IMAGE_MODEL,
     prompt: finalPrompt,
@@ -327,26 +324,13 @@ async function cctqImageEdit({ prompt, images, retry = true }) {
   return readImageResultAsB64(payload.data[0]);
 }
 
-function explainImageEditRequiredError(err) {
-  const message = err?.message || 'unknown upstream error';
-  const error = new Error([
-    '图生图失败：当前作图必须使用 images/edits 图片编辑接口，不能降级为纯文生图。',
-    '之前这里会在图片编辑失败后自动改用 images/generations，导致参考图丢失，所以生成结果容易乱。',
-    '请确认当前电脑/网络使用的中转站和图片模型支持 /v1/images/edits，或改用支持图片编辑的 API 配置。',
-    `原始错误：${message}`,
-  ].join('\n'));
-  error.statusCode = err?.statusCode || err?.status || 502;
-  error.cause = err;
-  return error;
-}
-
-async function cctqImageEditStrict({ prompt, images }) {
+async function cctqImageEditStrict({ prompt, images, label }) {
   try {
-    return await cctqImageEdit({ prompt, images });
+    return await cctqImageEdit({ prompt, images, label });
   } catch (err) {
     if (!isImageEditGatewayFailure(err)) throw err;
     console.warn('[ai-image] images/edits failed; refusing text-to-image fallback:', err.message);
-    throw explainImageEditRequiredError(err);
+    throw err;
   }
 }
 
@@ -420,16 +404,7 @@ router.post('/generate', upload.array('images', 8), async (req, res) => {
     if (!extracted) return res.status(400).json({ error: '缺少卖点信息（extracted）' });
     if (!files.length) return res.status(400).json({ error: '缺少参考图，无法基于原图生成多图' });
 
-    const baseInfo = [
-      extracted.function_desc,
-      extracted.target_buyer,
-      extracted.buy_reason,
-      extracted.trigger_scenario,
-      extracted.competitor_points,
-      extracted.complaint_insights,
-      extracted.size_info,
-      extracted.accessory_info,
-    ].filter(Boolean).join('；');
+    const baseInfo = buildBaseInfo(extracted);
 
     const referenceImage = await uploadableImage(
       files[0].buffer,
@@ -439,17 +414,10 @@ router.post('/generate', upload.array('images', 8), async (req, res) => {
 
     const images = [];
     for (const shot of SHOT_LIST) {
-      const prompt = [
-        `请基于上传的参考图生成一张「${shot.label}」。`,
-        `产品信息：${baseInfo}。`,
-        '必须保留参考图中的产品主体、结构、颜色和关键外观特征。',
-        '只根据当前图片类型调整场景、构图、光线或展示方式。',
-        '风格干净，适合日本市场电商详情页，画面中不要出现文字。',
-      ].join('\n');
-
       const b64 = await cctqImageEditStrict({
         images: [referenceImage],
-        prompt,
+        prompt: baseInfo,
+        label: `generate:${shot.key}`,
       });
 
       images.push({ key: shot.key, label: shot.label, b64 });
@@ -482,6 +450,7 @@ router.post('/generate-one', upload.array('images', 8), async (req, res) => {
     const b64 = await cctqImageEditStrict({
       images: [referenceImage],
       prompt,
+      label: `generate-one:${shot.key}`,
     });
 
     res.json({ image: { key: shot.key, label: shot.label, b64 } });
@@ -500,21 +469,14 @@ router.post('/single-generate', upload.array('images', 8), async (req, res) => {
     if (!prompt) return res.status(400).json({ error: '缺少作图需求（prompt）' });
     if (!files.length) return res.status(400).json({ error: '请先上传一张参考素材' });
 
-    const imagePrompt = [
-      prompt,
-      '生成一张适合电商使用的图片，画面干净、主体清晰、质感专业。',
-      '请保留参考素材中的产品主体特征，并按作图需求调整场景、构图和风格。',
-    ].join('\n');
+    const imagePrompt = prompt;
 
-    const referenceImage = await uploadableImage(
-      files[0].buffer,
-      files[0].originalname || 'image-1.png',
-      files[0].mimetype || 'image/png'
-    );
+    const referenceImages = uploadableImagesFromFiles(files, 'single-reference');
 
     const b64 = await cctqImageEditStrict({
-      images: [referenceImage],
+      images: referenceImages,
       prompt: imagePrompt,
+      label: 'single-generate',
     });
 
     res.json({
@@ -546,13 +508,8 @@ router.post('/edit', upload.single('image'), async (req, res) => {
       return res.status(400).json({ error: '缺少参考图（上传文件或 image_b64）' });
     }
 
-    const editPrompt = [
-      prompt,
-      '必须以当前这张已生成图片为基础进行局部修改。',
-      '保持原图主体、人物身份、姿势、构图、背景和产品关系尽量不变，只按用户修改需求调整。',
-      '不要重新生成无关人物或无关场景。',
-    ].join('\n');
-    const b64 = await cctqImageEdit({ images: [imageBuffer], prompt: editPrompt });
+    const editPrompt = prompt;
+    const b64 = await cctqImageEdit({ images: [imageBuffer], prompt: editPrompt, label: 'refine-edit' });
 
     res.json({ b64 });
   } catch (err) {
