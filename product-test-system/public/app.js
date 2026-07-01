@@ -787,7 +787,7 @@ async function importTrackingFile(event) {
     await loadTracking();
     const unmatchedText = result.unmatched?.length ? `，未匹配 ${result.unmatched.length} 条` : '';
     const errorText = result.errors?.length ? `，错误 ${result.errors.length} 条` : '';
-    alert(`导入完成：匹配 ${result.matched || 0} 条，更新 ${result.updated || 0} 条，新增备注 ${result.notes_added || 0} 条${unmatchedText}${errorText}`);
+    alert(`导入完成：匹配 ${result.matched || 0} 条，新增 ${result.created || 0} 条，更新 ${result.updated || 0} 条，新增备注 ${result.notes_added || 0} 条${unmatchedText}${errorText}`);
   } catch (error) {
     alert(error.message || '导入失败');
   } finally {

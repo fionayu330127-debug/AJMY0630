@@ -77,6 +77,14 @@ function normalizeTracking(row) {
   return row;
 }
 
+function isTrackingOnly(row) {
+  return row?.tracking_only === true || row?.tracking_only === 'true';
+}
+
+function isTrackingRow(row) {
+  return isTrackingOnly(row) || normalizeStatus(row.sample_status) === statusByKey.converted;
+}
+
 function normalizeTrackingImportRow(item) {
   const source = item || {};
   const read = (...keys) => {
@@ -354,7 +362,8 @@ app.get('/api/submissions', async (req, res) => {
     }
     if (changed) await writeSubmissions(rows);
   }
-  let filtered = rows;
+  const visibleRows = rows.filter((row) => !isTrackingOnly(row));
+  let filtered = visibleRows;
 
   if (status !== 'all' && statusByKey[status]) {
     filtered = filtered.filter((row) => normalizeStatus(row.sample_status) === statusByKey[status]);
@@ -374,7 +383,7 @@ app.get('/api/submissions', async (req, res) => {
   }
 
   res.json({
-    summary: summarize(rows),
+    summary: summarize(visibleRows),
     submissions: filtered.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 300),
   });
 });
@@ -453,7 +462,7 @@ app.get('/api/tracking', async (req, res) => {
   const rows = await readSubmissions();
   let changed = false;
   let filtered = rows
-    .filter((row) => normalizeStatus(row.sample_status) === statusByKey.converted)
+    .filter(isTrackingRow)
     .map((row) => {
       const before = JSON.stringify({
         tracking_owner: row.tracking_owner,
@@ -502,7 +511,7 @@ app.patch('/api/tracking/:id/meta', async (req, res) => {
   const rows = await readSubmissions();
   const row = rows.find((item) => Number(item.id) === id);
   if (!row) return res.status(404).json({ error: '链接记录不存在' });
-  if (normalizeStatus(row.sample_status) !== statusByKey.converted) return res.status(400).json({ error: '只有上架成功的链接可以跟踪' });
+  if (!isTrackingRow(row)) return res.status(400).json({ error: '只有上架成功或已导入跟踪的链接可以跟踪' });
 
   normalizeTracking(row);
   if (Object.prototype.hasOwnProperty.call(req.body, 'tracking_stars')) {
@@ -522,7 +531,7 @@ app.post('/api/tracking/:id/notes', async (req, res) => {
   const rows = await readSubmissions();
   const row = rows.find((item) => Number(item.id) === id);
   if (!row) return res.status(404).json({ error: '链接记录不存在' });
-  if (normalizeStatus(row.sample_status) !== statusByKey.converted) return res.status(400).json({ error: '只有上架成功的链接可以跟踪' });
+  if (!isTrackingRow(row)) return res.status(400).json({ error: '只有上架成功或已导入跟踪的链接可以跟踪' });
 
   normalizeTracking(row);
   const userName = String(user?.name || '').trim();
@@ -557,10 +566,11 @@ app.post('/api/tracking/import', async (req, res) => {
   if (!importRows.length) return res.status(400).json({ error: '没有可导入的数据' });
 
   const rows = await readSubmissions();
-  const convertedRows = rows.filter((row) => normalizeStatus(row.sample_status) === statusByKey.converted);
+  let nextId = rows.reduce((max, item) => Math.max(max, Number(item.id || 0)), 0) + 1;
+  const trackingRows = rows.filter(isTrackingRow);
   const asinMap = new Map();
   const nameMap = new Map();
-  convertedRows.forEach((row) => {
+  trackingRows.forEach((row) => {
     normalizeTracking(row);
     const asinKey = trackingImportKey(row.amazon_asin);
     const nameKey = trackingImportKey(row.product_name || row.product_keywords);
@@ -573,6 +583,7 @@ app.post('/api/tracking/import', async (req, res) => {
   const result = {
     total: importRows.length,
     matched: 0,
+    created: 0,
     updated: 0,
     notes_added: 0,
     unmatched: [],
@@ -582,18 +593,50 @@ app.post('/api/tracking/import', async (req, res) => {
   importRows.forEach((item, index) => {
     const asinKey = trackingImportKey(item.amazon_asin);
     const nameKey = trackingImportKey(item.product_name);
-    const row = (asinKey && asinMap.get(asinKey)) || (nameKey && nameMap.get(nameKey));
+    let row = (asinKey && asinMap.get(asinKey)) || (nameKey && nameMap.get(nameKey));
+    let createdThisRow = false;
     if (!row) {
-      result.unmatched.push({
-        row: index + 2,
-        amazon_asin: item.amazon_asin,
-        product_name: item.product_name,
-      });
-      return;
+      row = {
+        id: nextId,
+        tracking_only: true,
+        sample_status: statusByKey.converted,
+        listing_status: '',
+        urgency: '',
+        submit_date: item.submit_date || '',
+        developer: '',
+        lister: item.tracking_owner || '',
+        product_name: item.product_name || item.amazon_asin || '',
+        product_keywords: item.product_name || item.amazon_asin || '历史跟踪链接',
+        brand: item.brand || '',
+        store_name: item.store_name || '',
+        variant_name: '',
+        source_url: '',
+        product_image: item.product_image || '',
+        product_note: '',
+        price_jp: '',
+        erp_listed: '',
+        direct_review: '',
+        ads_enabled: '',
+        amazon_asin: item.amazon_asin || '',
+        product_sku: '',
+        submitter_name: userName,
+        review_note: '链接跟踪导入',
+        created_at: now,
+        updated_at: now,
+        tracking_owner: item.tracking_owner || '',
+        tracking_stars: 0,
+        tracking_notes: [],
+      };
+      rows.push(row);
+      nextId += 1;
+      if (asinKey) asinMap.set(asinKey, row);
+      if (nameKey) nameMap.set(nameKey, row);
+      result.created += 1;
+      createdThisRow = true;
     }
 
-    let changed = false;
-    result.matched += 1;
+    let changed = createdThisRow;
+    if (!createdThisRow) result.matched += 1;
 
     ['submit_date', 'product_image', 'product_name', 'brand', 'store_name'].forEach((field) => {
       if (item[field]) {
@@ -636,11 +679,11 @@ app.post('/api/tracking/import', async (req, res) => {
     if (changed) {
       normalizeTracking(row);
       row.updated_at = now;
-      result.updated += 1;
+      if (!createdThisRow) result.updated += 1;
     }
   });
 
-  if (result.updated) await writeSubmissions(rows);
+  if (result.updated || result.created) await writeSubmissions(rows);
   res.json({ ok: true, ...result });
 });
 
