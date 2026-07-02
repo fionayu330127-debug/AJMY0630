@@ -862,6 +862,46 @@ function updateTrackingFilter(event) {
   render();
 }
 
+function compressImageFile(file, maxSize = 360, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    if (!file.type?.startsWith('image/')) {
+      reject(new Error('请选择图片文件'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const width = img.naturalWidth || img.width;
+        const height = img.naturalHeight || img.height;
+        if (!width || !height) {
+          reject(new Error('图片读取失败'));
+          return;
+        }
+        const scale = Math.min(1, maxSize / Math.max(width, height));
+        const targetWidth = Math.max(1, Math.round(width * scale));
+        const targetHeight = Math.max(1, Math.round(height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const context = canvas.getContext('2d');
+        if (!context) {
+          reject(new Error('图片压缩失败'));
+          return;
+        }
+        context.fillStyle = '#fff';
+        context.fillRect(0, 0, targetWidth, targetHeight);
+        context.drawImage(img, 0, 0, targetWidth, targetHeight);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => reject(new Error('图片读取失败'));
+      img.src = String(reader.result || '');
+    };
+    reader.onerror = () => reject(new Error('图片读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
 function readImageFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -874,7 +914,7 @@ function readImageFile(file) {
 async function saveTrackingImage(id, file) {
   if (!file) return;
   try {
-    const image = await readImageFile(file);
+    const image = await compressImageFile(file);
     await saveTrackingRow(id, { product_image: image });
   } catch (error) {
     alert(error.message || '图片上传失败');
@@ -1229,10 +1269,13 @@ async function fetchProductImage() {
 function uploadProductImage(event) {
   const file = event.currentTarget.files?.[0];
   if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => setImageField(String(reader.result || ''), '已上传图片');
-  reader.onerror = () => setImageField('', '图片读取失败');
-  reader.readAsDataURL(file);
+  setImageField('', '正在压缩图片...');
+  compressImageFile(file)
+    .then((image) => setImageField(image, '已上传压缩图片'))
+    .catch((error) => setImageField('', error.message || '图片上传失败'))
+    .finally(() => {
+      event.currentTarget.value = '';
+    });
 }
 
 function clearProductImage() {
