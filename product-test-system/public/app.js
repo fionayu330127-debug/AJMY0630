@@ -478,7 +478,7 @@ function trackingStarsView(row) {
       : '<span class="stars-empty">未评星</span>';
   }
   return `
-    <select class="tracking-star-select" data-tracking-star-id="${Number(row.id)}">
+    <select class="tracking-star-select ${current ? 'has-stars' : ''}" data-tracking-star-id="${Number(row.id)}">
       ${[0, 1, 2, 3, 4, 5].map((value) => `<option value="${value}" ${value === current ? 'selected' : ''}>${value ? '★'.repeat(value) : '未评星'}</option>`).join('')}
     </select>
   `;

@@ -402,6 +402,10 @@ tr:last-child td { border-bottom: 0; }
   font-weight: 800;
 }
 
+.tracking-star-select.has-stars {
+  color: #eab308;
+}
+
 .stars-readonly {
   color: #eab308;
   white-space: nowrap;
