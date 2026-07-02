@@ -206,7 +206,7 @@ function readonlyCell(field, row) {
 }
 
 function actionsView(row) {
-  return `<div class="row-actions"><button data-edit-id="${Number(row.id)}" type="button">编辑</button></div>`;
+  return `<div class="row-actions"><button data-edit-id="${Number(row.id)}" type="button">编辑</button><button data-delete-id="${Number(row.id)}" type="button">删除</button></div>`;
 }
 
 function asinLinkView(value) {
@@ -780,6 +780,9 @@ function bind() {
       render();
     });
   });
+  document.querySelectorAll('[data-delete-id]').forEach((button) => {
+    button.addEventListener('click', () => deleteSubmissionRow(Number(button.dataset.deleteId)));
+  });
   document.querySelectorAll('[data-row-status-id]').forEach((select) => {
     select.addEventListener('change', () => updateRowStatus(Number(select.dataset.rowStatusId), select.value));
   });
@@ -836,6 +839,17 @@ async function updateRowStatus(id, status) {
   });
   if (!response.ok) {
     alert('状态保存失败');
+  }
+  await loadSubmissions();
+}
+
+async function deleteSubmissionRow(id) {
+  if (!confirm('确定删除这条链接刊登记录吗？')) return;
+  const response = await fetch(`./api/submissions/${id}`, { method: 'DELETE' });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    alert(result.error || '删除失败');
+    return;
   }
   await loadSubmissions();
 }

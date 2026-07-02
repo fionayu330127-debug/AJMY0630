@@ -108,7 +108,14 @@ function compareTrackingRows(a, b) {
 async function notifyListerAssigned(row) {
   const webhook = String(process.env.QYWX_LINK_LISTING_WEBHOOK || '').trim();
   const lister = String(row.lister || '').trim();
-  if (!webhook || !lister) return;
+  if (!webhook) {
+    console.error('notify lister assigned skipped: QYWX_LINK_LISTING_WEBHOOK is not configured');
+    return { ok: false, reason: 'missing_webhook' };
+  }
+  if (!lister) {
+    console.error('notify lister assigned skipped: lister is empty', row.id);
+    return { ok: false, reason: 'missing_lister' };
+  }
 
   const productName = String(row.product_name || row.product_keywords || '-').trim();
   const brand = String(row.brand || '-').trim();
@@ -134,12 +141,87 @@ async function notifyListerAssigned(row) {
         markdown: { content },
       }),
     });
+    const text = await response.text();
     if (!response.ok) {
-      console.error('notify lister assigned failed', response.status, await response.text());
+      console.error('notify lister assigned failed', response.status, text);
+      return { ok: false, reason: 'http_error', status: response.status };
     }
+    const result = JSON.parse(text || '{}');
+    if (Number(result.errcode || 0) !== 0) {
+      console.error('notify lister assigned failed', result);
+      return { ok: false, reason: 'qywx_error', result };
+    }
+    console.log('notify lister assigned sent', row.id, lister);
+    return { ok: true };
   } catch (error) {
     console.error('notify lister assigned failed', error);
+    return { ok: false, reason: 'exception' };
   }
+}
+
+async function notifyLinkListingChanged(row, title, lines) {
+  const webhook = String(process.env.QYWX_LINK_LISTING_WEBHOOK || '').trim();
+  if (!webhook) {
+    console.error('link listing notify skipped: QYWX_LINK_LISTING_WEBHOOK is not configured', title);
+    return { ok: false, reason: 'missing_webhook' };
+  }
+
+  const productName = String(row.product_name || row.product_keywords || '-').trim();
+  const brand = String(row.brand || '-').trim();
+  const store = String(row.store_name || '-').trim();
+  const submitter = String(row.submitter_name || '-').trim();
+  const submitDate = String(row.submit_date || '').slice(0, 10) || '-';
+  const content = [
+    `### ${title}`,
+    ...lines,
+    `> 产品名称：${productName}`,
+    `> 品牌：${brand}`,
+    `> 店铺：${store}`,
+    `> 提交日期：${submitDate}`,
+    `> 提交人：${submitter}`,
+  ].join('\n');
+
+  try {
+    const response = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        msgtype: 'markdown',
+        markdown: { content },
+      }),
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error('link listing notify failed', title, response.status, text);
+      return { ok: false, reason: 'http_error', status: response.status };
+    }
+    const result = JSON.parse(text || '{}');
+    if (Number(result.errcode || 0) !== 0) {
+      console.error('link listing notify failed', title, result);
+      return { ok: false, reason: 'qywx_error', result };
+    }
+    console.log('link listing notify sent', title, row.id);
+    return { ok: true };
+  } catch (error) {
+    console.error('link listing notify failed', title, error);
+    return { ok: false, reason: 'exception' };
+  }
+}
+
+async function notifyListerChanged(row, previousLister, nextLister, user) {
+  return notifyLinkListingChanged(row, '修改刊登人', [
+    `> 原刊登人：${previousLister || '-'}`,
+    `> 新刊登人：<font color="warning">${nextLister || '-'}</font>`,
+    `> 修改人：${String(user?.name || '-').trim() || '-'}`,
+  ]);
+}
+
+async function notifyTrackingOwnerChanged(row, previousOwner, nextOwner, user) {
+  return notifyLinkListingChanged(row, '修改负责人', [
+    `> 原负责人：${previousOwner || '-'}`,
+    `> 新负责人：<font color="warning">${nextOwner || '-'}</font>`,
+    `> 修改人：${String(user?.name || '-').trim() || '-'}`,
+  ]);
 }
 
 function normalizeTrackingImportRow(item) {
@@ -469,7 +551,7 @@ app.post('/api/submissions', async (req, res) => {
   };
   rows.push(row);
   await writeSubmissions(rows);
-  notifyListerAssigned(row);
+  await notifyListerAssigned(row);
   res.json({ ok: true, submission: row });
 });
 
@@ -480,6 +562,7 @@ app.patch('/api/submissions/:id', async (req, res) => {
   const row = rows.find((item) => Number(item.id) === id);
   if (!row) return res.status(404).json({ error: '链接刊登记录不存在' });
 
+  const previousLister = String(row.lister || '').trim();
   const editableFields = submissionFields;
   for (const field of editableFields) {
     if (Object.prototype.hasOwnProperty.call(req.body, field)) {
@@ -497,7 +580,25 @@ app.patch('/api/submissions/:id', async (req, res) => {
 
   row.updated_at = new Date().toISOString();
   await writeSubmissions(rows);
+  const nextLister = String(row.lister || '').trim();
+  if (isManager(user) && previousLister !== nextLister) {
+    await notifyListerChanged(row, previousLister, nextLister, user);
+  }
   res.json({ ok: true, submission: row });
+});
+
+app.delete('/api/submissions/:id', async (req, res) => {
+  const user = await getCurrentUser(req);
+  if (!isManager(user)) return res.status(403).json({ error: '只有管理员可以删除链接刊登记录' });
+
+  const id = Number(req.params.id);
+  const rows = await readSubmissions();
+  const index = rows.findIndex((item) => Number(item.id) === id);
+  if (index === -1) return res.status(404).json({ error: '链接刊登记录不存在' });
+
+  rows.splice(index, 1);
+  await writeSubmissions(rows);
+  res.json({ ok: true });
 });
 
 app.patch('/api/submissions/:id/status', async (req, res) => {
@@ -572,6 +673,7 @@ app.patch('/api/tracking/:id/meta', async (req, res) => {
   if (!isTrackingRow(row)) return res.status(400).json({ error: '只有上架成功或已导入跟踪的链接可以跟踪' });
 
   normalizeTracking(row);
+  const previousOwner = String(row.tracking_owner || '').trim();
   if (Object.prototype.hasOwnProperty.call(req.body, 'tracking_stars')) {
     row.tracking_stars = Math.max(0, Math.min(5, Number(req.body.tracking_stars || 0)));
   }
@@ -580,6 +682,10 @@ app.patch('/api/tracking/:id/meta', async (req, res) => {
   }
   row.updated_at = new Date().toISOString();
   await writeSubmissions(rows);
+  const nextOwner = String(row.tracking_owner || '').trim();
+  if (isManager(user) && previousOwner !== nextOwner) {
+    await notifyTrackingOwnerChanged(row, previousOwner, nextOwner, user);
+  }
   res.json({ ok: true, submission: row });
 });
 
