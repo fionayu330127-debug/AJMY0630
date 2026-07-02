@@ -693,13 +693,27 @@ function bind() {
     state.editingId = null;
     render();
   });
-  document.getElementById('modalBackdrop')?.addEventListener('click', (event) => {
-    if (event.target?.id === 'modalBackdrop') {
-      state.modalOpen = false;
-      state.editingId = null;
-      render();
-    }
-  });
+  const modalBackdrop = document.getElementById('modalBackdrop');
+  if (modalBackdrop) {
+    let startedOnBackdrop = false;
+    modalBackdrop.addEventListener('pointerdown', (event) => {
+      startedOnBackdrop = event.target === event.currentTarget;
+    });
+    modalBackdrop.addEventListener('pointerup', (event) => {
+      if (startedOnBackdrop && event.target === event.currentTarget) {
+        startedOnBackdrop = false;
+        state.modalOpen = false;
+        state.editingId = null;
+        render();
+      }
+    });
+    modalBackdrop.addEventListener('pointercancel', () => {
+      startedOnBackdrop = false;
+    });
+    modalBackdrop.addEventListener('pointerleave', (event) => {
+      if (event.buttons === 0) startedOnBackdrop = false;
+    });
+  }
   document.querySelectorAll('[data-status]').forEach((button) => {
     button.addEventListener('click', () => {
       state.status = button.dataset.status || 'all';

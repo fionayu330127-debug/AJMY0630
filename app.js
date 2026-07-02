@@ -1539,6 +1539,27 @@ async function loadAmazonAds() {
   }
 }
 
+function bindBackdropClose(backdropId, onClose) {
+  const backdrop = document.getElementById(backdropId);
+  if (!backdrop) return;
+  let startedOnBackdrop = false;
+  backdrop.addEventListener('pointerdown', (event) => {
+    startedOnBackdrop = event.target === event.currentTarget;
+  });
+  backdrop.addEventListener('pointerup', (event) => {
+    if (startedOnBackdrop && event.target === event.currentTarget) {
+      startedOnBackdrop = false;
+      onClose();
+    }
+  });
+  backdrop.addEventListener('pointercancel', () => {
+    startedOnBackdrop = false;
+  });
+  backdrop.addEventListener('pointerleave', (event) => {
+    if (event.buttons === 0) startedOnBackdrop = false;
+  });
+}
+
 function bindSampleSubmit() {
   document.getElementById('openSampleSubmit')?.addEventListener('click', () => {
     state.sampleSubmitOpen = true;
@@ -1550,11 +1571,9 @@ function bindSampleSubmit() {
     render();
   });
 
-  document.getElementById('sampleSubmitBackdrop')?.addEventListener('click', (event) => {
-    if (event.target?.id === 'sampleSubmitBackdrop') {
-      state.sampleSubmitOpen = false;
-      render();
-    }
+  bindBackdropClose('sampleSubmitBackdrop', () => {
+    state.sampleSubmitOpen = false;
+    render();
   });
 
   document.querySelectorAll('[data-sample-status]').forEach((button) => {
@@ -1702,18 +1721,14 @@ function bindTeam() {
     render();
   });
 
-  document.getElementById('teamModalBackdrop')?.addEventListener('click', (event) => {
-    if (event.target.id === 'teamModalBackdrop') {
-      state.teamAddOpen = false;
-      render();
-    }
+  bindBackdropClose('teamModalBackdrop', () => {
+    state.teamAddOpen = false;
+    render();
   });
 
-  document.getElementById('teamEditModalBackdrop')?.addEventListener('click', (event) => {
-    if (event.target.id === 'teamEditModalBackdrop') {
-      state.teamEditMemberId = null;
-      render();
-    }
+  bindBackdropClose('teamEditModalBackdrop', () => {
+    state.teamEditMemberId = null;
+    render();
   });
 
   const search = document.getElementById('teamSearch');
