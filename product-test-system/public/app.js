@@ -12,6 +12,10 @@ const state = {
   editingId: null,
   importing: false,
   noteRowId: null,
+  editingNote: null,
+  trackingFilters: {},
+  openFilter: null,
+  trackingSort: 'default',
 };
 
 const isTrackingView = new URLSearchParams(window.location.search).get('view') === 'tracking';
@@ -52,6 +56,20 @@ const tableFields = [
   { key: 'submitter_name', label: '提交人' },
 ];
 
+const trackingEditFields = [
+  { key: 'submit_date', label: '提交日期', type: 'date' },
+  { key: 'product_image', label: '产品图片', type: 'image', wide: true },
+  { key: 'product_name', label: '产品名称' },
+  { key: 'tracking_owner', label: '负责人', type: 'select', optionsSource: 'teamMembers' },
+  { key: 'brand', label: '品牌' },
+  { key: 'store_name', label: '店铺' },
+  { key: 'price_jp', label: '售价JP' },
+  { key: 'submitter_name', label: '提交人' },
+  { key: 'tracking_stars', label: '星级', type: 'select', options: ['0', '1', '2', '3', '4', '5'] },
+  { key: 'amazon_asin', label: '亚马逊ASIN' },
+  { key: 'product_note', label: '跟踪备注', multiline: true, wide: true },
+];
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -84,7 +102,7 @@ function render() {
   const summary = state.payload?.summary || {};
   const tabs = [
     ['all', '全部', summary.total || 0],
-    ['pending', '待提交', summary.pending || 0],
+    ['pending', '待刊登', summary.pending || 0],
     ['testing', '待填ASIN', summary.testing || 0],
     ['passed', '待确认广告', summary.passed || 0],
     ['failed', '异常', summary.failed || 0],
@@ -123,7 +141,7 @@ function render() {
       </nav>
 
       <section class="kpi-grid">
-        <div><span>待提交</span><strong>${Number(summary.pending || 0)}</strong></div>
+        <div><span>待刊登</span><strong>${Number(summary.pending || 0)}</strong></div>
         <div><span>待填ASIN</span><strong>${Number(summary.testing || 0)}</strong></div>
         <div><span>待确认广告</span><strong>${Number(summary.passed || 0)}</strong></div>
         <div><span>上架成功</span><strong>${Number(summary.converted || 0)}</strong></div>
@@ -198,7 +216,7 @@ function asinLinkView(value) {
 }
 
 function renderTracking() {
-  const rows = state.trackingPayload?.submissions || [];
+  const rows = sortedTrackingRows(filteredTrackingRows(state.trackingPayload?.submissions || []));
   app.innerHTML = `
     <section class="module-shell">
       <header class="module-head">
@@ -214,7 +232,19 @@ function renderTracking() {
         </div>
       </header>
 
-      <input class="search-input" id="searchInput" type="search" placeholder="搜索产品 / 负责人 / 品牌 / 店铺 / ASIN / 备注" value="${escapeHtml(state.search)}">
+      <div class="tracking-toolbar">
+        <input class="search-input" id="searchInput" type="search" placeholder="搜索产品 / 负责人 / 品牌 / 店铺 / ASIN / 备注" value="${escapeHtml(state.search)}">
+        <label class="tracking-sort-control">
+          <span>排序方式</span>
+          <select id="trackingSortSelect">
+            <option value="default" ${state.trackingSort === 'default' ? 'selected' : ''}>默认排序</option>
+            <option value="star_desc" ${state.trackingSort === 'star_desc' ? 'selected' : ''}>星级从高到低</option>
+            <option value="star_asc" ${state.trackingSort === 'star_asc' ? 'selected' : ''}>星级从低到高</option>
+            <option value="submit_asc" ${state.trackingSort === 'submit_asc' ? 'selected' : ''}>提交日期旧到新</option>
+            <option value="submit_desc" ${state.trackingSort === 'submit_desc' ? 'selected' : ''}>提交日期新到旧</option>
+          </select>
+        </label>
+      </div>
 
       <section class="table-wrap">
         <table class="tracking-table">
@@ -223,35 +253,37 @@ function renderTracking() {
               <th>提交日期</th>
               <th>产品图片</th>
               <th>产品名称</th>
-              <th>负责人</th>
-              <th>品牌</th>
-              <th>店铺</th>
+              ${trackingHeaderCell('负责人', 'tracking_owner', 'values')}
+              ${trackingHeaderCell('品牌', 'brand', 'values')}
+              ${trackingHeaderCell('店铺', 'store_name', 'values')}
               <th>售价JP</th>
-              <th>提交人</th>
-              <th>星级</th>
+              ${trackingHeaderCell('提交人', 'submitter_name', 'values')}
+              ${trackingHeaderCell('星级', 'tracking_stars', 'stars')}
               <th>亚马逊ASIN</th>
-              <th>跟踪备注</th>
+              ${trackingHeaderCell('跟踪备注', 'tracking_note_week', 'week-date')}
               <th>创建时间</th>
+              <th>操作</th>
             </tr>
           </thead>
-          <tbody>${state.trackingPayload ? trackingRowsView(rows) : '<tr><td colspan="12"><div class="empty">正在加载链接跟踪清单...</div></td></tr>'}</tbody>
+          <tbody>${state.trackingPayload ? trackingRowsView(rows) : '<tr><td colspan="13"><div class="empty">正在加载链接跟踪清单...</div></td></tr>'}</tbody>
         </table>
       </section>
+      ${state.modalOpen ? modalView() : ''}
     </section>
   `;
   bind();
 }
 
 function trackingRowsView(rows) {
-  if (!rows.length) return '<tr><td colspan="12"><div class="empty">暂无上架成功链接</div></td></tr>';
+  if (!rows.length) return '<tr><td colspan="13"><div class="empty">暂无上架成功链接</div></td></tr>';
   return rows.map((row) => {
     const notes = Array.isArray(row.tracking_notes) ? row.tracking_notes : [];
     const latest = notes[0] || null;
     return `
       <tr>
         <td>${escapeHtml(String(row.submit_date || '').slice(0, 10) || '-')}</td>
-        <td>${readonlyCell({ key: 'product_image' }, row)}</td>
-        <td>${escapeHtml(row.product_name || row.product_keywords || '-')}</td>
+        <td>${trackingImageView(row)}</td>
+        <td>${trackingProductNameView(row)}</td>
         <td>${trackingOwnerView(row)}</td>
         <td>${escapeHtml(row.brand || '-')}</td>
         <td>${escapeHtml(row.store_name || '-')}</td>
@@ -261,9 +293,164 @@ function trackingRowsView(rows) {
         <td>${asinLinkView(row.amazon_asin)}</td>
         <td>${trackingNotesView(row, latest, notes)}</td>
         <td>${escapeHtml(formatDateTime(row.created_at))}</td>
+        <td>${trackingActionsView(row)}</td>
       </tr>
     `;
   }).join('');
+}
+
+function trackingHeaderCell(label, key, type = 'text') {
+  const active = String(state.trackingFilters[key] || '');
+  const open = state.openFilter === key;
+  return `
+    <th class="filterable-th">
+      <div class="th-title-row">
+        <span>${escapeHtml(label)}</span>
+        <button class="filter-toggle ${active ? 'active' : ''}" data-toggle-filter="${escapeHtml(key)}" type="button" aria-label="筛选">▾</button>
+      </div>
+      ${open ? trackingFilterControl(key, type, active) : ''}
+    </th>
+  `;
+}
+
+function trackingFilterControl(key, type, active) {
+  if (type === 'stars') {
+    return `
+      <div class="filter-popover">
+        <select data-tracking-filter="${escapeHtml(key)}">
+          <option value="">全部</option>
+          ${[5, 4, 3, 2, 1, 0].map((value) => `<option value="${value}" ${active === String(value) ? 'selected' : ''}>${value}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  }
+  if (type === 'values') {
+    const values = trackingColumnValues(state.trackingPayload?.submissions || [], key);
+    return `
+      <div class="filter-popover">
+        <select data-tracking-filter="${escapeHtml(key)}">
+          <option value="">全部</option>
+          ${values.map((value) => `<option value="${escapeHtml(value)}" ${active === value ? 'selected' : ''}>${escapeHtml(value)}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  }
+  if (type === 'week-date') {
+    const weeks = trackingNoteWeeks(state.trackingPayload?.submissions || []);
+    return `
+      <div class="filter-popover">
+        <input data-tracking-filter="${escapeHtml(key)}" type="date" value="${escapeHtml(active)}" list="trackingNoteWeeks">
+        <datalist id="trackingNoteWeeks">
+          ${weeks.map((week) => `<option value="${escapeHtml(week)}"></option>`).join('')}
+        </datalist>
+      </div>
+    `;
+  }
+  return `
+    <div class="filter-popover">
+      <input data-tracking-filter="${escapeHtml(key)}" value="${escapeHtml(active)}" placeholder="输入后回车">
+    </div>
+  `;
+}
+
+function trackingColumnValues(rows, key) {
+  const values = new Set();
+  rows.forEach((row) => {
+    const value = key === 'tracking_owner'
+      ? row.tracking_owner || row.lister
+      : row[key];
+    const text = String(value || '').trim();
+    if (text) values.add(text);
+  });
+  return [...values].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+}
+
+function trackingNoteWeeks(rows) {
+  const weeks = new Set();
+  rows.forEach((row) => {
+    (row.tracking_notes || []).forEach((note) => {
+      const week = String(note.week_start || '').slice(0, 10);
+      if (week) weeks.add(week);
+    });
+  });
+  return [...weeks].sort((a, b) => b.localeCompare(a));
+}
+
+function filteredTrackingRows(rows) {
+  const filters = state.trackingFilters || {};
+  return rows.filter((row) => Object.entries(filters).every(([key, raw]) => {
+    const query = String(raw || '').trim().toLowerCase();
+    if (!query) return true;
+    if (key === 'tracking_note_week') {
+      return (row.tracking_notes || []).some((note) => String(note.week_start || '').slice(0, 10) === query);
+    }
+    if (key === 'tracking_stars') return String(Number(row.tracking_stars || 0)) === query;
+    const value = key === 'product_name' ? row.product_name || row.product_keywords : row[key];
+    return String(value || '').toLowerCase().includes(query);
+  }));
+}
+
+function trackingDateValue(value) {
+  const text = String(value || '').trim();
+  if (!text) return 0;
+  const normalized = text.replaceAll('/', '-');
+  const time = new Date(normalized).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function isRecentTrackingItem(row) {
+  const time = trackingDateValue(row.submit_date || row.created_at);
+  return time && Date.now() - time <= 30 * 24 * 60 * 60 * 1000;
+}
+
+function sortedTrackingRows(rows) {
+  const copy = [...rows];
+  if (state.trackingSort === 'star_desc') {
+    return copy.sort((a, b) => Number(b.tracking_stars || 0) - Number(a.tracking_stars || 0));
+  }
+  if (state.trackingSort === 'star_asc') {
+    return copy.sort((a, b) => Number(a.tracking_stars || 0) - Number(b.tracking_stars || 0));
+  }
+  if (state.trackingSort === 'submit_asc') {
+    return copy.sort((a, b) => trackingDateValue(a.submit_date) - trackingDateValue(b.submit_date));
+  }
+  if (state.trackingSort === 'submit_desc') {
+    return copy.sort((a, b) => trackingDateValue(b.submit_date) - trackingDateValue(a.submit_date));
+  }
+  return copy.sort((a, b) => {
+    const recentDiff = Number(isRecentTrackingItem(b)) - Number(isRecentTrackingItem(a));
+    if (recentDiff) return recentDiff;
+    const starDiff = Number(b.tracking_stars || 0) - Number(a.tracking_stars || 0);
+    if (starDiff) return starDiff;
+    return trackingDateValue(b.submit_date) - trackingDateValue(a.submit_date);
+  });
+}
+
+function trackingImageView(row) {
+  const value = row.product_image || '';
+  return `
+    <label class="tracking-image-upload" data-tracking-drop-image="${Number(row.id)}">
+      ${value ? `<img class="table-thumb" src="${escapeHtml(imagePreviewSrc(value))}" alt="产品图片">` : '<span class="muted">点击上传</span>'}
+      <input data-tracking-image-id="${Number(row.id)}" type="file" accept="image/*" hidden>
+    </label>
+  `;
+}
+
+function trackingProductNameView(row) {
+  const name = row.product_name || row.product_keywords || '-';
+  const className = isRecentTrackingItem(row) ? 'recent-product-name' : '';
+  return `<span class="${className}">${escapeHtml(name)}</span>`;
+}
+
+function trackingActionsView(row) {
+  if (!canManageTracking()) return '<span class="muted">-</span>';
+  return `
+    <div class="row-actions tracking-actions">
+      <button data-edit-id="${Number(row.id)}" type="button">修改</button>
+      <button data-save-row-id="${Number(row.id)}" type="button">保存</button>
+      <button data-delete-row-id="${Number(row.id)}" type="button">删除</button>
+    </div>
+  `;
 }
 
 function canManageTracking() {
@@ -285,7 +472,11 @@ function trackingOwnerView(row) {
 
 function trackingStarsView(row) {
   const current = Number(row.tracking_stars || 0);
-  if (!canManageTracking()) return `<span class="stars-readonly">${'★'.repeat(current)}${'☆'.repeat(5 - current)}</span>`;
+  if (!canManageTracking()) {
+    return current
+      ? `<span class="stars-readonly">${'★'.repeat(current)}${'☆'.repeat(5 - current)}</span>`
+      : '<span class="stars-empty">未评星</span>';
+  }
   return `
     <select class="tracking-star-select" data-tracking-star-id="${Number(row.id)}">
       ${[0, 1, 2, 3, 4, 5].map((value) => `<option value="${value}" ${value === current ? 'selected' : ''}>${value ? '★'.repeat(value) : '未评星'}</option>`).join('')}
@@ -298,18 +489,20 @@ function trackingNotesView(row, latest, notes) {
   const older = notes.slice(1);
   return `
     <div class="tracking-notes">
-      <div class="latest-note">
-        ${latest ? `<strong>${escapeHtml(latest.week_start || '')}</strong><span>${escapeHtml(latest.content || '')}</span><em>${escapeHtml(latest.author || '')}</em>` : '<span class="muted">暂无备注</span>'}
-      </div>
+      ${latest ? trackingNoteItemView(row, latest, true) : `
+        <div class="latest-note">
+          <span class="muted">暂无备注</span>
+          <button class="ghost-btn note-toggle-btn" data-note-row-id="${Number(row.id)}" type="button">新增本周备注</button>
+        </div>
+      `}
       ${older.length ? `
         <details>
           <summary>查看历史备注（${older.length}）</summary>
           <div class="note-history">
-            ${older.map((note) => `<div><strong>${escapeHtml(note.week_start || '')}</strong><span>${escapeHtml(note.content || '')}</span><em>${escapeHtml(note.author || '')}</em></div>`).join('')}
+            ${older.map((note) => trackingNoteItemView(row, note, false)).join('')}
           </div>
         </details>
       ` : ''}
-      <button class="ghost-btn note-toggle-btn" data-note-row-id="${Number(row.id)}" type="button">${noteFormOpen ? '收起备注' : '新增本周备注'}</button>
       ${noteFormOpen ? `
         <form class="note-form" data-note-form-id="${Number(row.id)}">
           <input name="week_start" type="date" value="${escapeHtml(currentWeekStart())}">
@@ -317,6 +510,43 @@ function trackingNotesView(row, latest, notes) {
           <button class="primary-btn" type="submit">保存备注</button>
         </form>
       ` : ''}
+    </div>
+  `;
+}
+
+function trackingNoteItemView(row, note, isLatest) {
+  const editing = state.editingNote &&
+    Number(state.editingNote.rowId) === Number(row.id) &&
+    Number(state.editingNote.noteId) === Number(note.id);
+  if (editing) {
+    return `
+      <form class="${isLatest ? 'latest-note' : ''} note-edit-form" data-edit-note-row-id="${Number(row.id)}" data-edit-note-id="${Number(note.id)}">
+        <input name="week_start" type="date" value="${escapeHtml(String(note.week_start || '').slice(0, 10))}">
+        <textarea name="content" rows="3">${escapeHtml(note.content || '')}</textarea>
+        <div class="note-actions">
+          <button class="primary-btn" type="submit">保存</button>
+          <button class="ghost-btn" data-cancel-note-edit type="button">取消</button>
+        </div>
+      </form>
+    `;
+  }
+  return `
+    <div class="${isLatest ? 'latest-note' : ''} note-item">
+      <div class="note-title-row">
+        <strong>${escapeHtml(note.week_start || '')}</strong>
+        ${isLatest ? `
+          <button class="ghost-btn note-toggle-btn" data-note-row-id="${Number(row.id)}" type="button">新增本周备注</button>
+          <button class="ghost-btn" data-edit-note-row-id="${Number(row.id)}" data-edit-note-id="${Number(note.id)}" type="button">修改</button>
+          <button class="ghost-btn" data-delete-note-row-id="${Number(row.id)}" data-delete-note-id="${Number(note.id)}" type="button">删除</button>
+        ` : ''}
+      </div>
+      <span>${escapeHtml(note.content || '')}</span>
+      ${isLatest ? '' : `
+        <div class="note-actions">
+          <button class="ghost-btn" data-edit-note-row-id="${Number(row.id)}" data-edit-note-id="${Number(note.id)}" type="button">修改</button>
+          <button class="ghost-btn" data-delete-note-row-id="${Number(row.id)}" data-delete-note-id="${Number(note.id)}" type="button">删除</button>
+        </div>
+      `}
     </div>
   `;
 }
@@ -332,18 +562,21 @@ function currentWeekStart() {
 function modalView() {
   const editingRow = currentEditingRow();
   const isEditing = Boolean(editingRow);
+  const title = isTrackingView ? '编辑链接跟踪信息' : (isEditing ? '编辑链接刊登提交' : '新增链接刊登提交');
+  const desc = isTrackingView ? '修改后点击保存，链接跟踪清单会同步更新。' : (isEditing ? '修改后点击保存，列表信息会同步更新。' : '记录保存在当前独立模块的数据文件中。');
+  const modalFields = isTrackingView ? trackingEditFields : fields;
   return `
     <div class="modal-backdrop" id="modalBackdrop">
       <section class="modal">
         <header>
           <div>
-            <h2>${isEditing ? '编辑链接刊登提交' : '新增链接刊登提交'}</h2>
-            <p>${isEditing ? '修改后点击保存，列表信息会同步更新。' : '记录保存在当前独立模块的数据文件中。'}</p>
+            <h2>${title}</h2>
+            <p>${desc}</p>
           </div>
           <button class="ghost-btn" id="closeModal" type="button">关闭</button>
         </header>
         <form id="submitForm" class="form-grid">
-          ${fields.map((field) => fieldView(field, editingRow)).join('')}
+          ${modalFields.map((field) => fieldView(field, editingRow)).join('')}
           <footer>
             <div class="error" id="formError"></div>
             <button class="primary-btn" type="submit">${isEditing ? '保存' : '提交'}</button>
@@ -356,6 +589,9 @@ function modalView() {
 
 function currentEditingRow() {
   if (!state.editingId) return null;
+  if (isTrackingView) {
+    return (state.trackingPayload?.submissions || []).find((row) => Number(row.id) === Number(state.editingId)) || null;
+  }
   return (state.payload?.submissions || []).find((row) => Number(row.id) === Number(state.editingId)) || null;
 }
 
@@ -448,6 +684,10 @@ function bind() {
   });
   document.getElementById('downloadTemplateBtn')?.addEventListener('click', isTrackingView ? downloadTrackingImportTemplate : downloadImportTemplate);
   document.getElementById('importFile')?.addEventListener('change', isTrackingView ? importTrackingFile : importFile);
+  document.getElementById('trackingSortSelect')?.addEventListener('change', (event) => {
+    state.trackingSort = event.currentTarget.value || 'default';
+    render();
+  });
   document.getElementById('closeModal')?.addEventListener('click', () => {
     state.modalOpen = false;
     state.editingId = null;
@@ -489,6 +729,30 @@ function bind() {
   document.querySelectorAll('[data-upload-image]').forEach((input) => {
     input.addEventListener('change', uploadProductImage);
   });
+  document.querySelectorAll('[data-tracking-filter]').forEach((input) => {
+    input.addEventListener('change', updateTrackingFilter);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') updateTrackingFilter(event);
+    });
+  });
+  document.querySelectorAll('[data-toggle-filter]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const key = button.dataset.toggleFilter;
+      state.openFilter = state.openFilter === key ? null : key;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-tracking-image-id]').forEach((input) => {
+    input.addEventListener('change', uploadTrackingImage);
+  });
+  document.querySelectorAll('[data-tracking-drop-image]').forEach((node) => {
+    node.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      node.classList.add('drag-over');
+    });
+    node.addEventListener('dragleave', () => node.classList.remove('drag-over'));
+    node.addEventListener('drop', dropTrackingImage);
+  });
   document.querySelectorAll('[data-clear-image]').forEach((button) => {
     button.addEventListener('click', clearProductImage);
   });
@@ -521,6 +785,33 @@ function bind() {
   document.querySelectorAll('[data-note-form-id]').forEach((form) => {
     form.addEventListener('submit', submitTrackingNote);
   });
+  document.querySelectorAll('button[data-edit-note-id]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.editingNote = {
+        rowId: Number(button.dataset.editNoteRowId),
+        noteId: Number(button.dataset.editNoteId),
+      };
+      render();
+    });
+  });
+  document.querySelectorAll('[data-cancel-note-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.editingNote = null;
+      render();
+    });
+  });
+  document.querySelectorAll('[data-edit-note-row-id]').forEach((form) => {
+    if (form.tagName === 'FORM') form.addEventListener('submit', submitEditedTrackingNote);
+  });
+  document.querySelectorAll('[data-delete-note-id]').forEach((button) => {
+    button.addEventListener('click', () => deleteTrackingNote(Number(button.dataset.deleteNoteRowId), Number(button.dataset.deleteNoteId)));
+  });
+  document.querySelectorAll('[data-save-row-id]').forEach((button) => {
+    button.addEventListener('click', () => saveTrackingRow(Number(button.dataset.saveRowId)));
+  });
+  document.querySelectorAll('[data-delete-row-id]').forEach((button) => {
+    button.addEventListener('click', () => deleteTrackingRow(Number(button.dataset.deleteRowId)));
+  });
 }
 
 async function updateRowStatus(id, status) {
@@ -533,6 +824,84 @@ async function updateRowStatus(id, status) {
     alert('状态保存失败');
   }
   await loadSubmissions();
+}
+
+function updateTrackingFilter(event) {
+  const key = event.currentTarget.dataset.trackingFilter;
+  if (!key) return;
+  state.trackingFilters[key] = event.currentTarget.value;
+  if (!event.currentTarget.value) delete state.trackingFilters[key];
+  render();
+}
+
+function readImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('图片读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function saveTrackingImage(id, file) {
+  if (!file) return;
+  try {
+    const image = await readImageFile(file);
+    await saveTrackingRow(id, { product_image: image });
+  } catch (error) {
+    alert(error.message || '图片上传失败');
+  }
+}
+
+function uploadTrackingImage(event) {
+  saveTrackingImage(Number(event.currentTarget.dataset.trackingImageId), event.currentTarget.files?.[0]);
+  event.currentTarget.value = '';
+}
+
+function dropTrackingImage(event) {
+  event.preventDefault();
+  const node = event.currentTarget;
+  node.classList.remove('drag-over');
+  saveTrackingImage(Number(node.dataset.trackingDropImage), event.dataTransfer?.files?.[0]);
+}
+
+async function saveTrackingRow(id, extraPayload = null) {
+  const row = (state.trackingPayload?.submissions || []).find((item) => Number(item.id) === Number(id));
+  if (!row && !extraPayload) return;
+  const payload = extraPayload || {
+    submit_date: row.submit_date || '',
+    product_image: row.product_image || '',
+    product_name: row.product_name || row.product_keywords || '',
+    product_keywords: row.product_keywords || row.product_name || row.amazon_asin || '',
+    brand: row.brand || '',
+    store_name: row.store_name || '',
+    price_jp: row.price_jp || '',
+    submitter_name: row.submitter_name || '',
+    amazon_asin: row.amazon_asin || '',
+    product_sku: row.product_sku || '',
+    source_url: row.source_url || '',
+    product_note: row.product_note || '',
+  };
+  const response = await fetch(`./api/tracking/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    alert((await response.json().catch(() => ({}))).error || '链接信息保存失败');
+    return;
+  }
+  await loadTracking();
+}
+
+async function deleteTrackingRow(id) {
+  if (!confirm('确定删除这条链接跟踪记录吗？')) return;
+  const response = await fetch(`./api/tracking/${id}`, { method: 'DELETE' });
+  if (!response.ok) {
+    alert((await response.json().catch(() => ({}))).error || '删除失败');
+    return;
+  }
+  await loadTracking();
 }
 
 function parseCsv(text) {
@@ -928,19 +1297,53 @@ async function submitTrackingNote(event) {
   await loadTracking();
 }
 
+async function submitEditedTrackingNote(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const rowId = Number(form.dataset.editNoteRowId);
+  const noteId = Number(form.dataset.editNoteId);
+  const formData = new FormData(form);
+  const response = await fetch(`./api/tracking/${rowId}/notes/${noteId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      week_start: String(formData.get('week_start') || '').trim(),
+      content: String(formData.get('content') || '').trim(),
+    }),
+  });
+  if (!response.ok) {
+    alert((await response.json().catch(() => ({}))).error || '备注保存失败');
+    return;
+  }
+  state.editingNote = null;
+  await loadTracking();
+}
+
+async function deleteTrackingNote(rowId, noteId) {
+  if (!confirm('确定删除这条备注吗？')) return;
+  const response = await fetch(`./api/tracking/${rowId}/notes/${noteId}`, { method: 'DELETE' });
+  if (!response.ok) {
+    alert((await response.json().catch(() => ({}))).error || '备注删除失败');
+    return;
+  }
+  await loadTracking();
+}
+
 async function submitForm(event) {
   event.preventDefault();
   const error = document.getElementById('formError');
   if (error) error.textContent = '';
   const formData = new FormData(event.currentTarget);
   const payload = {};
-  fields.forEach((field) => {
+  const submitFields = isTrackingView ? trackingEditFields : fields;
+  submitFields.forEach((field) => {
     payload[field.key] = String(formData.get(field.key) || '').trim();
   });
-  payload.submitter_name = String(state.currentUser?.name || '').trim();
-  if (!payload.sample_status) payload.sample_status = '链接刊登提交';
+  if (!isTrackingView) payload.submitter_name = String(state.currentUser?.name || '').trim();
+  if (!isTrackingView && !payload.sample_status) payload.sample_status = '链接刊登提交';
   const editingId = state.editingId;
-  const response = await fetch(editingId ? `./api/submissions/${editingId}` : './api/submissions', {
+  const url = isTrackingView && editingId ? `./api/tracking/${editingId}` : (editingId ? `./api/submissions/${editingId}` : './api/submissions');
+  const response = await fetch(url, {
     method: editingId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -952,7 +1355,8 @@ async function submitForm(event) {
   }
   state.modalOpen = false;
   state.editingId = null;
-  await loadSubmissions();
+  if (isTrackingView) await loadTracking();
+  else await loadSubmissions();
 }
 
 async function bootstrap() {

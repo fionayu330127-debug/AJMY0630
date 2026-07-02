@@ -85,6 +85,63 @@ function isTrackingRow(row) {
   return isTrackingOnly(row) || normalizeStatus(row.sample_status) === statusByKey.converted;
 }
 
+function canEditTrackingNote(user, row) {
+  const userName = String(user?.name || '').trim();
+  return isManager(user) || !row.tracking_owner || row.tracking_owner === userName;
+}
+
+function isRecentTrackingRow(row, now = Date.now()) {
+  const time = new Date(row.created_at || row.submit_date || 0).getTime();
+  if (!Number.isFinite(time)) return false;
+  return now - time <= 30 * 24 * 60 * 60 * 1000;
+}
+
+function compareTrackingRows(a, b) {
+  const now = Date.now();
+  const recentDiff = Number(isRecentTrackingRow(b, now)) - Number(isRecentTrackingRow(a, now));
+  if (recentDiff) return recentDiff;
+  const starsDiff = Number(b.tracking_stars || 0) - Number(a.tracking_stars || 0);
+  if (starsDiff) return starsDiff;
+  return String(b.updated_at || b.created_at).localeCompare(String(a.updated_at || a.created_at));
+}
+
+async function notifyListerAssigned(row) {
+  const webhook = String(process.env.QYWX_LINK_LISTING_WEBHOOK || '').trim();
+  const lister = String(row.lister || '').trim();
+  if (!webhook || !lister) return;
+
+  const productName = String(row.product_name || row.product_keywords || '-').trim();
+  const brand = String(row.brand || '-').trim();
+  const store = String(row.store_name || '-').trim();
+  const submitter = String(row.submitter_name || '-').trim();
+  const submitDate = String(row.submit_date || '').slice(0, 10) || '-';
+  const content = [
+    '### 新增链接刊登任务',
+    `> 刊登人：<font color="warning">${lister}</font>`,
+    `> 产品名称：${productName}`,
+    `> 品牌：${brand}`,
+    `> 店铺：${store}`,
+    `> 提交日期：${submitDate}`,
+    `> 提交人：${submitter}`,
+  ].join('\n');
+
+  try {
+    const response = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        msgtype: 'markdown',
+        markdown: { content },
+      }),
+    });
+    if (!response.ok) {
+      console.error('notify lister assigned failed', response.status, await response.text());
+    }
+  } catch (error) {
+    console.error('notify lister assigned failed', error);
+  }
+}
+
 function normalizeTrackingImportRow(item) {
   const source = item || {};
   const read = (...keys) => {
@@ -412,6 +469,7 @@ app.post('/api/submissions', async (req, res) => {
   };
   rows.push(row);
   await writeSubmissions(rows);
+  notifyListerAssigned(row);
   res.json({ ok: true, submission: row });
 });
 
@@ -499,7 +557,7 @@ app.get('/api/tracking', async (req, res) => {
   res.json({
     user,
     can_manage: isManager(user),
-    submissions: filtered.sort((a, b) => String(b.updated_at || b.created_at).localeCompare(String(a.updated_at || a.created_at))).slice(0, 300),
+    submissions: filtered.sort(compareTrackingRows).slice(0, 300),
   });
 });
 
@@ -554,6 +612,107 @@ app.post('/api/tracking/:id/notes', async (req, res) => {
   row.updated_at = now;
   await writeSubmissions(rows);
   res.json({ ok: true, note, submission: row });
+});
+
+app.patch('/api/tracking/:id', async (req, res) => {
+  const user = await getCurrentUser(req);
+  if (!isManager(user)) return res.status(403).json({ error: '只有管理员和余蓉可以修改链接跟踪信息' });
+
+  const id = Number(req.params.id);
+  const rows = await readSubmissions();
+  const row = rows.find((item) => Number(item.id) === id);
+  if (!row) return res.status(404).json({ error: '链接记录不存在' });
+  if (!isTrackingRow(row)) return res.status(400).json({ error: '只有链接跟踪记录可以修改' });
+
+  const editableFields = [
+    'submit_date',
+    'product_image',
+    'product_name',
+    'product_keywords',
+    'brand',
+    'store_name',
+    'price_jp',
+    'submitter_name',
+    'amazon_asin',
+    'product_sku',
+    'source_url',
+    'product_note',
+  ];
+  editableFields.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+      row[field] = String(req.body[field] || '').trim();
+    }
+  });
+  if (Object.prototype.hasOwnProperty.call(req.body, 'tracking_owner')) {
+    row.tracking_owner = String(req.body.tracking_owner || '').trim();
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body, 'tracking_stars')) {
+    row.tracking_stars = Math.max(0, Math.min(5, Number(req.body.tracking_stars || 0)));
+  }
+  if (!row.product_keywords) row.product_keywords = row.product_name || row.amazon_asin || '历史跟踪链接';
+  row.updated_at = new Date().toISOString();
+  await writeSubmissions(rows);
+  res.json({ ok: true, submission: normalizeTracking(row) });
+});
+
+app.delete('/api/tracking/:id', async (req, res) => {
+  const user = await getCurrentUser(req);
+  if (!isManager(user)) return res.status(403).json({ error: '只有管理员和余蓉可以删除链接跟踪记录' });
+
+  const id = Number(req.params.id);
+  const rows = await readSubmissions();
+  const index = rows.findIndex((item) => Number(item.id) === id);
+  if (index === -1) return res.status(404).json({ error: '链接记录不存在' });
+  if (!isTrackingRow(rows[index])) return res.status(400).json({ error: '只有链接跟踪记录可以删除' });
+
+  rows.splice(index, 1);
+  await writeSubmissions(rows);
+  res.json({ ok: true });
+});
+
+app.patch('/api/tracking/:id/notes/:noteId', async (req, res) => {
+  const user = await getCurrentUser(req);
+  const id = Number(req.params.id);
+  const noteId = Number(req.params.noteId);
+  const rows = await readSubmissions();
+  const row = rows.find((item) => Number(item.id) === id);
+  if (!row) return res.status(404).json({ error: '链接记录不存在' });
+  if (!isTrackingRow(row)) return res.status(400).json({ error: '只有链接跟踪记录可以修改备注' });
+
+  normalizeTracking(row);
+  if (!canEditTrackingNote(user, row)) return res.status(403).json({ error: '只有负责人、管理员和余蓉可以修改备注' });
+  const note = row.tracking_notes.find((item) => Number(item.id) === noteId);
+  if (!note) return res.status(404).json({ error: '备注不存在' });
+
+  const content = String(req.body.content || '').trim();
+  if (!content) return res.status(400).json({ error: '请输入跟踪备注' });
+  note.week_start = String(req.body.week_start || note.week_start || weekStartString()).slice(0, 10);
+  note.content = content;
+  note.updated_at = new Date().toISOString();
+  row.updated_at = note.updated_at;
+  normalizeTracking(row);
+  await writeSubmissions(rows);
+  res.json({ ok: true, note, submission: row });
+});
+
+app.delete('/api/tracking/:id/notes/:noteId', async (req, res) => {
+  const user = await getCurrentUser(req);
+  const id = Number(req.params.id);
+  const noteId = Number(req.params.noteId);
+  const rows = await readSubmissions();
+  const row = rows.find((item) => Number(item.id) === id);
+  if (!row) return res.status(404).json({ error: '链接记录不存在' });
+  if (!isTrackingRow(row)) return res.status(400).json({ error: '只有链接跟踪记录可以删除备注' });
+
+  normalizeTracking(row);
+  if (!canEditTrackingNote(user, row)) return res.status(403).json({ error: '只有负责人、管理员和余蓉可以删除备注' });
+  const before = row.tracking_notes.length;
+  row.tracking_notes = row.tracking_notes.filter((item) => Number(item.id) !== noteId);
+  if (row.tracking_notes.length === before) return res.status(404).json({ error: '备注不存在' });
+
+  row.updated_at = new Date().toISOString();
+  await writeSubmissions(rows);
+  res.json({ ok: true, submission: row });
 });
 
 app.post('/api/tracking/import', async (req, res) => {
