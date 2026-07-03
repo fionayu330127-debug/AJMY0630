@@ -99,16 +99,16 @@ function sampleAssignDetail(sampleId) {
 function latestAssignableSampleForUids(uids) {
   const list = [...new Set((uids || []).map((item) => String(item || '').trim()).filter(Boolean))];
   if (!list.length) return null;
-  const activeStatuses = ['approved', 'shipped', 'published'];
+  const notifyStatuses = ['approved', 'published'];
   const placeholders = list.map(() => '?').join(',');
   return db.prepare(`
     SELECT id
     FROM samples
     WHERE uid IN (${placeholders})
-      AND status IN (${activeStatuses.map(() => '?').join(',')})
+      AND status IN (${notifyStatuses.map(() => '?').join(',')})
     ORDER BY applied_at DESC, id DESC
     LIMIT 1
-  `).get(...list, ...activeStatuses);
+  `).get(...list, ...notifyStatuses);
 }
 
 function markSampleLibraryReady(sampleId) {
@@ -190,6 +190,13 @@ function percentText(value) {
   return String(value);
 }
 
+function isOverdueUnpublishedSample(row) {
+  if (!row?.bd_id || !row?.approve_expiration_at) return false;
+  if (['published', 'rejected', 'cancelled'].includes(String(row.status || ''))) return false;
+  const deadline = new Date(row.approve_expiration_at).getTime();
+  return Number.isFinite(deadline) && deadline < Date.now();
+}
+
 async function syncBdMembersFromEmployees() {
   const { rows } = await corePool.query(`
     SELECT id, name, login_name, phone, wecom_userid, role, status
@@ -259,10 +266,10 @@ async function listBdMembers() {
   });
 }
 
-async function notifyBdAssigned(sampleId) {
-  const webhook = process.env.WECOM_BD_ASSIGN_WEBHOOK || '';
+async function notifyBdAssigned(sampleId, title = '新的样品分配通知') {
+  const webhook = process.env.QYWX_TK_CREATOR_WEBHOOK || process.env.WECOM_BD_ASSIGN_WEBHOOK || '';
   if (!webhook) {
-    console.warn('[wecom] WECOM_BD_ASSIGN_WEBHOOK is empty, skip BD assign notification');
+    console.warn('[wecom] QYWX_TK_CREATOR_WEBHOOK/WECOM_BD_ASSIGN_WEBHOOK is empty, skip BD assign notification');
     return;
   }
 
@@ -278,7 +285,7 @@ async function notifyBdAssigned(sampleId) {
   }
 
   const content = [
-    '### 新的样品分配任务',
+    `### ${title}`,
     `> 达人名称：${detail.creator_name || '-'}`,
     `> TikTok ID：${detail.creator_handle || detail.uid || '-'}`,
     `> 样品名称：${detail.product_name || '-'}`,
@@ -296,6 +303,68 @@ async function notifyBdAssigned(sampleId) {
   } catch (error) {
     console.error(`[wecom] BD assign notification failed for sample ${sampleId}:`, error.message);
   }
+}
+
+async function notifySampleOverdueUnpublished(sampleId) {
+  const webhook = process.env.QYWX_TK_CREATOR_WEBHOOK || process.env.WECOM_BD_ASSIGN_WEBHOOK || '';
+  if (!webhook) {
+    console.warn('[wecom] QYWX_TK_CREATOR_WEBHOOK/WECOM_BD_ASSIGN_WEBHOOK is empty, skip overdue notification');
+    return;
+  }
+
+  const detail = sampleAssignDetail(sampleId);
+  if (!detail) {
+    console.warn(`[wecom] sample not found for overdue notification: ${sampleId}`);
+    return;
+  }
+
+  const mention = detail.wecom_userid ? `<@${detail.wecom_userid}>` : '';
+  const content = [
+    '### 样品超时未发布视频',
+    `> 达人名称：${detail.creator_name || '-'}`,
+    `> TikTok ID：${detail.creator_handle || detail.uid || '-'}`,
+    `> 样品名称：${detail.product_name || '-'}`,
+    `> 截止时间：${detail.approve_expiration_at || '-'}`,
+    `> 负责BD：${detail.bd_name || '-'}`,
+    mention ? `\n${mention}` : '',
+  ].filter(Boolean).join('\n');
+
+  try {
+    await postJson(webhook, {
+      msgtype: 'markdown',
+      markdown: { content },
+    });
+    console.log(`[wecom] overdue unpublished notification sent for sample ${sampleId}`);
+  } catch (error) {
+    console.error(`[wecom] overdue unpublished notification failed for sample ${sampleId}:`, error.message);
+  }
+}
+
+function notifyOverdueUnpublishedSamples(sampleId = null) {
+  const where = [
+    'bd_id IS NOT NULL',
+    'approve_expiration_at IS NOT NULL',
+    "COALESCE(wecom_overdue_notified_at, '') = ''",
+    "status NOT IN ('published', 'rejected', 'cancelled')",
+    "datetime(approve_expiration_at) < datetime('now')",
+  ];
+  const params = [];
+  if (sampleId) {
+    where.push('id = ?');
+    params.push(sampleId);
+  }
+  const rows = db.prepare(`
+    SELECT id
+    FROM samples
+    WHERE ${where.join(' AND ')}
+    LIMIT 20
+  `).all(...params);
+  rows.forEach((row) => {
+    db.prepare('UPDATE samples SET wecom_overdue_notified_at = datetime(\'now\') WHERE id = ?').run(row.id);
+    notifySampleOverdueUnpublished(row.id).catch((error) => {
+      console.error(`[wecom] unexpected overdue notification error for sample ${row.id}:`, error.message);
+    });
+  });
 }
 
 // 把token写进 .env：如果对应的key已存在就替换，不存在就追加一行
@@ -582,6 +651,7 @@ try { db.exec("ALTER TABLE invitation_records ADD COLUMN sample_approval_mode TE
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN sample_apply_link TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE products ADD COLUMN product_url TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN commission_rate REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE samples ADD COLUMN wecom_overdue_notified_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN invitation_record_id INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN assigned_bd_id INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_count_30d INTEGER'); } catch (_) {}
@@ -1708,6 +1778,7 @@ async function syncAllShops(source = 'manual') {
   for (const shop of shops) {
     results.push(await syncOneShop(shop, source));
   }
+  notifyOverdueUnpublishedSamples();
   return {
     source,
     synced_at: nowText(),
@@ -2716,6 +2787,7 @@ app.patch('/api/samples/:id', (req, res) => {
   const allowed = ['status', 'collab_type', 'bd_id', 'note'];
   const updates = [];
   const params = [];
+  const previous = db.prepare('SELECT status, bd_id FROM samples WHERE id = ?').get(id);
 
   for (const key of allowed) {
     if (key in req.body) {
@@ -2728,6 +2800,7 @@ app.patch('/api/samples/:id', (req, res) => {
   params.push(id);
   db.prepare(`UPDATE samples SET ${updates.join(', ')} WHERE id = ?`).run(...params);
   markSampleLibraryReady(id);
+  const current = db.prepare('SELECT status, bd_id FROM samples WHERE id = ?').get(id);
 
   // 如果是分配BD，模拟生成一条通知（实际项目可换成站内信/邮件/webhook）
   if ('bd_id' in req.body && req.body.bd_id) {
@@ -2736,7 +2809,18 @@ app.patch('/api/samples/:id', (req, res) => {
     notifyBdAssigned(id).catch((error) => {
       console.error(`[wecom] unexpected notification error for sample ${id}:`, error.message);
     });
+  } else if (
+    'status' in req.body &&
+    current?.bd_id &&
+    ['approved', 'published'].includes(String(current.status || '')) &&
+    String(current.status || '') !== String(previous?.status || '')
+  ) {
+    console.log(`📨 [通知] 样品 ${id} 状态变为 ${current.status}，通知负责 BD`);
+    notifyBdAssigned(id, current.status === 'published' ? '新的视频已发布' : '新的样品分配通知').catch((error) => {
+      console.error(`[wecom] unexpected status notification error for sample ${id}:`, error.message);
+    });
   }
+  notifyOverdueUnpublishedSamples(id);
 
   res.json({ success: true });
 });
