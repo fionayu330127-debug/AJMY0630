@@ -256,7 +256,7 @@ function dashboardPayload(user) {
       { name: 'WebSocket 消息推送', status: '待接入', tone: 'info' },
       { name: '本地数据库', status: 'PostgreSQL', tone: 'ok' },
       { name: 'TK 达人管理系统', status: '/tk/', tone: 'info' },
-      { name: '库存明细', status: 'http://47.110.59.28/', tone: 'info' },
+      { name: '库存明细', status: 'http://47.110.59.28:5174/inventory', tone: 'info' },
       { name: '库存货件', status: '/inventory/', tone: 'info' },
     ],
     timeline: [
@@ -443,6 +443,291 @@ app.use('/tk', tkApp);
 app.use('/product-test', productTestApp);
 app.use('/ai-draw', aiImageApp);
 app.use('/inventory', inventoryShipmentApp);
+
+const INVENTORY_DETAIL_ORIGIN = 'http://47.110.59.28:5174';
+const INVENTORY_DETAIL_API_ORIGIN = 'http://47.110.59.28:8081';
+const INVENTORY_DETAIL_FALLBACK_CSS = `
+:root {
+  --background: #ffffff;
+  --foreground: #111827;
+  --card: #ffffff;
+  --card-foreground: #111827;
+  --surface: #f8fafc;
+  --muted: #f3f4f6;
+  --muted-foreground: #6b7280;
+  --accent: #eef2ff;
+  --accent-foreground: #1e3a8a;
+  --border: #e5e7eb;
+  --primary: #111827;
+  --destructive: #dc2626;
+  --chart-1: #2563eb;
+  --chart-2: #4f46e5;
+  --chart-3: #0891b2;
+  --chart-4: #059669;
+  --chart-5: #7c3aed;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; font-family: Arial, "Microsoft YaHei", sans-serif; color: var(--foreground); background: var(--background); }
+a { color: inherit; text-decoration: none; }
+svg { display: block; flex-shrink: 0; }
+button, input, select { font: inherit; }
+.flex { display: flex; }
+.grid { display: grid; }
+.hidden { display: none; }
+.inline-flex { display: inline-flex; }
+.h-screen { height: 100vh; }
+.h-full { height: 100%; }
+.h-4 { height: 1rem; }
+.h-8 { height: 2rem; }
+.h-9 { height: 2.25rem; }
+.h-11 { height: 2.75rem; }
+.w-full { width: 100%; }
+.w-48 { width: 12rem; }
+.w-\\[340px\\] { width: 340px; }
+.min-h-0 { min-height: 0; }
+.min-w-0 { min-width: 0; }
+.min-w-\\[1110px\\] { min-width: 1110px; }
+.flex-1 { flex: 1 1 0%; }
+.shrink-0 { flex-shrink: 0; }
+.flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.items-baseline { align-items: baseline; }
+.justify-between { justify-content: space-between; }
+.justify-center { justify-content: center; }
+.gap-1 { gap: .25rem; }
+.gap-2 { gap: .5rem; }
+.gap-3 { gap: .75rem; }
+.gap-4 { gap: 1rem; }
+.gap-x-3 { column-gap: .75rem; }
+.gap-y-1 { row-gap: .25rem; }
+.overflow-hidden { overflow: hidden; }
+.overflow-auto { overflow: auto; }
+.overflow-x-auto { overflow-x: auto; }
+.whitespace-nowrap { white-space: nowrap; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sticky { position: sticky; }
+.top-0 { top: 0; }
+.z-20 { z-index: 20; }
+.p-0 { padding: 0; }
+.p-2 { padding: .5rem; }
+.p-4 { padding: 1rem; }
+.px-3 { padding-left: .75rem; padding-right: .75rem; }
+.px-4 { padding-left: 1rem; padding-right: 1rem; }
+.px-5 { padding-left: 1.25rem; padding-right: 1.25rem; }
+.py-0 { padding-top: 0; padding-bottom: 0; }
+.py-2 { padding-top: .5rem; padding-bottom: .5rem; }
+.py-3 { padding-top: .75rem; padding-bottom: .75rem; }
+.py-4 { padding-top: 1rem; padding-bottom: 1rem; }
+.mt-1 { margin-top: .25rem; }
+.mt-4 { margin-top: 1rem; }
+.border { border: 1px solid var(--border); }
+.border-r { border-right: 1px solid var(--border); }
+.border-b { border-bottom: 1px solid var(--border); }
+.border-t { border-top: 1px solid var(--border); }
+.border-b-0 { border-bottom-width: 0; }
+.rounded-md { border-radius: .5rem; }
+.rounded-lg { border-radius: .625rem; }
+.rounded-xl { border-radius: .75rem; }
+.bg-surface { background: var(--surface); }
+.bg-card { background: var(--card); }
+.bg-muted { background: var(--muted); }
+.bg-muted\\/50 { background: rgba(243, 244, 246, .5); }
+.bg-accent { background: var(--accent); }
+.text-foreground { color: var(--foreground); }
+.text-card-foreground { color: var(--card-foreground); }
+.text-muted-foreground { color: var(--muted-foreground); }
+.text-accent-foreground { color: var(--accent-foreground); }
+.text-primary { color: var(--primary); }
+.text-xs { font-size: .75rem; line-height: 1rem; }
+.text-sm { font-size: .875rem; line-height: 1.25rem; }
+.text-base { font-size: 1rem; line-height: 1.5rem; }
+.text-xl { font-size: 1.25rem; line-height: 1.75rem; }
+.font-medium { font-weight: 500; }
+.font-semibold { font-weight: 600; }
+.tabular-nums { font-variant-numeric: tabular-nums; }
+.table-fixed { table-layout: fixed; }
+.border-separate { border-collapse: separate; }
+.border-spacing-0 { border-spacing: 0; }
+.text-center { text-align: center; }
+.cursor-pointer { cursor: pointer; }
+.transition-colors { transition: color .15s ease, background-color .15s ease, border-color .15s ease; }
+.shadow-sm { box-shadow: 0 1px 2px rgba(15, 23, 42, .06); }
+.shadow-\\[0_1px_0_var\\(--border\\)\\] { box-shadow: 0 1px 0 var(--border); }
+.size-4 { width: 1rem; height: 1rem; }
+.size-6 { width: 1.5rem; height: 1.5rem; }
+.size-9 { width: 2.25rem; height: 2.25rem; }
+.bg-chart-1\\/10 { background: rgba(37, 99, 235, .1); }
+.bg-chart-2\\/10 { background: rgba(79, 70, 229, .1); }
+.bg-chart-3\\/10 { background: rgba(8, 145, 178, .1); }
+.bg-chart-4\\/10 { background: rgba(5, 150, 105, .1); }
+.bg-chart-5\\/10 { background: rgba(124, 58, 237, .1); }
+.border-chart-1\\/20 { border-color: rgba(37, 99, 235, .2); }
+.border-chart-2\\/20 { border-color: rgba(79, 70, 229, .2); }
+.border-chart-3\\/20 { border-color: rgba(8, 145, 178, .2); }
+.border-chart-4\\/20 { border-color: rgba(5, 150, 105, .2); }
+.border-chart-5\\/20 { border-color: rgba(124, 58, 237, .2); }
+.grid-flow-col { grid-auto-flow: column; }
+.auto-cols-\\[minmax\\(172px\\,1fr\\)\\] { grid-auto-columns: minmax(172px, 1fr); }
+[data-slot="card"], .overflow-hidden.rounded-xl.border.bg-card { border: 1px solid var(--border); border-radius: .75rem; background: var(--card); }
+body > .flex.h-screen > aside { display: none !important; }
+body > .flex.h-screen > main { width: 100% !important; flex: 1 1 100% !important; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; }
+th, td { border-bottom: 1px solid var(--border); vertical-align: middle; }
+thead th { background: var(--muted); color: var(--muted-foreground); }
+button { border: 1px solid var(--border); border-radius: .5rem; background: #fff; padding: .35rem .65rem; cursor: pointer; }
+input { border: 1px solid var(--border); border-radius: .5rem; padding: .35rem .65rem; }
+`;
+
+function rewriteInventoryDetailText(text) {
+  return text
+    .replaceAll('/_next/', '/inventory-detail-proxy/_next/')
+    .replaceAll('href="/inventory"', 'href="/inventory-detail-proxy/inventory"')
+    .replaceAll('href="/aba"', 'href="/aba-data-proxy/aba"')
+    .replaceAll('href="/advertising"', 'href="http://47.110.59.28:5174/advertising"')
+    .replaceAll(
+      '"".concat(window.location.protocol,"//").concat(window.location.hostname,":8081")',
+      'window.location.origin+"/inventory-detail-api"',
+    );
+}
+
+function rewriteAbaDataText(text) {
+  return text
+    .replaceAll('/_next/', '/aba-data-proxy/_next/')
+    .replaceAll('href="/inventory"', 'href="/inventory-detail-proxy/inventory"')
+    .replaceAll('href="/aba"', 'href="/aba-data-proxy/aba"')
+    .replaceAll('href="/advertising"', 'href="http://47.110.59.28:5174/advertising"')
+    .replaceAll(
+      '"".concat(window.location.protocol,"//").concat(window.location.hostname,":8081")',
+      'window.location.origin+"/inventory-detail-api"',
+    );
+}
+
+app.get('/inventory-detail-proxy/*', async (req, res) => {
+  try {
+    const targetPath = `/${req.params[0] || ''}`;
+    const targetUrl = new URL(targetPath, INVENTORY_DETAIL_ORIGIN);
+    targetUrl.search = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+    const response = await fetch(targetUrl, {
+      headers: {
+        accept: req.headers.accept || '*/*',
+        'user-agent': req.headers['user-agent'] || 'agimia-erp-shell',
+      },
+    });
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    res.status(response.status);
+    res.setHeader('Cache-Control', contentType.includes('text/html') ? 'no-store' : 'public, max-age=600');
+    res.setHeader('Content-Type', contentType);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (contentType.includes('javascript')) {
+      res.send(rewriteInventoryDetailText(buffer.toString('utf8')));
+      return;
+    }
+    if (!contentType.includes('text/html')) {
+      res.send(buffer);
+      return;
+    }
+    let html = rewriteInventoryDetailText(buffer.toString('utf8'));
+    const cssLinks = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)"[^>]*>/g)];
+    for (const match of cssLinks) {
+      const cssPath = match[1].replace('/inventory-detail-proxy', '');
+      const cssUrl = new URL(cssPath, INVENTORY_DETAIL_ORIGIN);
+      const cssResponse = await fetch(cssUrl);
+      if (!cssResponse.ok) continue;
+      const cssText = (await cssResponse.text()).replaceAll('</style', '<\\/style');
+      html = html.replace(match[0], `<style data-inventory-proxy-css>${cssText}</style>`);
+    }
+    html = html.replace('</head>', `<style data-inventory-proxy-fallback>${INVENTORY_DETAIL_FALLBACK_CSS}</style></head>`);
+    res.send(html);
+  } catch (error) {
+    res.status(502).send(`库存明细加载失败：${error.message || '代理请求失败'}`);
+  }
+});
+
+app.get('/aba-data-proxy/*', async (req, res) => {
+  try {
+    const targetPath = `/${req.params[0] || ''}`;
+    const targetUrl = new URL(targetPath, INVENTORY_DETAIL_ORIGIN);
+    targetUrl.search = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+    const response = await fetch(targetUrl, {
+      headers: {
+        accept: req.headers.accept || '*/*',
+        'user-agent': req.headers['user-agent'] || 'agimia-erp-shell',
+      },
+    });
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    res.status(response.status);
+    res.setHeader('Cache-Control', contentType.includes('text/html') ? 'no-store' : 'public, max-age=600');
+    res.setHeader('Content-Type', contentType);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (contentType.includes('javascript')) {
+      res.send(rewriteAbaDataText(buffer.toString('utf8')));
+      return;
+    }
+    if (!contentType.includes('text/html')) {
+      res.send(buffer);
+      return;
+    }
+    let html = rewriteAbaDataText(buffer.toString('utf8'));
+    const cssLinks = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)"[^>]*>/g)];
+    for (const match of cssLinks) {
+      const cssPath = match[1].replace('/aba-data-proxy', '');
+      const cssUrl = new URL(cssPath, INVENTORY_DETAIL_ORIGIN);
+      const cssResponse = await fetch(cssUrl);
+      if (!cssResponse.ok) continue;
+      const cssText = (await cssResponse.text()).replaceAll('</style', '<\\/style');
+      html = html.replace(match[0], `<style data-aba-proxy-css>${cssText}</style>`);
+    }
+    html = html.replace('</head>', `<style data-aba-proxy-fallback>${INVENTORY_DETAIL_FALLBACK_CSS}</style></head>`);
+    res.send(html);
+  } catch (error) {
+    res.status(502).send(`ABA 数据加载失败：${error.message || '代理请求失败'}`);
+  }
+});
+
+app.all('/inventory-detail-api/*', async (req, res) => {
+  try {
+    const targetUrl = new URL(`/${req.params[0] || ''}`, INVENTORY_DETAIL_API_ORIGIN);
+    targetUrl.search = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+    const response = await fetch(targetUrl, {
+      method: req.method,
+      headers: {
+        accept: req.headers.accept || '*/*',
+        'content-type': req.headers['content-type'] || 'application/json',
+        'user-agent': req.headers['user-agent'] || 'agimia-erp-shell',
+      },
+      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body || {}),
+    });
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    res.status(response.status);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', contentType);
+    res.send(Buffer.from(await response.arrayBuffer()));
+  } catch (error) {
+    res.status(502).json({ error: error.message || '库存明细接口代理失败' });
+  }
+});
+
+app.get('/_next/*', async (req, res) => {
+  try {
+    const targetUrl = new URL(`/_next/${req.params[0] || ''}`, INVENTORY_DETAIL_ORIGIN);
+    targetUrl.search = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+    const response = await fetch(targetUrl, {
+      headers: {
+        accept: req.headers.accept || '*/*',
+        'user-agent': req.headers['user-agent'] || 'agimia-erp-shell',
+      },
+    });
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    res.status(response.status);
+    res.setHeader('Cache-Control', 'public, max-age=600');
+    res.setHeader('Content-Type', contentType);
+    res.send(Buffer.from(await response.arrayBuffer()));
+  } catch (error) {
+    res.status(502).send(`库存明细资源加载失败：${error.message || '代理请求失败'}`);
+  }
+});
+
 app.use(express.static(ROOT, {
   etag: true,
   lastModified: true,
@@ -452,7 +737,7 @@ app.use(express.static(ROOT, {
       return;
     }
     if (/\.(?:js|css)$/i.test(filePath)) {
-      res.setHeader('Cache-Control', 'public, max-age=600');
+      res.setHeader('Cache-Control', 'no-cache');
       return;
     }
     res.setHeader('Cache-Control', 'no-cache');
