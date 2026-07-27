@@ -668,17 +668,7 @@ app.get('/aba-data-proxy/*', async (req, res) => {
       res.send(buffer);
       return;
     }
-    let html = rewriteAbaDataText(buffer.toString('utf8'));
-    const cssLinks = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)"[^>]*>/g)];
-    for (const match of cssLinks) {
-      const cssPath = match[1].replace('/aba-data-proxy', '');
-      const cssUrl = new URL(cssPath, INVENTORY_DETAIL_ORIGIN);
-      const cssResponse = await fetch(cssUrl);
-      if (!cssResponse.ok) continue;
-      const cssText = (await cssResponse.text()).replaceAll('</style', '<\\/style');
-      html = html.replace(match[0], `<style data-aba-proxy-css>${cssText}</style>`);
-    }
-    res.send(html);
+    res.send(rewriteAbaDataText(buffer.toString('utf8')));
   } catch (error) {
     res.status(502).send(`ABA 数据加载失败：${error.message || '代理请求失败'}`);
   }
