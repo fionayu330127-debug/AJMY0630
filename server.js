@@ -678,7 +678,6 @@ app.get('/aba-data-proxy/*', async (req, res) => {
       const cssText = (await cssResponse.text()).replaceAll('</style', '<\\/style');
       html = html.replace(match[0], `<style data-aba-proxy-css>${cssText}</style>`);
     }
-    html = html.replace('</head>', `<style data-aba-proxy-fallback>${INVENTORY_DETAIL_FALLBACK_CSS}</style></head>`);
     res.send(html);
   } catch (error) {
     res.status(502).send(`ABA 数据加载失败：${error.message || '代理请求失败'}`);
