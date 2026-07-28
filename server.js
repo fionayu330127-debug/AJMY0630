@@ -5,11 +5,13 @@ const crypto = require('node:crypto');
 const { Pool } = require('pg');
 
 const TK_DIR = path.join(__dirname, 'modules', 'tk-creator-system');
+const ABA_DATA_DIR = path.join(__dirname, 'modules', 'aba-data-system');
 const PRODUCT_TEST_DIR = path.join(__dirname, 'product-test-system');
 const AI_IMAGE_DIR = path.join(__dirname, 'ai-image-system');
 const INVENTORY_SHIPMENT_DIR = path.join(__dirname, 'inventory-shipment-system');
 const express = require('express');
 const tkApp = require(path.join(TK_DIR, 'server.js'));
+const abaDataApp = require(path.join(ABA_DATA_DIR, 'server.js'));
 const tkDb = require(path.join(TK_DIR, 'db.js'));
 const productTestApp = require(path.join(PRODUCT_TEST_DIR, 'server.js'));
 const aiImageApp = require(path.join(AI_IMAGE_DIR, 'server.js'));
@@ -441,6 +443,7 @@ app.get('/healthz', (req, res) => {
 productTestApp.getCurrentUser = getSessionUser;
 app.use('/tk', tkApp);
 app.use('/product-test', productTestApp);
+app.use('/aba-data', abaDataApp);
 app.use('/ai-draw', aiImageApp);
 app.use('/inventory', inventoryShipmentApp);
 

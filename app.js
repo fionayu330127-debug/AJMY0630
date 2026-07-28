@@ -85,7 +85,7 @@ const navGroups = [
     title: '选品中心',
     icon: '选',
     items: [
-      { id: 'aba-data', label: 'ABA 数据', externalUrl: 'http://47.110.59.28:5174/aba' },
+      { id: 'aba-data', label: 'ABA 数据' },
       { id: 'tk-trend', label: 'TK trend' },
     ],
   },
@@ -390,13 +390,13 @@ function modulePanel(active) {
       <section class="panel work-panel">
         <div class="panel-head">
           <h3>ABA 数据</h3>
-          <small>http://47.110.59.28:5174/aba</small>
+          <small>/aba-data/</small>
         </div>
         <div class="module-frame">
-          <iframe src="http://47.110.59.28:5174/aba" title="ABA 数据"></iframe>
+          <iframe src="/aba-data/?v=20260728" title="ABA 数据"></iframe>
         </div>
         <div class="footer-row">
-          <span>ABA 数据模块已同步到选品中心。</span>
+          <span>ABA 数据模块已作为独立模块接入选品中心。</span>
           <a href="http://47.110.59.28:5174/aba" target="_blank" rel="noopener">模块链接：http://47.110.59.28:5174/aba</a>
         </div>
       </section>
