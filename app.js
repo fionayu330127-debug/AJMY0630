@@ -393,7 +393,7 @@ function modulePanel(active) {
           <small>http://47.110.59.28:5174/aba</small>
         </div>
         <div class="module-frame">
-          <iframe src="/aba-data-proxy/aba" title="ABA 数据"></iframe>
+          <iframe src="http://47.110.59.28:5174/aba" title="ABA 数据"></iframe>
         </div>
         <div class="footer-row">
           <span>ABA 数据模块已同步到选品中心。</span>
