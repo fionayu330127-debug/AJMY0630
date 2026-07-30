@@ -7,6 +7,44 @@ body > .flex.h-screen > main {
   width: 100% !important;
   flex: 1 1 100% !important;
 }
+nav[aria-label="pagination"] {
+  display: flex !important;
+  width: auto !important;
+  align-items: center !important;
+  margin: 0 !important;
+}
+nav[aria-label="pagination"] ul {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  gap: 4px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  list-style: none !important;
+}
+nav[aria-label="pagination"] li {
+  display: block !important;
+  margin: 0 !important;
+  list-style: none !important;
+}
+nav[aria-label="pagination"] a {
+  display: inline-flex !important;
+  min-width: 32px !important;
+  height: 32px !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 0 8px !important;
+  border-radius: 6px !important;
+  text-decoration: none !important;
+}
+div:has(> nav[aria-label="pagination"]) {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-end !important;
+  gap: 12px !important;
+  white-space: nowrap !important;
+}
 `;
 
 async function preserveAbaStyles() {
