@@ -1,6 +1,13 @@
 const frame = document.getElementById('abaFrame');
 const loading = document.getElementById('abaLoading');
 let styleObserver = null;
+const embedCss = `
+body > .flex.h-screen > aside { display: none !important; }
+body > .flex.h-screen > main {
+  width: 100% !important;
+  flex: 1 1 100% !important;
+}
+`;
 
 async function preserveAbaStyles() {
   const doc = frame.contentDocument;
@@ -20,7 +27,7 @@ async function preserveAbaStyles() {
     if (doc.getElementById('aba-persistent-styles')) return;
     const style = doc.createElement('style');
     style.id = 'aba-persistent-styles';
-    style.textContent = cssText;
+    style.textContent = `${cssText}\n${embedCss}`;
     doc.head.appendChild(style);
   };
 
