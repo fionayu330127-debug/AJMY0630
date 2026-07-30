@@ -679,7 +679,7 @@ app.get('/aba-data-proxy/*', async (req, res) => {
       const cssResponse = await fetch(cssUrl);
       if (!cssResponse.ok) continue;
       const cssText = (await cssResponse.text()).replaceAll('</style', '<\\/style');
-      html = html.replace(match[0], `<style data-aba-proxy-css>${cssText}</style>`);
+      html = html.replace(match[0], `<style data-aba-proxy-css>${cssText}</style>${match[0]}`);
     }
     res.send(html);
   } catch (error) {
