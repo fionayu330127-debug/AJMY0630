@@ -2645,7 +2645,8 @@ app.get('/api/data/bd-report', async (req, res) => {
   const scopedSamples = allSamples.filter(validOwner);
   const periodSamples = scopedSamples.filter((sample) => inRange(sample.applied_at));
   const acceptedStatuses = new Set(['approved', 'assigned', 'shipped', 'published']);
-  const isNew = (sample) => String(firstSampleByUid.get(sample.uid) || '') === String(sample.applied_at || '');
+  const sqliteTime = (value) => value ? String(value).replace('T', ' ').slice(0, 19) : '';
+  const isNew = (sample) => sqliteTime(firstSampleByUid.get(sample.uid)) === sqliteTime(sample.applied_at);
   const publishedAt = (sample) => sample.published_at || (sample.status === 'published' ? sample.synced_at || sample.library_added_at : null);
 
   const handleOwners = new Map();
@@ -2654,10 +2655,11 @@ app.get('/api/data/bd-report', async (req, res) => {
     if (handle && sample.owner_bd_id) handleOwners.set(handle, Number(sample.owner_bd_id));
   });
   const orderWhere = ['order_created_at >= ?', 'order_created_at < ?'];
-  const orderArgs = [startText, endText];
+  const orderArgs = [sqlDate(previousStart), endText];
   if (shop !== 'all') { orderWhere.push('shop_id = ?'); orderArgs.push(shop); }
-  let periodOrders = db.prepare(`SELECT * FROM affiliate_orders WHERE ${orderWhere.join(' AND ')}`).all(...orderArgs);
-  if (bdId) periodOrders = periodOrders.filter((order) => handleOwners.get(normalizeCreatorHandle(order.creator_username)) === bdId);
+  let rangeOrders = db.prepare(`SELECT * FROM affiliate_orders WHERE ${orderWhere.join(' AND ')}`).all(...orderArgs);
+  if (bdId) rangeOrders = rangeOrders.filter((order) => handleOwners.get(normalizeCreatorHandle(order.creator_username)) === bdId);
+  const periodOrders = rangeOrders.filter((order) => inRange(order.order_created_at));
 
   const summarize = (samples, orders) => {
     const targeted = samples.filter((s) => s.collab_type === 'targeted');
@@ -2706,7 +2708,9 @@ app.get('/api/data/bd-report', async (req, res) => {
       const fulfilled = received.filter((s) => publishedAt(s) && new Date(publishedAt(s)).getTime() <= new Date(s.sample_received_at).getTime() + 7 * 86400000);
       const handles = new Set(typed.map((s) => normalizeCreatorHandle(s.creator_handle)).filter(Boolean));
       const orders = periodOrders.filter((o) => handles.has(normalizeCreatorHandle(o.creator_username)));
-      conversionRows.push({ bdId: id, name: bdMap.get(id) || `BD ${id}`, type, samples: typed.filter((s) => acceptedStatuses.has(s.status)).length, fulfillmentRate: received.length ? Math.round(new Set(fulfilled.map((s) => s.uid)).size / new Set(received.map((s) => s.uid)).size * 1000) / 10 : null, videos: typed.filter((s) => s.status === 'published' && inRange(publishedAt(s))).length, conversions: new Set(orders.map((o) => o.external_order_id)).size });
+      const receivedCreators = new Set(received.map((s) => s.uid)).size;
+      const fulfilledCreators = new Set(fulfilled.map((s) => s.uid)).size;
+      conversionRows.push({ bdId: id, name: bdMap.get(id) || `BD ${id}`, type, samples: typed.filter((s) => acceptedStatuses.has(s.status)).length, receivedCreators, fulfilledCreators, fulfillmentRate: receivedCreators ? Math.round(fulfilledCreators / receivedCreators * 1000) / 10 : null, videos: typed.filter((s) => s.status === 'published' && inRange(publishedAt(s))).length, conversions: new Set(orders.map((o) => o.external_order_id)).size });
     });
   });
 
@@ -2720,12 +2724,25 @@ app.get('/api/data/bd-report', async (req, res) => {
     trends.push({ key: fromText.slice(0, 7), label: `${from.getUTCMonth() + 1}月`, ...summarize(monthSamples, monthOrders) });
   }
   const previousSamples = scopedSamples.filter((s) => inRange(s.applied_at, sqlDate(previousStart), startText));
-  const previous = summarize(previousSamples, []);
+  const previousOrders = rangeOrders.filter((order) => inRange(order.order_created_at, sqlDate(previousStart), startText));
+  const previous = summarize(previousSamples, previousOrders);
   const byBd = inviteRows.map((row) => {
     const detail = conversionRows.filter((item) => item.bdId === row.bdId);
-    return { bdId: row.bdId, name: row.name, invites: row.targetedInvites + row.openInvites, samples: detail.reduce((n, x) => n + x.samples, 0), fulfillment: detail.reduce((n, x) => n + (x.fulfillmentRate || 0), 0) / Math.max(detail.filter((x) => x.fulfillmentRate != null).length, 1), videos: detail.reduce((n, x) => n + x.videos, 0), conversions: detail.reduce((n, x) => n + x.conversions, 0) };
+    const received = detail.reduce((n, x) => n + x.receivedCreators, 0);
+    const fulfilled = detail.reduce((n, x) => n + x.fulfilledCreators, 0);
+    return { bdId: row.bdId, name: row.name, invites: row.targetedInvites + row.openInvites, samples: detail.reduce((n, x) => n + x.samples, 0), fulfillment: received ? Math.round(fulfilled / received * 1000) / 10 : 0, videos: detail.reduce((n, x) => n + x.videos, 0), conversions: detail.reduce((n, x) => n + x.conversions, 0) };
   });
-  res.json({ filters: { shop, bd: bdId || 'all', period, start: startText, end: endText }, metrics, previous, bds: [...bdMap].map(([id, name]) => ({ id, name })), inviteRows, conversionRows, trends, byBd });
+  const trendSeries = selectedBdIds.map((id) => ({
+    bdId: id,
+    name: bdMap.get(id) || `BD ${id}`,
+    values: trends.map((trend) => {
+      const monthSamples = scopedSamples.filter((s) => Number(s.owner_bd_id) === id && inRange(s.applied_at, `${trend.key}-01 00:00:00`, sqlDate(new Date(Date.UTC(Number(trend.key.slice(0, 4)), Number(trend.key.slice(5, 7)), 1)))));
+      const handles = new Set(monthSamples.map((s) => normalizeCreatorHandle(s.creator_handle)).filter(Boolean));
+      const monthOrders = periodOrders.filter((o) => inRange(o.order_created_at, `${trend.key}-01 00:00:00`, sqlDate(new Date(Date.UTC(Number(trend.key.slice(0, 4)), Number(trend.key.slice(5, 7)), 1)))) && handles.has(normalizeCreatorHandle(o.creator_username)));
+      return { key: trend.key, label: trend.label, ...summarize(monthSamples, monthOrders) };
+    }),
+  }));
+  res.json({ filters: { shop, bd: bdId || 'all', period, start: startText, end: endText }, metrics, previous, bds: [...bdMap].map(([id, name]) => ({ id, name })), inviteRows, conversionRows, trends, trendSeries, byBd });
 });
 
 app.get('/api/data/overview', async (req, res) => {

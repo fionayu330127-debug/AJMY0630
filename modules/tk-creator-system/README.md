@@ -151,6 +151,23 @@ tk-creator-system/data/tk-creator.db
 1. **接入 TikTok Shop 真实 API** —— 替换"新建样品申请"为自动从 TikTok 后台拉取
 2. **Webhook 实时推送** —— 新样品/新订单自动写入，无需手动点「刷新」
 3. **数据中心模块** —— BD月报、出单统计、自动通知规则
+
+### BD 报表指标口径
+
+接口：`GET /api/data/bd-report?bd=all&period=month&shop=all`。三个筛选条件共同作用于指标卡、明细表和图表；时间按自然月，BD 优先取 `samples.bd_id`，为空时取 `creator_library.bd_id`。
+
+| 指标 | 数据表和字段 | 聚合口径 |
+| --- | --- | --- |
+| 新增定邀达人 | `samples.uid/collab_type/applied_at` | 时间段内 `collab_type = 'targeted'` 的去重达人 |
+| 新增公开邀约 | `samples.uid/collab_type/applied_at` | 时间段内 `collab_type = 'open'` 的去重达人 |
+| 总负责达人数 | `samples.uid/bd_id`, `creator_library.bd_id` | 截止期末已归属所选 BD 的去重达人 |
+| 邀约接受率 | `samples.uid/collab_type/status` | 定邀中状态为 `approved/assigned/shipped/published` 的去重达人数 / 定邀去重达人数 |
+| 新增样品合作 | `samples.id/status/applied_at` | 时间段内状态为 `approved/assigned/shipped/published` 的合作记录数 |
+| 达人履约率 | `samples.uid/sample_received_at/published_at` | 签收后 7 天内发布的去重达人数 / 已签收去重达人数 |
+| 视频发布数量 | `samples.id/status/published_at` | 时间段内变为 `published` 的合作记录数，一条合作记录计一个视频 |
+| 订单转化量 | `affiliate_orders.external_order_id/creator_username/order_created_at` | 按达人账号关联 BD 后，对时间段内订单号去重计数 |
+
+新达人指该 `uid` 的本次 `samples.applied_at` 等于全库最早样品合作时间；老达人指此前已有更早的 `samples` 记录。首次合作判断跨店铺。报表请求直接聚合 `data/tk-creator.db`，不使用前端模拟数据。
 4. **登录权限** —— 区分管理员和 BD 账号，BD 只能看到分配给自己的达人
 5. **超时提醒 / 自动星级规则** —— 定时任务自动检测、自动打标
 
