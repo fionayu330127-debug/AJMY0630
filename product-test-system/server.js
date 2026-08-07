@@ -61,6 +61,15 @@ function isManager(user) {
   return user?.role === 'admin' || user?.name === '余蓉';
 }
 
+function canEditTrackingAds(user) {
+  return isManager(user) || user?.role === 'member';
+}
+
+function onlyUpdatesTrackingAds(body) {
+  const keys = Object.keys(body || {});
+  return keys.length > 0 && keys.every((key) => key === 'ads_enabled');
+}
+
 function weekStartString(date = new Date()) {
   const current = new Date(date);
   current.setHours(0, 0, 0, 0);
@@ -662,6 +671,62 @@ app.get('/api/tracking', async (req, res) => {
   });
 });
 
+app.post('/api/tracking', async (req, res) => {
+  const user = await getCurrentUser(req);
+  if (!isManager(user)) return res.status(403).json({ error: '只有管理员和余蓉可以新增链接跟踪记录' });
+
+  const productName = String(req.body.product_name || req.body.product_keywords || '').trim();
+  const asin = String(req.body.amazon_asin || '').trim();
+  if (!productName && !asin) return res.status(400).json({ error: '请输入产品名称或亚马逊ASIN' });
+
+  const now = new Date().toISOString();
+  const userName = String(user?.name || req.body.submitter_name || '').trim() || '链接跟踪模块';
+  const stars = Number(req.body.tracking_stars || 0);
+  const trackingNote = String(req.body.product_note || req.body.tracking_note || '').trim();
+  const rows = await readSubmissions();
+  const row = {
+    id: rows.reduce((max, item) => Math.max(max, Number(item.id || 0)), 0) + 1,
+    tracking_only: true,
+    sample_status: statusByKey.converted,
+    listing_status: '',
+    urgency: '',
+    submit_date: String(req.body.submit_date || '').trim(),
+    developer: '',
+    lister: String(req.body.tracking_owner || '').trim(),
+    product_name: productName || asin,
+    product_keywords: productName || asin || '历史跟踪链接',
+    brand: String(req.body.brand || '').trim(),
+    store_name: String(req.body.store_name || '').trim(),
+    variant_name: '',
+    source_url: String(req.body.source_url || '').trim(),
+    product_image: String(req.body.product_image || req.body.image_url || '').trim(),
+    product_note: '',
+    price_jp: String(req.body.price_jp || req.body.sale_price_jp || '').trim(),
+    erp_listed: '',
+    direct_review: '',
+    ads_enabled: String(req.body.ads_enabled || '').trim(),
+    amazon_asin: asin,
+    product_sku: String(req.body.product_sku || '').trim(),
+    submitter_name: userName,
+    review_note: '链接跟踪手动新增',
+    created_at: now,
+    updated_at: now,
+    tracking_owner: String(req.body.tracking_owner || '').trim(),
+    tracking_stars: Number.isFinite(stars) ? Math.max(0, Math.min(5, stars)) : 0,
+    tracking_notes: trackingNote ? [{
+      id: Date.now(),
+      week_start: weekStartString(),
+      content: trackingNote,
+      author: userName,
+      created_at: now,
+    }] : [],
+  };
+
+  rows.push(row);
+  await writeSubmissions(rows);
+  res.json({ ok: true, submission: normalizeTracking(row) });
+});
+
 app.patch('/api/tracking/:id/meta', async (req, res) => {
   const user = await getCurrentUser(req);
   if (!isManager(user)) return res.status(403).json({ error: '只有管理员和余蓉可以修改星级和负责人' });
@@ -684,7 +749,9 @@ app.patch('/api/tracking/:id/meta', async (req, res) => {
   await writeSubmissions(rows);
   const nextOwner = String(row.tracking_owner || '').trim();
   if (isManager(user) && previousOwner !== nextOwner) {
-    await notifyTrackingOwnerChanged(row, previousOwner, nextOwner, user);
+    notifyTrackingOwnerChanged(row, previousOwner, nextOwner, user).catch((error) => {
+      console.error('notify tracking owner changed failed', error);
+    });
   }
   res.json({ ok: true, submission: row });
 });
@@ -722,7 +789,10 @@ app.post('/api/tracking/:id/notes', async (req, res) => {
 
 app.patch('/api/tracking/:id', async (req, res) => {
   const user = await getCurrentUser(req);
-  if (!isManager(user)) return res.status(403).json({ error: '只有管理员和余蓉可以修改链接跟踪信息' });
+  const adsOnly = onlyUpdatesTrackingAds(req.body);
+  if (!isManager(user) && !(adsOnly && canEditTrackingAds(user))) {
+    return res.status(403).json({ error: '只有管理员和成员可以修改是否开广告，其他链接跟踪信息仅管理员和余蓉可以修改' });
+  }
 
   const id = Number(req.params.id);
   const rows = await readSubmissions();
@@ -730,7 +800,7 @@ app.patch('/api/tracking/:id', async (req, res) => {
   if (!row) return res.status(404).json({ error: '链接记录不存在' });
   if (!isTrackingRow(row)) return res.status(400).json({ error: '只有链接跟踪记录可以修改' });
 
-  const editableFields = [
+  const editableFields = isManager(user) ? [
     'submit_date',
     'product_image',
     'product_name',
@@ -742,17 +812,18 @@ app.patch('/api/tracking/:id', async (req, res) => {
     'amazon_asin',
     'product_sku',
     'source_url',
+    'ads_enabled',
     'product_note',
-  ];
+  ] : ['ads_enabled'];
   editableFields.forEach((field) => {
     if (Object.prototype.hasOwnProperty.call(req.body, field)) {
       row[field] = String(req.body[field] || '').trim();
     }
   });
-  if (Object.prototype.hasOwnProperty.call(req.body, 'tracking_owner')) {
+  if (isManager(user) && Object.prototype.hasOwnProperty.call(req.body, 'tracking_owner')) {
     row.tracking_owner = String(req.body.tracking_owner || '').trim();
   }
-  if (Object.prototype.hasOwnProperty.call(req.body, 'tracking_stars')) {
+  if (isManager(user) && Object.prototype.hasOwnProperty.call(req.body, 'tracking_stars')) {
     row.tracking_stars = Math.max(0, Math.min(5, Number(req.body.tracking_stars || 0)));
   }
   if (!row.product_keywords) row.product_keywords = row.product_name || row.amazon_asin || '历史跟踪链接';

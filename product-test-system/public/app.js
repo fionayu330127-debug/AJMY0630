@@ -13,6 +13,7 @@ const state = {
   importing: false,
   noteRowId: null,
   editingNote: null,
+  loadError: '',
   trackingFilters: {},
   openFilter: null,
   trackingSort: 'default',
@@ -67,6 +68,7 @@ const trackingEditFields = [
   { key: 'submitter_name', label: '提交人' },
   { key: 'tracking_stars', label: '星级', type: 'select', options: ['0', '1', '2', '3', '4', '5'] },
   { key: 'amazon_asin', label: '亚马逊ASIN' },
+  { key: 'ads_enabled', label: '是否开广告', type: 'select', options: ['', '否', '是'] },
   { key: 'product_note', label: '跟踪备注', multiline: true, wide: true },
 ];
 
@@ -167,6 +169,7 @@ function render() {
 }
 
 function rowsView(rows) {
+  if (state.loadError) return `<tr><td colspan="13"><div class="empty">${escapeHtml(state.loadError)}</div></td></tr>`;
   if (!rows.length) return '<tr><td colspan="13"><div class="empty">暂无链接刊登提交记录</div></td></tr>';
   return rows.map((row) => `
     <tr>
@@ -228,6 +231,7 @@ function renderTracking() {
           <button class="ghost-btn" id="reloadBtn" type="button">刷新清单</button>
           <button class="ghost-btn" id="downloadTemplateBtn" type="button">下载导入模板</button>
           <button class="ghost-btn" id="importBtn" type="button">${state.importing ? '导入中...' : '导入'}</button>
+          ${canManageTracking() ? '<button class="primary-btn" id="addTrackingBtn" type="button">新增链接跟踪</button>' : ''}
           <input id="importFile" type="file" accept=".csv,.json,application/json,text/csv" hidden>
         </div>
       </header>
@@ -261,11 +265,12 @@ function renderTracking() {
               ${trackingHeaderCell('星级', 'tracking_stars', 'stars')}
               <th>亚马逊ASIN</th>
               ${trackingHeaderCell('跟踪备注', 'tracking_note_week', 'week-date')}
+              ${trackingHeaderCell('是否开广告', 'ads_enabled', 'values')}
               <th>创建时间</th>
               <th>操作</th>
             </tr>
           </thead>
-          <tbody>${state.trackingPayload ? trackingRowsView(rows) : '<tr><td colspan="13"><div class="empty">正在加载链接跟踪清单...</div></td></tr>'}</tbody>
+          <tbody>${state.trackingPayload ? trackingRowsView(rows) : '<tr><td colspan="14"><div class="empty">正在加载链接跟踪清单...</div></td></tr>'}</tbody>
         </table>
       </section>
       ${state.modalOpen ? modalView() : ''}
@@ -275,7 +280,8 @@ function renderTracking() {
 }
 
 function trackingRowsView(rows) {
-  if (!rows.length) return '<tr><td colspan="13"><div class="empty">暂无上架成功链接</div></td></tr>';
+  if (state.loadError) return `<tr><td colspan="14"><div class="empty">${escapeHtml(state.loadError)}</div></td></tr>`;
+  if (!rows.length) return '<tr><td colspan="14"><div class="empty">暂无上架成功链接</div></td></tr>';
   return rows.map((row) => {
     const notes = Array.isArray(row.tracking_notes) ? row.tracking_notes : [];
     const latest = notes[0] || null;
@@ -292,6 +298,7 @@ function trackingRowsView(rows) {
         <td>${trackingStarsView(row)}</td>
         <td>${asinLinkView(row.amazon_asin)}</td>
         <td>${trackingNotesView(row, latest, notes)}</td>
+        <td>${trackingAdsEnabledView(row)}</td>
         <td>${escapeHtml(formatDateTime(row.created_at))}</td>
         <td>${trackingActionsView(row)}</td>
       </tr>
@@ -385,6 +392,7 @@ function filteredTrackingRows(rows) {
       return (row.tracking_notes || []).some((note) => String(note.week_start || '').slice(0, 10) === query);
     }
     if (key === 'tracking_stars') return String(Number(row.tracking_stars || 0)) === query;
+    if (key === 'ads_enabled') return String(row.ads_enabled || '').toLowerCase() === query;
     const value = key === 'product_name' ? row.product_name || row.product_keywords : row[key];
     return String(value || '').toLowerCase().includes(query);
   }));
@@ -458,6 +466,11 @@ function canManageTracking() {
   return Boolean(state.trackingPayload?.can_manage || user.role === 'admin' || user.name === '余蓉');
 }
 
+function canEditTrackingAds() {
+  const user = state.trackingPayload?.user || state.currentUser || {};
+  return Boolean(canManageTracking() || user.role === 'member');
+}
+
 function trackingOwnerView(row) {
   const owner = row.tracking_owner || row.lister || '';
   if (!canManageTracking()) return escapeHtml(owner || '-');
@@ -480,6 +493,16 @@ function trackingStarsView(row) {
   return `
     <select class="tracking-star-select ${current ? 'has-stars' : ''}" data-tracking-star-id="${Number(row.id)}">
       ${[0, 1, 2, 3, 4, 5].map((value) => `<option value="${value}" ${value === current ? 'selected' : ''}>${value ? '★'.repeat(value) : '未评星'}</option>`).join('')}
+    </select>
+  `;
+}
+
+function trackingAdsEnabledView(row) {
+  const current = String(row.ads_enabled || '').trim();
+  if (!canEditTrackingAds()) return escapeHtml(current || '-');
+  return `
+    <select class="tracking-ads-select" data-tracking-ads-id="${Number(row.id)}">
+      ${['', '否', '是'].map((value) => `<option value="${escapeHtml(value)}" ${value === current ? 'selected' : ''}>${escapeHtml(value || '未设置')}</option>`).join('')}
     </select>
   `;
 }
@@ -562,8 +585,8 @@ function currentWeekStart() {
 function modalView() {
   const editingRow = currentEditingRow();
   const isEditing = Boolean(editingRow);
-  const title = isTrackingView ? '编辑链接跟踪信息' : (isEditing ? '编辑链接刊登提交' : '新增链接刊登提交');
-  const desc = isTrackingView ? '修改后点击保存，链接跟踪清单会同步更新。' : (isEditing ? '修改后点击保存，列表信息会同步更新。' : '记录保存在当前独立模块的数据文件中。');
+  const title = isTrackingView ? (isEditing ? '编辑链接跟踪信息' : '新增链接跟踪') : (isEditing ? '编辑链接刊登提交' : '新增链接刊登提交');
+  const desc = isTrackingView ? (isEditing ? '修改后点击保存，链接跟踪清单会同步更新。' : '手动新增已经在跟踪的链接，不会进入链接刊登清单。') : (isEditing ? '修改后点击保存，列表信息会同步更新。' : '记录保存在当前独立模块的数据文件中。');
   const modalFields = isTrackingView ? trackingEditFields : fields;
   return `
     <div class="modal-backdrop" id="modalBackdrop">
@@ -682,6 +705,11 @@ function bind() {
   document.getElementById('importBtn')?.addEventListener('click', () => {
     document.getElementById('importFile')?.click();
   });
+  document.getElementById('addTrackingBtn')?.addEventListener('click', () => {
+    state.modalOpen = true;
+    state.editingId = null;
+    render();
+  });
   document.getElementById('downloadTemplateBtn')?.addEventListener('click', isTrackingView ? downloadTrackingImportTemplate : downloadImportTemplate);
   document.getElementById('importFile')?.addEventListener('change', isTrackingView ? importTrackingFile : importFile);
   document.getElementById('trackingSortSelect')?.addEventListener('change', (event) => {
@@ -791,6 +819,9 @@ function bind() {
   });
   document.querySelectorAll('[data-tracking-owner-id]').forEach((select) => {
     select.addEventListener('change', () => updateTrackingMeta(Number(select.dataset.trackingOwnerId), { tracking_owner: select.value }));
+  });
+  document.querySelectorAll('[data-tracking-ads-id]').forEach((select) => {
+    select.addEventListener('change', () => saveTrackingRow(Number(select.dataset.trackingAdsId), { ads_enabled: select.value }));
   });
   document.querySelectorAll('[data-note-row-id]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -948,6 +979,7 @@ async function saveTrackingRow(id, extraPayload = null) {
     amazon_asin: row.amazon_asin || '',
     product_sku: row.product_sku || '',
     source_url: row.source_url || '',
+    ads_enabled: row.ads_enabled || '',
     product_note: row.product_note || '',
   };
   const response = await fetch(`./api/tracking/${id}`, {
@@ -1320,20 +1352,36 @@ async function loadSubmissions() {
   const params = new URLSearchParams();
   if (state.search) params.set('search', state.search);
   if (state.status !== 'all') params.set('status', state.status);
-  const response = await fetch(`./api/submissions?${params.toString()}`);
-  state.payload = response.ok
-    ? await response.json()
-    : { summary: {}, submissions: [] };
+  state.loadError = '';
+  try {
+    const response = await fetch(`./api/submissions?${params.toString()}`);
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || '链接刊登数据加载失败');
+    }
+    state.payload = await response.json();
+  } catch (error) {
+    state.payload = { summary: {}, submissions: [] };
+    state.loadError = error.message || '链接刊登数据加载失败，请刷新或联系管理员检查接口';
+  }
   render();
 }
 
 async function loadTracking() {
   const params = new URLSearchParams();
   if (state.search) params.set('search', state.search);
-  const response = await fetch(`./api/tracking?${params.toString()}`);
-  state.trackingPayload = response.ok
-    ? await response.json()
-    : { user: state.currentUser, can_manage: false, submissions: [] };
+  state.loadError = '';
+  try {
+    const response = await fetch(`./api/tracking?${params.toString()}`);
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || '链接跟踪数据加载失败');
+    }
+    state.trackingPayload = await response.json();
+  } catch (error) {
+    state.trackingPayload = { user: state.currentUser, can_manage: false, submissions: [] };
+    state.loadError = error.message || '链接跟踪数据加载失败，请刷新或联系管理员检查接口';
+  }
   render();
 }
 
@@ -1413,7 +1461,7 @@ async function submitForm(event) {
   if (!isTrackingView) payload.submitter_name = String(state.currentUser?.name || '').trim();
   if (!isTrackingView && !payload.sample_status) payload.sample_status = '链接刊登提交';
   const editingId = state.editingId;
-  const url = isTrackingView && editingId ? `./api/tracking/${editingId}` : (editingId ? `./api/submissions/${editingId}` : './api/submissions');
+  const url = isTrackingView ? (editingId ? `./api/tracking/${editingId}` : './api/tracking') : (editingId ? `./api/submissions/${editingId}` : './api/submissions');
   const response = await fetch(url, {
     method: editingId ? 'PATCH' : 'POST',
     headers: { 'Content-Type': 'application/json' },
