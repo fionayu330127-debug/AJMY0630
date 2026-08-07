@@ -88,6 +88,7 @@ function normalizeOrder(raw) {
     totalAmount: Number(raw.payment?.total_amount || raw.total_amount || raw.order_amount || 0),
     createdAt: firstText(raw.create_time, raw.created_time, raw.create_time_ms),
     updatedAt: firstText(raw.update_time, raw.updated_time, raw.update_time_ms),
+    deliveredAt: normalizeDeliveredAtFromOrder(raw),
     rawJson: JSON.stringify(raw),
   };
 }
@@ -113,6 +114,22 @@ function normalizeTimestamp(value) {
     return new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
   }
   return String(value);
+}
+
+function normalizeDeliveredAtFromOrder(raw) {
+  const status = String(firstText(raw.status, raw.order_status)).toLowerCase();
+  if (!/(delivered|completed)/i.test(status)) return '';
+  return normalizeTimestamp(firstText(
+    raw.delivered_time,
+    raw.delivery_time,
+    raw.delivered_at,
+    raw.delivery_at,
+    raw.completed_time,
+    raw.completed_at,
+    raw.update_time,
+    raw.updated_time,
+    raw.update_time_ms
+  ));
 }
 
 function unwrapCreatorPayload(raw) {
@@ -323,6 +340,7 @@ function normalizeSampleApplication(raw) {
     category: firstText(raw.category, raw.category_name, product.category_name),
     collabType: normalizeCollabType(raw),
     status: mapSampleStatus(firstText(raw.status, raw.application_status, raw.sample_status, raw.request_status)),
+    orderId: firstText(raw.order_id, raw.order?.id, raw.order?.order_id),
     externalProductId: firstText(raw.product_id, product.product_id, product.id),
     appliedAt: normalizeTimestamp(firstText(raw.apply_time, raw.applied_at, raw.create_time, raw.created_time)),
     productName: firstText(raw.product_name, raw.product_title, product.title, product.sku_name, product.name),
@@ -347,6 +365,29 @@ function normalizeSampleApplication(raw) {
     salesCount: normalizeNumber(firstText(raw.sales_count, raw.units_sold, raw.sold_count, raw.order_count, raw.completed_order_count, creator.sales_count, creator.units_sold, creator.sold_count, creator.order_count)),
     commissionRate: normalizeNumber(firstText(raw.commission_rate, product.commission_rate)),
     approveExpirationAt: normalizeTimestamp(firstText(raw.approve_expiration_time, raw.expiration_time, raw.end_time, raw.deadline_time)),
+    sampleReceivedAt: normalizeTimestamp(firstText(
+      raw.sample_received_time,
+      raw.sample_receive_time,
+      raw.received_time,
+      raw.received_at,
+      raw.signed_time,
+      raw.signed_at,
+      raw.delivered_time,
+      raw.delivered_at,
+      raw.delivery_time,
+      raw.delivery_at,
+      raw.completed_time,
+      raw.completed_at
+    )),
+    publishedAt: normalizeTimestamp(firstText(
+      raw.publish_time,
+      raw.published_at,
+      raw.post_time,
+      raw.posted_at,
+      raw.content_publish_time,
+      raw.completed_time,
+      raw.completed_at
+    )),
     note: firstText(raw.note, raw.reason, raw.message),
     rawJson: JSON.stringify(raw),
   };
@@ -403,6 +444,9 @@ function ensureSyncSchema(db) {
   try { db.exec('ALTER TABLE samples ADD COLUMN sales_count INTEGER'); } catch (_) {}
   try { db.exec('ALTER TABLE samples ADD COLUMN commission_rate REAL'); } catch (_) {}
   try { db.exec('ALTER TABLE samples ADD COLUMN approve_expiration_at TEXT'); } catch (_) {}
+  try { db.exec('ALTER TABLE samples ADD COLUMN sample_received_at TEXT'); } catch (_) {}
+  try { db.exec('ALTER TABLE samples ADD COLUMN published_at TEXT'); } catch (_) {}
+  try { db.exec('ALTER TABLE samples ADD COLUMN wecom_overdue_notified_at TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE samples ADD COLUMN library_added_at TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE samples ADD COLUMN synced_at TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE samples ADD COLUMN raw_json TEXT'); } catch (_) {}
@@ -474,12 +518,14 @@ function ensureSyncSchema(db) {
       total_amount REAL DEFAULT 0,
       created_at TEXT,
       updated_at TEXT,
+      delivered_at TEXT,
       synced_at TEXT,
       raw_json TEXT,
       UNIQUE(shop_id, external_order_id),
       FOREIGN KEY (shop_id) REFERENCES shops(id)
     );
   `);
+  try { db.exec('ALTER TABLE orders ADD COLUMN delivered_at TEXT'); } catch (_) {}
 }
 
 function upsertAffiliateCreator(db, shopId, item) {
@@ -617,13 +663,19 @@ function upsertSampleApplication(db, shopId, sample) {
   const productId = ensureSampleProduct(db, shopId, sample);
   const existing = db.prepare('SELECT id FROM samples WHERE shop_id = ? AND external_sample_id = ?').get(shopId, sample.externalId);
   const inheritedBdId = findExistingLibraryBd(db, sample.uid, sample.creatorHandle);
+  const sampleReceivedAt = sample.sampleReceivedAt || findSampleReceivedAtFromOrder(db, shopId, sample.orderId);
 
   if (existing) {
     db.prepare(`
       UPDATE samples
       SET uid = ?, creator_name = ?, creator_handle = ?, fans = ?, category = ?,
           collab_type = COALESCE(NULLIF(?, ''), collab_type),
-          status = ?, bd_id = CASE
+          status = CASE
+            WHEN ? = 'pending' AND status = 'assigned' AND bd_id IS NOT NULL THEN status
+            ELSE ?
+          END,
+          bd_id = CASE
+            WHEN ? = 'pending' AND status = 'assigned' AND bd_id IS NOT NULL THEN bd_id
             WHEN ? IN ('pending', 'rejected', 'cancelled') THEN NULL
             WHEN bd_id IS NULL THEN ?
             ELSE bd_id
@@ -635,6 +687,15 @@ function upsertSampleApplication(db, shopId, sample) {
           product_id = COALESCE(?, product_id), external_product_id = ?, creator_avatar_url = ?,
           applied_at = COALESCE(NULLIF(?, ''), applied_at), videos = ?, avg_view = ?,
           fulfillment_rate = ?, sales_amount = ?, sales_currency = ?, sales_count = ?, commission_rate = ?, approve_expiration_at = ?,
+          wecom_overdue_notified_at = CASE
+            WHEN COALESCE(sample_received_at, '') <> COALESCE(NULLIF(?, ''), sample_received_at, '') THEN NULL
+            ELSE wecom_overdue_notified_at
+          END,
+          sample_received_at = COALESCE(NULLIF(?, ''), sample_received_at),
+          published_at = CASE
+            WHEN ? = 'published' AND published_at IS NULL THEN COALESCE(NULLIF(?, ''), datetime('now'))
+            ELSE published_at
+          END,
           note = COALESCE(NULLIF(note, ''), ?), synced_at = datetime('now'), raw_json = ?
       WHERE id = ?
     `).run(
@@ -644,6 +705,8 @@ function upsertSampleApplication(db, shopId, sample) {
       sample.fans,
       sample.category,
       sample.collabType,
+      sample.status,
+      sample.status,
       sample.status,
       sample.status,
       inheritedBdId,
@@ -660,6 +723,10 @@ function upsertSampleApplication(db, shopId, sample) {
       sample.salesCount,
       sample.commissionRate,
       sample.approveExpirationAt,
+      sampleReceivedAt,
+      sampleReceivedAt,
+      sample.status,
+      sample.publishedAt,
       sample.note,
       sample.rawJson,
       existing.id
@@ -673,11 +740,11 @@ function upsertSampleApplication(db, shopId, sample) {
       id, uid, shop_id, creator_name, creator_handle, fans, category, collab_type,
       status, bd_id, product_id, applied_at, videos, avg_view, note,
       external_sample_id, external_product_id, creator_avatar_url,
-      fulfillment_rate, sales_amount, sales_currency, sales_count, commission_rate, approve_expiration_at,
+      fulfillment_rate, sales_amount, sales_currency, sales_count, commission_rate, approve_expiration_at, sample_received_at, published_at,
       synced_at, raw_json
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-      ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+      ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
   `).run(
     id,
     sample.uid,
@@ -703,9 +770,23 @@ function upsertSampleApplication(db, shopId, sample) {
     sample.salesCount,
     sample.commissionRate,
     sample.approveExpirationAt,
+    sampleReceivedAt,
+    sample.status === 'published' ? (sample.publishedAt || new Date().toISOString().slice(0, 19).replace('T', ' ')) : null,
     sample.rawJson
   );
   return 'created';
+}
+
+function findSampleReceivedAtFromOrder(db, shopId, orderId) {
+  const cleanOrderId = String(orderId || '').trim();
+  if (!cleanOrderId) return '';
+  const order = db.prepare(`
+    SELECT delivered_at
+    FROM orders
+    WHERE shop_id = ? AND external_order_id = ?
+    LIMIT 1
+  `).get(shopId, cleanOrderId);
+  return order?.delivered_at || '';
 }
 
 function upsertProduct(db, shopId, product) {
@@ -747,15 +828,16 @@ function upsertOrder(db, shopId, order) {
   db.prepare(`
     INSERT INTO orders (
       shop_id, external_order_id, status, buyer_name, currency, total_amount,
-      created_at, updated_at, synced_at, raw_json
+      created_at, updated_at, delivered_at, synced_at, raw_json
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
     ON CONFLICT(shop_id, external_order_id) DO UPDATE SET
       status = excluded.status,
       buyer_name = excluded.buyer_name,
       currency = excluded.currency,
       total_amount = excluded.total_amount,
       updated_at = excluded.updated_at,
+      delivered_at = COALESCE(NULLIF(excluded.delivered_at, ''), orders.delivered_at),
       synced_at = datetime('now'),
       raw_json = excluded.raw_json
   `).run(
@@ -767,6 +849,7 @@ function upsertOrder(db, shopId, order) {
     order.totalAmount,
     order.createdAt,
     order.updatedAt,
+    order.deliveredAt,
     order.rawJson
   );
   return 'upserted';
@@ -791,7 +874,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchPaged({ path, body, shop, listKeys, pageSize = 50, maxPages = 0, pageDelayMs = 0 }) {
+async function fetchPaged({ path, body, shop, listKeys, pageSize = 50, maxPages = 0, pageDelayMs = Number(process.env.TK_API_PAGE_DELAY_MS || 800) }) {
   const items = [];
   let pageToken = '';
   let searchKey = body?.search_key || '';
@@ -1097,11 +1180,11 @@ async function syncSampleApplications(db, shop) {
 async function syncTikTokShop(db, shop) {
   ensureSyncSchema(db);
   await ensureShopCipher(db, shop);
+  const samples = await syncSampleApplications(db, shop);
   const products = await syncProducts(db, shop);
   const orders = await syncOrders(db, shop);
   const affiliateOrders = await syncAffiliateOrders(db, shop);
   const affiliateCreators = await syncAffiliateCreators(db, shop);
-  const samples = await syncSampleApplications(db, shop);
   return { products, orders, affiliateOrders, affiliateCreators, samples };
 }
 

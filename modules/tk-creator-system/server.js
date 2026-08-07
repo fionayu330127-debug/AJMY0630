@@ -86,6 +86,7 @@ function sampleAssignDetail(sampleId) {
       s.creator_handle,
       s.commission_rate,
       s.approve_expiration_at,
+      s.sample_received_at,
       p.name AS product_name,
       b.name AS bd_name,
       b.wecom_userid
@@ -191,9 +192,11 @@ function percentText(value) {
 }
 
 function isOverdueUnpublishedSample(row) {
-  if (!row?.bd_id || !row?.approve_expiration_at) return false;
+  if (!row?.bd_id || !row?.sample_received_at) return false;
   if (['published', 'rejected', 'cancelled'].includes(String(row.status || ''))) return false;
-  const deadline = new Date(row.approve_expiration_at).getTime();
+  const receivedAt = new Date(row.sample_received_at).getTime();
+  if (!Number.isFinite(receivedAt)) return false;
+  const deadline = receivedAt + 7 * 86400000;
   return Number.isFinite(deadline) && deadline < Date.now();
 }
 
@@ -293,6 +296,11 @@ async function notifyBdAssigned(sampleId, title = '新的样品分配通知') {
     `> 剩余天数：${daysLeftText(detail.approve_expiration_at)}`,
     mention ? `\n${mention}` : '',
   ].filter(Boolean).join('\n');
+  const dedupeKey = ['bd-assigned', webhook, sampleId, title, detail.wecom_userid || '', content].join('|');
+  if (shouldSkipWecomNotification(dedupeKey)) {
+    console.log(`[wecom] duplicate BD assign notification skipped for sample ${sampleId}`);
+    return;
+  }
 
   try {
     await postJson(webhook, {
@@ -324,10 +332,16 @@ async function notifySampleOverdueUnpublished(sampleId) {
     `> 达人名称：${detail.creator_name || '-'}`,
     `> TikTok ID：${detail.creator_handle || detail.uid || '-'}`,
     `> 样品名称：${detail.product_name || '-'}`,
-    `> 截止时间：${detail.approve_expiration_at || '-'}`,
+    `> 签收时间：${detail.sample_received_at || '-'}`,
+    '> 超时标准：签收后 7 天未发布视频',
     `> 负责BD：${detail.bd_name || '-'}`,
     mention ? `\n${mention}` : '',
   ].filter(Boolean).join('\n');
+  const dedupeKey = ['overdue-unpublished', webhook, sampleId, detail.wecom_userid || '', content].join('|');
+  if (shouldSkipWecomNotification(dedupeKey)) {
+    console.log(`[wecom] duplicate overdue unpublished notification skipped for sample ${sampleId}`);
+    return;
+  }
 
   try {
     await postJson(webhook, {
@@ -343,10 +357,10 @@ async function notifySampleOverdueUnpublished(sampleId) {
 function notifyOverdueUnpublishedSamples(sampleId = null) {
   const where = [
     'bd_id IS NOT NULL',
-    'approve_expiration_at IS NOT NULL',
+    'sample_received_at IS NOT NULL',
     "COALESCE(wecom_overdue_notified_at, '') = ''",
     "status NOT IN ('published', 'rejected', 'cancelled')",
-    "datetime(approve_expiration_at) < datetime('now')",
+    "datetime(sample_received_at, '+7 days') < datetime('now')",
   ];
   const params = [];
   if (sampleId) {
@@ -651,6 +665,8 @@ try { db.exec("ALTER TABLE invitation_records ADD COLUMN sample_approval_mode TE
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN sample_apply_link TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE products ADD COLUMN product_url TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN commission_rate REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE samples ADD COLUMN sample_received_at TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE samples ADD COLUMN published_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN wecom_overdue_notified_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN invitation_record_id INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN assigned_bd_id INTEGER'); } catch (_) {}
@@ -1772,8 +1788,14 @@ async function syncOneShop(shop, source) {
   }
 }
 
-async function syncAllShops(source = 'manual') {
-  const shops = db.prepare('SELECT * FROM shops ORDER BY id').all();
+async function syncAllShops(source = 'manual', shopId = 'all') {
+  const requestedShop = String(shopId || 'all');
+  const shops = db.prepare(`
+    SELECT *
+    FROM shops
+    ${requestedShop !== 'all' ? 'WHERE id = ?' : ''}
+    ORDER BY id
+  `).all(...(requestedShop !== 'all' ? [requestedShop] : []));
   const results = [];
   for (const shop of shops) {
     results.push(await syncOneShop(shop, source));
@@ -1816,6 +1838,19 @@ function scheduleShopSync() {
 }
 
 let syncTimer = null;
+const wecomNotificationDedupe = new Map();
+
+function shouldSkipWecomNotification(key, windowMs = 60000) {
+  const now = Date.now();
+  for (const [itemKey, sentAt] of wecomNotificationDedupe.entries()) {
+    if (now - sentAt > windowMs) wecomNotificationDedupe.delete(itemKey);
+  }
+  const lastSentAt = wecomNotificationDedupe.get(key);
+  if (lastSentAt && now - lastSentAt < windowMs) return true;
+  wecomNotificationDedupe.set(key, now);
+  return false;
+}
+
 function startShopSyncScheduler() {
   if (syncTimer) return;
   scheduleShopSync();
@@ -2326,7 +2361,7 @@ app.get('/api/tiktok/oauth/url', (req, res) => {
 
 app.post('/api/sync/shops', async (req, res) => {
   try {
-    const result = await syncAllShops('manual');
+    const result = await syncAllShops('manual', req.body?.shop || req.query.shop || 'all');
     res.json(result);
   } catch (error) {
     writeSyncLog(null, 'manual', 'failed', error.message || '同步失败');
@@ -2575,6 +2610,122 @@ app.get('/api/orders', (req, res) => {
     LIMIT 200
   `;
   res.json(db.prepare(sql).all(...params));
+});
+
+app.get('/api/data/bd-report', async (req, res) => {
+  await listBdMembers();
+  const shop = String(req.query.shop || 'all');
+  const bdId = Number(req.query.bd || 0);
+  const period = ['month', 'quarter', 'halfyear', 'year'].includes(req.query.period) ? req.query.period : 'month';
+  const now = new Date();
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const monthCount = { month: 1, quarter: 3, halfyear: 6, year: 12 }[period];
+  const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - monthCount, 1));
+  const previousStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() - monthCount, 1));
+  const sqlDate = (date) => date.toISOString().slice(0, 19).replace('T', ' ');
+  const startText = sqlDate(start);
+  const endText = sqlDate(end);
+
+  const sampleWhere = [];
+  const sampleArgs = [];
+  if (shop !== 'all') { sampleWhere.push('s.shop_id = ?'); sampleArgs.push(shop); }
+  const allSamples = db.prepare(`
+    SELECT s.*, COALESCE(s.bd_id, l.bd_id) AS owner_bd_id, b.name AS bd_name
+    FROM samples s
+    LEFT JOIN creator_library l ON l.uid = s.uid
+    LEFT JOIN bd_members b ON b.id = COALESCE(s.bd_id, l.bd_id)
+    ${sampleWhere.length ? `WHERE ${sampleWhere.join(' AND ')}` : ''}
+    ORDER BY datetime(s.applied_at), s.id
+  `).all(...sampleArgs);
+  const firstSampleByUid = new Map();
+  db.prepare(`SELECT uid, MIN(datetime(applied_at)) AS first_at FROM samples GROUP BY uid`).all()
+    .forEach((row) => firstSampleByUid.set(row.uid, row.first_at));
+  const inRange = (value, from = startText, to = endText) => value && value >= from && value < to;
+  const validOwner = (sample) => !bdId || Number(sample.owner_bd_id) === bdId;
+  const scopedSamples = allSamples.filter(validOwner);
+  const periodSamples = scopedSamples.filter((sample) => inRange(sample.applied_at));
+  const acceptedStatuses = new Set(['approved', 'assigned', 'shipped', 'published']);
+  const isNew = (sample) => String(firstSampleByUid.get(sample.uid) || '') === String(sample.applied_at || '');
+  const publishedAt = (sample) => sample.published_at || (sample.status === 'published' ? sample.synced_at || sample.library_added_at : null);
+
+  const handleOwners = new Map();
+  scopedSamples.forEach((sample) => {
+    const handle = normalizeCreatorHandle(sample.creator_handle);
+    if (handle && sample.owner_bd_id) handleOwners.set(handle, Number(sample.owner_bd_id));
+  });
+  const orderWhere = ['order_created_at >= ?', 'order_created_at < ?'];
+  const orderArgs = [startText, endText];
+  if (shop !== 'all') { orderWhere.push('shop_id = ?'); orderArgs.push(shop); }
+  let periodOrders = db.prepare(`SELECT * FROM affiliate_orders WHERE ${orderWhere.join(' AND ')}`).all(...orderArgs);
+  if (bdId) periodOrders = periodOrders.filter((order) => handleOwners.get(normalizeCreatorHandle(order.creator_username)) === bdId);
+
+  const summarize = (samples, orders) => {
+    const targeted = samples.filter((s) => s.collab_type === 'targeted');
+    const received = samples.filter((s) => s.sample_received_at);
+    const fulfilled = received.filter((s) => {
+      const pub = publishedAt(s);
+      if (!pub) return false;
+      return new Date(pub).getTime() <= new Date(s.sample_received_at).getTime() + 7 * 86400000;
+    });
+    const targetedCreators = new Set(targeted.map((s) => s.uid)).size;
+    const acceptedTargeted = new Set(targeted.filter((s) => acceptedStatuses.has(s.status)).map((s) => s.uid)).size;
+    const receivedCreators = new Set(received.map((s) => s.uid)).size;
+    const fulfilledCreators = new Set(fulfilled.map((s) => s.uid)).size;
+    return {
+      targetedInvites: targetedCreators,
+      openInvites: new Set(samples.filter((s) => s.collab_type === 'open').map((s) => s.uid)).size,
+      acceptedTargeted,
+      sampleCooperations: samples.filter((s) => acceptedStatuses.has(s.status)).length,
+      newCooperations: samples.filter((s) => acceptedStatuses.has(s.status) && isNew(s)).length,
+      oldCooperations: samples.filter((s) => acceptedStatuses.has(s.status) && !isNew(s)).length,
+      receivedCreators,
+      fulfilledCreators,
+      acceptanceRate: targetedCreators ? Math.round(acceptedTargeted / targetedCreators * 1000) / 10 : null,
+      fulfillmentRate: receivedCreators ? Math.round(fulfilledCreators / receivedCreators * 1000) / 10 : null,
+      videos: samples.filter((s) => s.status === 'published' && inRange(publishedAt(s))).length,
+      conversions: new Set(orders.map((o) => o.external_order_id)).size,
+    };
+  };
+  const metrics = summarize(periodSamples, periodOrders);
+  metrics.totalCreators = new Set(scopedSamples.filter((s) => s.applied_at < endText && s.owner_bd_id).map((s) => s.uid)).size;
+  metrics.acceptanceRate = metrics.targetedInvites ? Math.round(metrics.acceptedTargeted / metrics.targetedInvites * 1000) / 10 : null;
+  metrics.fulfillmentRate = metrics.receivedCreators ? Math.round(metrics.fulfilledCreators / metrics.receivedCreators * 1000) / 10 : null;
+
+  const bdMap = new Map(db.prepare(`SELECT id, name FROM bd_members WHERE active = 1 OR id IN (SELECT DISTINCT bd_id FROM samples WHERE bd_id IS NOT NULL) ORDER BY name`).all().map((b) => [Number(b.id), b.name]));
+  const selectedBdIds = bdId ? [bdId] : [...bdMap.keys()];
+  const inviteRows = selectedBdIds.map((id) => {
+    const rows = periodSamples.filter((s) => Number(s.owner_bd_id) === id);
+    return { bdId: id, name: bdMap.get(id) || `BD ${id}`, totalCreators: new Set(scopedSamples.filter((s) => Number(s.owner_bd_id) === id).map((s) => s.uid)).size, targetedInvites: new Set(rows.filter((s) => s.collab_type === 'targeted').map((s) => s.uid)).size, openInvites: new Set(rows.filter((s) => s.collab_type === 'open').map((s) => s.uid)).size };
+  });
+  const conversionRows = [];
+  selectedBdIds.forEach((id) => {
+    const rows = periodSamples.filter((s) => Number(s.owner_bd_id) === id);
+    ['new', 'old'].forEach((type) => {
+      const typed = rows.filter((s) => isNew(s) === (type === 'new'));
+      const received = typed.filter((s) => s.sample_received_at);
+      const fulfilled = received.filter((s) => publishedAt(s) && new Date(publishedAt(s)).getTime() <= new Date(s.sample_received_at).getTime() + 7 * 86400000);
+      const handles = new Set(typed.map((s) => normalizeCreatorHandle(s.creator_handle)).filter(Boolean));
+      const orders = periodOrders.filter((o) => handles.has(normalizeCreatorHandle(o.creator_username)));
+      conversionRows.push({ bdId: id, name: bdMap.get(id) || `BD ${id}`, type, samples: typed.filter((s) => acceptedStatuses.has(s.status)).length, fulfillmentRate: received.length ? Math.round(new Set(fulfilled.map((s) => s.uid)).size / new Set(received.map((s) => s.uid)).size * 1000) / 10 : null, videos: typed.filter((s) => s.status === 'published' && inRange(publishedAt(s))).length, conversions: new Set(orders.map((o) => o.external_order_id)).size });
+    });
+  });
+
+  const trends = [];
+  for (let i = 0; i < monthCount; i += 1) {
+    const from = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, 1));
+    const to = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i + 1, 1));
+    const fromText = sqlDate(from); const toText = sqlDate(to);
+    const monthSamples = scopedSamples.filter((s) => inRange(s.applied_at, fromText, toText));
+    const monthOrders = periodOrders.filter((o) => inRange(o.order_created_at, fromText, toText));
+    trends.push({ key: fromText.slice(0, 7), label: `${from.getUTCMonth() + 1}月`, ...summarize(monthSamples, monthOrders) });
+  }
+  const previousSamples = scopedSamples.filter((s) => inRange(s.applied_at, sqlDate(previousStart), startText));
+  const previous = summarize(previousSamples, []);
+  const byBd = inviteRows.map((row) => {
+    const detail = conversionRows.filter((item) => item.bdId === row.bdId);
+    return { bdId: row.bdId, name: row.name, invites: row.targetedInvites + row.openInvites, samples: detail.reduce((n, x) => n + x.samples, 0), fulfillment: detail.reduce((n, x) => n + (x.fulfillmentRate || 0), 0) / Math.max(detail.filter((x) => x.fulfillmentRate != null).length, 1), videos: detail.reduce((n, x) => n + x.videos, 0), conversions: detail.reduce((n, x) => n + x.conversions, 0) };
+  });
+  res.json({ filters: { shop, bd: bdId || 'all', period, start: startText, end: endText }, metrics, previous, bds: [...bdMap].map(([id, name]) => ({ id, name })), inviteRows, conversionRows, trends, byBd });
 });
 
 app.get('/api/data/overview', async (req, res) => {
@@ -2936,13 +3087,16 @@ app.get('/api/library', async (req, res) => {
   const libMap = {};
   for (const l of libRows) libMap[l.uid] = l;
 
-  creators = creators.map(c => ({
-    ...c,
-    star: c.uids.map(uid => libMap[uid]?.star || 0).reduce((max, value) => Math.max(max, value), 0),
-    libNote: c.uids.map(uid => libMap[uid]?.note).find(Boolean) || '',
-    bd_id: c.uids.map(uid => libMap[uid]?.bd_id).find(Boolean) || c.samples.find(s => s.bd_id)?.bd_id || null,
-    bd_name: ''
-  }));
+  creators = creators.map(c => {
+    const latestSample = c.samples[0] || null;
+    return {
+      ...c,
+      star: c.uids.map(uid => libMap[uid]?.star || 0).reduce((max, value) => Math.max(max, value), 0),
+      libNote: c.uids.map(uid => libMap[uid]?.note).find(Boolean) || '',
+      bd_id: latestSample ? (latestSample.bd_id || null) : (c.uids.map(uid => libMap[uid]?.bd_id).find(Boolean) || null),
+      bd_name: ''
+    };
+  });
   const bdRows = db.prepare('SELECT id, name FROM bd_members WHERE active = 1').all();
   const bdMap = {};
   bdRows.forEach(b => { bdMap[b.id] = b.name; });

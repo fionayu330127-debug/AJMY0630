@@ -1120,7 +1120,7 @@ function renderMiniBars(rows, labels) {
   }).join('');
 }
 
-async function renderDataCenter() {
+async function renderLegacyDataCenter() {
   const box = document.getElementById('data-center');
   if (!box) return;
   box.innerHTML = '<div class="empty-state"><div>正在加载数据...</div></div>';
@@ -1177,6 +1177,37 @@ async function renderDataCenter() {
   } catch (error) {
     box.innerHTML = `<div class="empty-state"><div>${error.message || '数据加载失败'}</div></div>`;
   }
+}
+
+let bdReportState = { period: 'month', bd: 'all' };
+const reportMetricLabels = { targetedInvites: '定邀数量', openInvites: '公开邀约', sampleCooperations: '样品合作', fulfillmentRate: '履约率', videos: '视频发布', conversions: '订单转化' };
+function reportPct(v) { return v == null ? '—' : `${Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 1 })}%`; }
+function reportMetricValue(key, m) { return key === 'fulfillmentRate' || key === 'acceptanceRate' ? reportPct(m[key]) : Number(m[key] || 0).toLocaleString('zh-CN'); }
+function reportLineSvg(rows, key) {
+  const values = rows.map(r => Number(r[key] || 0)); const max = Math.max(...values, 1); const w = 760, h = 220;
+  const pts = values.map((v, i) => `${30 + (w - 60) * i / Math.max(values.length - 1, 1)},${h - 24 - (h - 50) * v / max}`).join(' ');
+  return `<svg class="bd-report-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="${reportMetricLabels[key] || key}趋势"><line x1="30" y1="${h - 24}" x2="${w - 20}" y2="${h - 24}" stroke="#d8dee7"/><polyline points="${pts}" fill="none" stroke="#4055c7" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>${values.map((v,i)=>`<circle cx="${30 + (w - 60) * i / Math.max(values.length - 1, 1)}" cy="${h - 24 - (h - 50) * v / max}" r="4" fill="#fff" stroke="#4055c7" stroke-width="2"/>`).join('')}${rows.map((r,i)=>`<text x="${30 + (w - 60) * i / Math.max(rows.length - 1, 1)}" y="${h - 5}" text-anchor="middle">${r.label}</text>`).join('')}</svg>`;
+}
+function reportBars(rows) { const max = Math.max(...rows.flatMap(r => [r.new || 0, r.old || 0]), 1); return `<svg class="bd-report-svg" viewBox="0 0 760 220">${rows.map((r,i)=>{const x=45+i*115; const a=Number(r.new||0), b=Number(r.old||0); return `<rect x="${x}" y="${190-a/max*150}" width="28" height="${a/max*150}" fill="#7c72c7"/><rect x="${x+34}" y="${190-b/max*150}" width="28" height="${b/max*150}" fill="#4f9788"/><text x="${x+31}" y="210" text-anchor="middle">${r.label}</text>`}).join('')}</svg>`; }
+function reportRadar(rows) { if (!rows.length) return '<div class="empty-state">暂无 BD 数据</div>'; const axes=['邀约','样品','履约率','视频','订单'], keys=['invites','samples','fulfillment','videos','conversions'], cx=200,cy=120,r=82, maxima=keys.map(k=>Math.max(...rows.map(x=>Number(x[k]||0)),1)), point=(i,q)=>`${cx+Math.cos(-Math.PI/2+i*Math.PI*2/5)*r*q},${cy+Math.sin(-Math.PI/2+i*Math.PI*2/5)*r*q}`; return `<svg class="bd-report-radar" viewBox="0 0 400 245">${[.25,.5,.75,1].map(q=>`<polygon points="${axes.map((_,i)=>point(i,q)).join(' ')}" fill="none" stroke="#dfe4ea"/>`).join('')}${axes.map((a,i)=>`<text x="${cx+Math.cos(-Math.PI/2+i*Math.PI*2/5)*(r+23)}" y="${cy+Math.sin(-Math.PI/2+i*Math.PI*2/5)*(r+23)}" text-anchor="middle">${a}</text>`).join('')}${rows.slice(0,4).map((row,j)=>`<polygon points="${keys.map((k,i)=>point(i,Number(row[k]||0)/maxima[i])).join(' ')}" fill="#4055c722" stroke="#4055c7" stroke-width="2"/>`).join('')}</svg>`; }
+async function renderDataCenter() {
+  const box = document.getElementById('data-center'); if (!box) return;
+  box.innerHTML = '<div class="empty-state">正在加载数据...</div>';
+  try {
+    const params = new URLSearchParams({ shop: curStore || 'all', period: bdReportState.period, bd: bdReportState.bd });
+    const d = await api(`/api/data/bd-report?${params}`); const m = d.metrics;
+    const metricCards = [['targetedInvites','新增定邀达人'],['openInvites','新增公开邀约'],['totalCreators','总负责达人数'],['acceptanceRate','邀约接受率'],['sampleCooperations','新增样品合作'],['fulfillmentRate','达人履约率'],['videos','视频发布数量'],['conversions','订单转化量']];
+    const bdOpts = `<option value="all">全部BD</option>${(d.bds||[]).map(b=>`<option value="${b.id}" ${String(b.id)===String(bdReportState.bd)?'selected':''}>${esc(b.name)}</option>`).join('')}`;
+    const shopOpts = `<option value="all">全部店铺</option>${SHOPS.map(s=>`<option value="${s.id}" ${s.id===curStore?'selected':''}>${esc(s.name)}</option>`).join('')}`;
+    const detail = d.inviteRows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.totalCreators}</td><td>${r.targetedInvites}</td><td>${r.openInvites}</td></tr>`).join('') || '<tr><td colspan="4">暂无数据</td></tr>';
+    const conv = d.conversionRows.reduce((acc,r)=>{(acc[r.bdId] ||= {name:r.name,new:null,old:null}); acc[r.bdId][r.type]=r; return acc;},{});
+    const convRows = Object.values(conv).map(r=>`<tr><td rowspan="3">${esc(r.name)}</td><td>新达人</td><td>${r.new?.samples||0}</td><td>${reportPct(r.new?.fulfillmentRate)}</td><td>${r.new?.videos||0}</td><td>${r.new?.conversions||0}</td></tr><tr><td>老达人</td><td>${r.old?.samples||0}</td><td>${reportPct(r.old?.fulfillmentRate)}</td><td>${r.old?.videos||0}</td><td>${r.old?.conversions||0}</td></tr><tr class="report-total"><td>汇总</td><td>${(r.new?.samples||0)+(r.old?.samples||0)}</td><td>—</td><td>${(r.new?.videos||0)+(r.old?.videos||0)}</td><td>${(r.new?.conversions||0)+(r.old?.conversions||0)}</td></tr>`).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
+    box.innerHTML = `<div class="bd-report-toolbar"><div><h2>数据中心</h2><p>BD邀约、样品与转化分析</p></div><div class="bd-report-filters"><select id="bd-report-bd">${bdOpts}</select><select id="bd-report-period"><option value="month">本月</option><option value="quarter">近3月</option><option value="halfyear">近6月</option><option value="year">本年</option></select><select id="bd-report-shop">${shopOpts}</select></div></div><div class="bd-report-kpis">${metricCards.map(([k,l])=>`<div class="report-kpi"><span>${l}</span><strong>${reportMetricValue(k,m)}</strong><small>较上期 ${k==='acceptanceRate'||k==='fulfillmentRate'?reportPct(m[k] == null ? null : (Number(m[k]) - Number(d.previous[k] || 0))):'—'}</small></div>`).join('')}</div><div class="bd-report-grid"><section class="dc-panel"><h3>BD邀约明细</h3><table class="dc-table"><thead><tr><th>BD</th><th>总负责</th><th>新增定邀</th><th>新增公开</th></tr></thead><tbody>${detail}</tbody></table></section><section class="dc-panel"><h3>BD样品及转化明细</h3><table class="dc-table"><thead><tr><th>BD</th><th>类型</th><th>样品数</th><th>履约率</th><th>视频数</th><th>转化量</th></tr></thead><tbody>${convRows}</tbody></table></section></div><section class="dc-panel report-chart-panel"><div class="report-chart-head"><h3>趋势曲线分析</h3><div class="report-chart-tabs">${['targetedInvites','sampleCooperations','fulfillmentRate','conversions'].map(k=>`<button class="${(bdReportState.metric||'targetedInvites')===k?'active':''}" data-report-metric="${k}">${reportMetricLabels[k]}</button>`).join('')}</div></div><div id="bd-report-line">${reportLineSvg(d.trends, bdReportState.metric||'targetedInvites')}</div></section><div class="bd-report-grid"><section class="dc-panel"><h3>新达人 vs 老达人</h3>${reportBars(d.trends.map(r=>({label:r.label,new:r.newCooperations,old:r.oldCooperations})))}</section><section class="dc-panel"><h3>各BD绩效雷达</h3>${reportRadar(d.byBd)}</section></div>`;
+    document.getElementById('bd-report-bd').onchange = e => { bdReportState.bd=e.target.value; renderDataCenter(); };
+    document.getElementById('bd-report-period').value = bdReportState.period; document.getElementById('bd-report-period').onchange = e => { bdReportState.period=e.target.value; renderDataCenter(); };
+    document.getElementById('bd-report-shop').onchange = e => { curStore=e.target.value; renderDataCenter(); };
+    box.querySelectorAll('[data-report-metric]').forEach(btn=>btn.onclick=()=>{bdReportState.metric=btn.dataset.reportMetric; renderDataCenter();});
+  } catch (error) { box.innerHTML = `<div class="empty-state">${esc(error.message || '数据加载失败')}</div>`; }
 }
 
 // ════ MODALS ════
@@ -2074,6 +2105,8 @@ function showSyncResult(result, caughtError = null) {
   const failed = rows.filter(r => r.status === 'failed').length;
   const skipped = rows.filter(r => r.status === 'skipped').length;
   const sampleTotal = rows.reduce((sum, r) => sum + Number(r.detail?.samples?.total || 0), 0);
+  const sampleCreated = rows.reduce((sum, r) => sum + Number(r.detail?.samples?.created || 0), 0);
+  const sampleUpdated = rows.reduce((sum, r) => sum + Number(r.detail?.samples?.updated || 0), 0);
   const body = document.getElementById('m-sync-result-body');
   if (!body) return;
 
@@ -2098,6 +2131,8 @@ function showSyncResult(result, caughtError = null) {
       <div class="sync-result-card"><span>成功</span><strong>${success}</strong></div>
       <div class="sync-result-card"><span>失败</span><strong>${failed}</strong></div>
       <div class="sync-result-card"><span>样品申请</span><strong>${sampleTotal}</strong></div>
+      <div class="sync-result-card"><span>样品新增</span><strong>${sampleCreated}</strong></div>
+      <div class="sync-result-card"><span>样品更新</span><strong>${sampleUpdated}</strong></div>
     </div>
     <div class="sync-shop-list">
       ${rows.map(row => {
@@ -2121,23 +2156,23 @@ function showSyncResult(result, caughtError = null) {
 // ════ INIT ════
 async function manualSyncShops() {
   try {
-    toast('正在同步店铺数据...');
-    const result = await api('/api/sync/shops', { method: 'POST', body: JSON.stringify({}) });
+    const shop = curStore === 'all' ? 'all' : curStore;
+    const shopName = shop === 'all' ? '全部店铺' : (shopInfo(shop).name || shop);
+    toast(`正在同步${shopName}数据...`);
+    const result = await api('/api/sync/shops', { method: 'POST', body: JSON.stringify({ shop }) });
     await refreshAll();
     const failed = result.results.filter(r => r.status === 'failed').length;
     const skipped = result.results.filter(r => r.status === 'skipped').length;
-    const updated = result.results.reduce((sum, r) => sum
-      + Number(r.detail?.products?.total || 0)
-      + Number(r.detail?.orders?.total || 0)
-      + Number(r.detail?.affiliateOrders?.lines || 0)
-      + Number(r.detail?.samples?.total || 0), 0);
     showSyncResult(result);
     if (failed) {
       toast(`同步失败：${failed} 个店铺，请查看解决办法`);
     } else if (skipped) {
       toast(`同步完成：${skipped} 个店铺待配置授权`);
     } else {
-      toast(`同步成功：更新 ${updated} 条信息`);
+      const sampleTotal = result.results.reduce((sum, r) => sum + Number(r.detail?.samples?.total || 0), 0);
+      const sampleCreated = result.results.reduce((sum, r) => sum + Number(r.detail?.samples?.created || 0), 0);
+      const sampleUpdated = result.results.reduce((sum, r) => sum + Number(r.detail?.samples?.updated || 0), 0);
+      toast(`同步成功：样品申请 ${sampleTotal} 条，新增 ${sampleCreated} 条，更新 ${sampleUpdated} 条`);
     }
   } catch (error) {
     showSyncResult(null, error);
