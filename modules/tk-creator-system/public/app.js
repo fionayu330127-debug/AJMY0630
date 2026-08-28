@@ -20,6 +20,7 @@ let libPageSize = 20;
 let lOrderRange = '90d';
 let lOrderMonth = new Date().toISOString().slice(0, 7);
 let assignTgt = null;
+let assignPreviousBdId = null;
 let collabTgt = null;
 let sampleStats = { total: 0, byStatus: {}, assignedBD: 0 };
 let AGENT_SETTINGS = null;
@@ -42,6 +43,7 @@ let WORKFLOW_PRODUCT_SELECTED = new Set();
 let WORKFLOW_PRODUCT_SHOP = '';
 let WORKFLOW_BD_SELECTED = new Set();
 let inviteFilterTimer = null;
+let CURRENT_USER = null;
 
 // ════ API HELPERS ════
 async function api(path, opts = {}) {
@@ -267,25 +269,45 @@ function renderStoreSwitchers() {
     const el = document.getElementById(id);
     if (el) el.innerHTML = html(suffix);
   });
+  renderSampleSyncState();
   updateStoreCounts();
+}
+
+function renderSampleSyncState() {
+  const el = document.getElementById('sample-sync-state');
+  if (!el) return;
+  const selected = curStore === 'all' ? SHOPS : SHOPS.filter(shop => shop.id === curStore);
+  if (!selected.length) { el.textContent = ''; return; }
+  const failed = selected.filter(shop => shop.last_sync_status === 'failed');
+  const latestSuccess = [...selected].sort((a, b) => String(b.last_success_sync_at || '').localeCompare(String(a.last_success_sync_at || '')))[0];
+  const failureText = failed.map(shop => `${shop.name}: ${shop.last_sync_message || '同步失败'}`).join('；');
+  el.className = `sample-sync-state ${failed.length ? 'failed' : 'success'}`;
+  el.textContent = failed.length
+    ? `最后成功 ${latestSuccess?.last_success_sync_at || '-'} · ${failureText}`
+    : `最后成功 ${latestSuccess?.last_success_sync_at || '-'}`;
+  el.title = failureText || '';
 }
 
 async function updateStoreCounts() {
   const libraryStats = await api('/api/library/stats').catch(() => ({ total: 0, byShop: {} }));
   for (const s of SHOPS) {
     const stats = await api(`/api/samples/stats?shop=${s.id}`);
-    ['', '-invite', '-data', '-automation', '-agent'].forEach(suf => {
+    ['', '-invite', '-automation', '-agent'].forEach(suf => {
       const el = document.getElementById(`scnt-${s.id}${suf}`);
       if (el) el.textContent = stats.total;
     });
+    const dataEl = document.getElementById(`scnt-${s.id}-data`);
+    if (dataEl) dataEl.textContent = libraryStats.byShop?.[s.id] ?? 0;
     const libEl = document.getElementById(`scnt-${s.id}-lib`);
     if (libEl) libEl.textContent = libraryStats.byShop?.[s.id] ?? 0;
   }
   const allSamples = await api('/api/samples/stats?shop=all').catch(() => ({ total: 0 }));
-  ['', '-invite', '-data', '-automation', '-agent'].forEach(suf => {
+  ['', '-invite', '-automation', '-agent'].forEach(suf => {
     const el = document.getElementById(`scnt-all${suf}`);
     if (el) el.textContent = allSamples.total;
   });
+  const allData = document.getElementById('scnt-all-data');
+  if (allData) allData.textContent = libraryStats.total || 0;
   const allLib = document.getElementById('scnt-all-lib');
   if (allLib) allLib.textContent = libraryStats.total || 0;
 }
@@ -812,7 +834,7 @@ async function renderSampleTable() {
     const salesCountCell = groupIndex === 0 ? `<td rowspan="${rowSpan}" class="creator-group-cell metric-cell">${s.sales_count ?? '-'}</td>` : '';
     const remainingClass = remainingDaysText(s.approve_expiration_at).includes('1 天') || remainingDaysText(s.approve_expiration_at) === '已过期' ? 'remain-warn' : '';
     const bdHtml = s.bd_id
-      ? `<div style="display:flex;align-items:center;gap:6px"><img src="${avatarSVG(s.bd_name, 22)}" style="width:22px;height:22px;border-radius:50%"><span style="font-size:12px;color:#555">${esc(s.bd_name || '')}</span></div>`
+      ? `<div class="sample-bd-owner"><img src="${avatarSVG(s.bd_name, 22)}" style="width:22px;height:22px;border-radius:50%"><span>${esc(s.bd_name || '')}</span>${CURRENT_USER?.is_admin ? `<button class="assign-btn sample-bd-edit" title="修改分配 BD" onclick="openAssignModal(event,'${sid}',${Number(s.bd_id) || 'null'})">修改</button>` : ''}</div>`
       : `<button class="assign-btn" onclick="openAssignModal(event,'${sid}')">分配 BD</button>`;
     const actHtml = s.status === 'pending'
       ? `<div class="abtns"><button class="abtn ok" onclick="doApprove('${sid}')">通过</button><button class="abtn ng" onclick="doReject('${sid}')">拒绝</button><button class="abtn bl" onclick="openCreatorModal('${sid}')">详情</button></div>`
@@ -1179,35 +1201,43 @@ async function renderLegacyDataCenter() {
   }
 }
 
-let bdReportState = { period: 'month', bd: 'all' };
+let bdReportState = { period: 'month', bdIds: [], metric: 'all' };
 const reportMetricLabels = { targetedInvites: '定邀数量', openInvites: '公开邀约', sampleCooperations: '样品合作', fulfillmentRate: '履约率', videos: '视频发布', conversions: '订单转化' };
 function reportPct(v) { return v == null ? '—' : `${Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 1 })}%`; }
 function reportMetricValue(key, m) { return key === 'fulfillmentRate' || key === 'acceptanceRate' ? reportPct(m[key]) : Number(m[key] || 0).toLocaleString('zh-CN'); }
 function reportLineSvg(series, key) {
   if (!series.length || !series.some(s => s.values?.length)) return '<div class="empty-state">暂无趋势数据</div>';
+  const selectableMetrics = ['targetedInvites','sampleCooperations','fulfillmentRate','conversions'];
+  if (key === 'all') return `<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">${selectableMetrics.map(metric => `<div style="min-width:0"><h4 style="margin:4px 0 6px;font-size:12px">${reportMetricLabels[metric]}</h4>${reportLineSvg(series, metric)}</div>`).join('')}</div>`;
   const colors = ['#4f46c7','#08776a','#d97706','#dc4666','#2875d6','#7c3aed'];
   const values = series.flatMap(s => (s.values || []).map(r => Number(r[key] || 0))); const max = Math.max(...values, 1); const w = 760, h = 240;
   const x = (i,n) => 42 + (w - 70) * i / Math.max(n - 1, 1); const y = v => h - 30 - (h - 66) * Number(v || 0) / max;
   const lines = series.map((s,j) => { const rows=s.values||[], color=colors[j%colors.length], pts=rows.map((r,i)=>`${x(i,rows.length)},${y(r[key])}`).join(' '); return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>${rows.map((r,i)=>`<circle cx="${x(i,rows.length)}" cy="${y(r[key])}" r="3.5" fill="#fff" stroke="${color}" stroke-width="2"><title>${esc(s.name)} ${r.label}: ${reportMetricValue(key,r)}</title></circle>`).join('')}`; }).join('');
-  const rows=series[0].values||[]; return `<div class="report-series-legend">${series.map((s,j)=>`<span><i style="background:${colors[j%colors.length]}"></i>${esc(s.name)}</span>`).join('')}</div><svg class="bd-report-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="${reportMetricLabels[key] || key}趋势"><line x1="42" y1="${h-30}" x2="${w-20}" y2="${h-30}" stroke="#d8dee7"/>${lines}${rows.map((r,i)=>`<text x="${x(i,rows.length)}" y="${h-7}" text-anchor="middle">${r.label}</text>`).join('')}</svg>`;
+  const rows=series[0].values||[], labelStep=Math.max(1,Math.ceil(rows.length/10)); return `<div class="report-series-legend">${series.map((s,j)=>`<span><i style="background:${colors[j%colors.length]}"></i>${esc(s.name)}</span>`).join('')}</div><svg class="bd-report-svg" viewBox="0 0 ${w} ${h}" role="img" aria-label="${reportMetricLabels[key] || key}趋势"><line x1="42" y1="${h-30}" x2="${w-20}" y2="${h-30}" stroke="#d8dee7"/>${lines}${rows.map((r,i)=>(i%labelStep===0||i===rows.length-1)?`<text x="${x(i,rows.length)}" y="${h-7}" text-anchor="middle">${r.label}</text>`:'').join('')}</svg>`;
 }
-function reportBars(rows) { const max = Math.max(...rows.flatMap(r => [r.new || 0, r.old || 0]), 1); return `<svg class="bd-report-svg" viewBox="0 0 760 220">${rows.map((r,i)=>{const x=45+i*115; const a=Number(r.new||0), b=Number(r.old||0); return `<rect x="${x}" y="${190-a/max*150}" width="28" height="${a/max*150}" fill="#7c72c7"/><rect x="${x+34}" y="${190-b/max*150}" width="28" height="${b/max*150}" fill="#4f9788"/><text x="${x+31}" y="210" text-anchor="middle">${r.label}</text>`}).join('')}</svg>`; }
+function reportBars(rows) { const max = Math.max(...rows.flatMap(r => [r.new || 0, r.old || 0]), 1), plotW=680, step=plotW/Math.max(rows.length,1), barW=Math.max(3,Math.min(24,(step-4)/2)), labelStep=Math.max(1,Math.ceil(rows.length/10)); return `<svg class="bd-report-svg" viewBox="0 0 760 220">${rows.map((r,i)=>{const x=40+i*step+(step-barW*2-2)/2; const a=Number(r.new||0), b=Number(r.old||0); return `<rect x="${x}" y="${190-a/max*150}" width="${barW}" height="${a/max*150}" fill="#7c72c7"/><rect x="${x+barW+2}" y="${190-b/max*150}" width="${barW}" height="${b/max*150}" fill="#4f9788"/>${(i%labelStep===0||i===rows.length-1)?`<text x="${x+barW+1}" y="210" text-anchor="middle">${r.label}</text>`:''}`}).join('')}</svg>`; }
 function reportRadar(rows) { if (!rows.length) return '<div class="empty-state">暂无 BD 数据</div>'; const shown=rows.slice(0,6), colors=['#4f46c7','#08776a','#d97706','#dc4666','#2875d6','#7c3aed'], axes=['邀约','样品','履约率','视频','订单'], keys=['invites','samples','fulfillment','videos','conversions'], cx=200,cy=120,r=82, maxima=keys.map(k=>Math.max(...shown.map(x=>Number(x[k]||0)),1)), point=(i,q)=>`${cx+Math.cos(-Math.PI/2+i*Math.PI*2/5)*r*q},${cy+Math.sin(-Math.PI/2+i*Math.PI*2/5)*r*q}`; return `<div class="report-series-legend">${shown.map((row,j)=>`<span><i style="background:${colors[j]}"></i>${esc(row.name)}</span>`).join('')}</div><svg class="bd-report-radar" viewBox="0 0 400 245">${[.25,.5,.75,1].map(q=>`<polygon points="${axes.map((_,i)=>point(i,q)).join(' ')}" fill="none" stroke="#dfe4ea"/>`).join('')}${axes.map((a,i)=>`<text x="${cx+Math.cos(-Math.PI/2+i*Math.PI*2/5)*(r+23)}" y="${cy+Math.sin(-Math.PI/2+i*Math.PI*2/5)*(r+23)}" text-anchor="middle">${a}</text>`).join('')}${shown.map((row,j)=>`<polygon points="${keys.map((k,i)=>point(i,Number(row[k]||0)/maxima[i])).join(' ')}" fill="${colors[j]}18" stroke="${colors[j]}" stroke-width="2"><title>${esc(row.name)}</title></polygon>`).join('')}</svg>`; }
 function reportDelta(key, current, previous) { const a=Number(current?.[key]||0), b=Number(previous?.[key]||0), diff=a-b, rate=key==='acceptanceRate'||key==='fulfillmentRate'; return `<span class="${diff<0?'down':'up'}">${diff===0?'—':`${rate?Math.abs(diff).toLocaleString('zh-CN',{maximumFractionDigits:1})+'%':Math.abs(diff).toLocaleString('zh-CN')} ${diff>0?'↑':'↓'}`}</span>`; }
 async function renderDataCenter() {
   const box = document.getElementById('data-center'); if (!box) return;
   box.innerHTML = '<div class="empty-state">正在加载数据...</div>';
   try {
-    const params = new URLSearchParams({ shop: curStore || 'all', period: bdReportState.period, bd: bdReportState.bd });
+    const params = new URLSearchParams({ shop: curStore || 'all', period: bdReportState.period, bd: bdReportState.bdIds.join(',') || 'all' });
     const d = await api(`/api/data/bd-report?${params}`); const m = d.metrics;
     const metricCards = [['targetedInvites','新增定邀达人'],['openInvites','新增公开邀约'],['totalCreators','总负责达人数'],['acceptanceRate','邀约接受率'],['sampleCooperations','新增样品合作'],['fulfillmentRate','达人履约率'],['videos','视频发布数量'],['conversions','订单转化量']];
-    const bdOpts = `<option value="all">全部BD</option>${(d.bds||[]).map(b=>`<option value="${b.id}" ${String(b.id)===String(bdReportState.bd)?'selected':''}>${esc(b.name)}</option>`).join('')}`;
+    const selectedBdIds = new Set(bdReportState.bdIds.map(String));
+    const bdSummary = selectedBdIds.size ? (d.bds||[]).filter(b=>selectedBdIds.has(String(b.id))).map(b=>b.name).slice(0,2).join('、') + (selectedBdIds.size>2?` 等 ${selectedBdIds.size} 位`:'') : '全部BD';
+    const bdOptions = (d.bds||[]).map(b=>`<label class="bd-report-bd-option"><input type="checkbox" class="bd-report-bd-cb" value="${b.id}" ${selectedBdIds.has(String(b.id))?'checked':''}><span>${esc(b.name)}</span></label>`).join('');
     const shopOpts = `<option value="all">全部店铺</option>${SHOPS.map(s=>`<option value="${s.id}" ${s.id===curStore?'selected':''}>${esc(s.name)}</option>`).join('')}`;
     const detail = d.inviteRows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.totalCreators}</td><td>${r.targetedInvites}</td><td>${r.openInvites}</td></tr>`).join('') || '<tr><td colspan="4">暂无数据</td></tr>';
     const conv = d.conversionRows.reduce((acc,r)=>{(acc[r.bdId] ||= {name:r.name,new:null,old:null}); acc[r.bdId][r.type]=r; return acc;},{});
     const convRows = Object.values(conv).map(r=>{const received=(r.new?.receivedCreators||0)+(r.old?.receivedCreators||0), fulfilled=(r.new?.fulfilledCreators||0)+(r.old?.fulfilledCreators||0); return `<tr><td rowspan="3">${esc(r.name)}</td><td>新达人</td><td>${r.new?.samples||0}</td><td>${reportPct(r.new?.fulfillmentRate)}</td><td>${r.new?.videos||0}</td><td>${r.new?.conversions||0}</td></tr><tr><td>老达人</td><td>${r.old?.samples||0}</td><td>${reportPct(r.old?.fulfillmentRate)}</td><td>${r.old?.videos||0}</td><td>${r.old?.conversions||0}</td></tr><tr class="report-total"><td>汇总</td><td>${(r.new?.samples||0)+(r.old?.samples||0)}</td><td>${reportPct(received?fulfilled/received*100:null)}</td><td>${(r.new?.videos||0)+(r.old?.videos||0)}</td><td>${(r.new?.conversions||0)+(r.old?.conversions||0)}</td></tr>`;}).join('') || '<tr><td colspan="6">暂无数据</td></tr>';
-    box.innerHTML = `<div class="bd-report-toolbar"><div><h2>数据中心</h2><p>BD绩效 · 达人转化 · 趋势分析</p></div><div class="bd-report-filters"><select id="bd-report-bd" aria-label="BD筛选">${bdOpts}</select><select id="bd-report-period" aria-label="时间筛选"><option value="month">本月</option><option value="quarter">近3月</option><option value="halfyear">近6月</option><option value="year">本年</option></select><select id="bd-report-shop" aria-label="店铺筛选">${shopOpts}</select></div></div><div class="bd-report-kpis">${metricCards.map(([k,l])=>`<div class="report-kpi"><span>${l}</span><strong>${reportMetricValue(k,m)}</strong><small>较上期 ${reportDelta(k,m,d.previous)}</small></div>`).join('')}</div><div class="bd-report-grid"><section class="dc-panel"><h3>BD邀约明细</h3><table class="dc-table"><thead><tr><th>BD</th><th>总负责</th><th>新增定邀</th><th>新增公开</th></tr></thead><tbody>${detail}</tbody></table></section><section class="dc-panel"><h3>BD样品及转化明细</h3><table class="dc-table"><thead><tr><th>BD</th><th>类型</th><th>样品数</th><th>履约率</th><th>视频数</th><th>转化量</th></tr></thead><tbody>${convRows}</tbody></table></section></div><section class="dc-panel report-chart-panel"><div class="report-chart-head"><h3>趋势曲线分析</h3><div class="report-chart-tabs">${['targetedInvites','sampleCooperations','fulfillmentRate','conversions'].map(k=>`<button class="${(bdReportState.metric||'targetedInvites')===k?'active':''}" data-report-metric="${k}">${reportMetricLabels[k]}</button>`).join('')}</div></div><div id="bd-report-line">${reportLineSvg(d.trendSeries||[], bdReportState.metric||'targetedInvites')}</div></section><div class="bd-report-grid"><section class="dc-panel"><h3>新达人 vs 老达人</h3><div class="report-legend"><span class="new">新达人样品</span><span class="old">老达人样品</span></div>${reportBars(d.trends.map(r=>({label:r.label,new:r.newCooperations,old:r.oldCooperations})))}</section><section class="dc-panel"><h3>各BD绩效雷达</h3>${reportRadar(d.byBd)}</section></div>`;
-    document.getElementById('bd-report-bd').onchange = e => { bdReportState.bd=e.target.value; renderDataCenter(); };
+    box.innerHTML = `<div class="bd-report-toolbar"><div><h2>数据中心</h2><p>BD绩效 · 达人转化 · 趋势分析</p></div><div class="bd-report-filters"><div class="bd-report-bd-select"><button id="bd-report-bd-trigger" class="bd-report-bd-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span>${esc(bdSummary)}</span><span>▾</span></button><div id="bd-report-bd-menu" class="bd-report-bd-menu"><div class="bd-report-bd-options">${bdOptions||'<div class="empty-state">暂无 BD 成员</div>'}</div><div class="bd-report-bd-actions"><button id="bd-report-bd-clear" type="button">全部BD</button><button id="bd-report-bd-apply" class="primary" type="button">应用</button></div></div></div><select id="bd-report-period" aria-label="时间筛选"><option value="month">本月</option><option value="quarter">近3月</option><option value="halfyear">近6月</option><option value="year">本年</option></select><select id="bd-report-shop" aria-label="店铺筛选">${shopOpts}</select></div></div><div class="bd-report-kpis">${metricCards.map(([k,l])=>`<div class="report-kpi"><span>${l}</span><strong>${reportMetricValue(k,m)}</strong><small>较上期 ${reportDelta(k,m,d.previous)}</small></div>`).join('')}</div><div class="bd-report-grid"><section class="dc-panel"><h3>BD邀约明细</h3><table class="dc-table"><thead><tr><th>BD</th><th>总负责</th><th>新增定邀</th><th>新增公开</th></tr></thead><tbody>${detail}</tbody></table></section><section class="dc-panel"><h3>BD样品及转化明细</h3><table class="dc-table"><thead><tr><th>BD</th><th>类型</th><th>样品数</th><th>履约率</th><th>视频数</th><th>转化量</th></tr></thead><tbody>${convRows}</tbody></table></section></div><section class="dc-panel report-chart-panel"><div class="report-chart-head"><h3>趋势曲线分析</h3><div class="report-chart-tabs">${['all','targetedInvites','sampleCooperations','fulfillmentRate','conversions'].map(k=>`<button class="${bdReportState.metric===k?'active':''}" data-report-metric="${k}">${k==='all'?'全部指标':reportMetricLabels[k]}</button>`).join('')}</div></div><div id="bd-report-line">${reportLineSvg(d.trendSeries||[], bdReportState.metric)}</div></section><div class="bd-report-grid"><section class="dc-panel"><h3>新达人 vs 老达人</h3><div class="report-legend"><span class="new">新达人样品</span><span class="old">老达人样品</span></div>${reportBars(d.trends.map(r=>({label:r.label,new:r.newCooperations,old:r.oldCooperations})))}</section><section class="dc-panel"><h3>各BD绩效雷达</h3>${reportRadar(d.byBd)}</section></div>`;
+    const bdMenu = document.getElementById('bd-report-bd-menu');
+    const bdTrigger = document.getElementById('bd-report-bd-trigger');
+    bdTrigger.onclick = () => { const open=bdMenu.classList.toggle('show'); bdTrigger.setAttribute('aria-expanded',String(open)); };
+    document.getElementById('bd-report-bd-clear').onclick = () => { bdReportState.bdIds=[]; renderDataCenter(); };
+    document.getElementById('bd-report-bd-apply').onclick = () => { bdReportState.bdIds=Array.from(box.querySelectorAll('.bd-report-bd-cb:checked')).map(el=>String(el.value)); renderDataCenter(); };
     document.getElementById('bd-report-period').value = bdReportState.period; document.getElementById('bd-report-period').onchange = e => { bdReportState.period=e.target.value; renderDataCenter(); };
     document.getElementById('bd-report-shop').onchange = e => { curStore=e.target.value; renderDataCenter(); };
     box.querySelectorAll('[data-report-metric]').forEach(btn=>btn.onclick=()=>{bdReportState.metric=btn.dataset.reportMetric; renderDataCenter();});
@@ -1258,8 +1288,8 @@ async function openCreatorModal(sid) {
   document.getElementById('m-creator').classList.add('show');
 }
 
-function openAssignModal(e, sid) {
-  e.stopPropagation(); assignTgt = sid;
+function openAssignModal(e, sid, previousBdId = null) {
+  e.stopPropagation(); assignTgt = sid; assignPreviousBdId = previousBdId;
   document.getElementById('assign-list').innerHTML = BD_LIST.map(b => `
     <div class="assign-opt" onclick="doAssign(${b.id})">
       <img src="${avatarSVG(b.name, 36)}" style="width:36px;height:36px;border-radius:50%">
@@ -1269,10 +1299,11 @@ function openAssignModal(e, sid) {
   document.getElementById('m-assign').classList.add('show');
 }
 async function doAssign(bdId) {
+  const reassignment = Boolean(assignPreviousBdId && Number(assignPreviousBdId) !== Number(bdId));
   await api(`/api/samples/${assignTgt}`, { method: 'PATCH', body: JSON.stringify({ bd_id: bdId, status: 'assigned' }) });
   closeModal('m-assign');
   const bd = BD_LIST.find(b => b.id === bdId);
-  toast(`📨 已分配给 ${bd?.name}，对方将收到通知`);
+  toast(reassignment ? `已将负责人修改为 ${bd?.name}` : `已分配给 ${bd?.name}，对方将收到通知`);
   await loadShopsAndBD();
   renderSamplePage();
 }
@@ -2159,11 +2190,14 @@ function showSyncResult(result, caughtError = null) {
 
 // ════ INIT ════
 async function manualSyncShops() {
+  const button = document.getElementById('sample-sync-button');
+  if (button?.disabled) return;
   try {
+    if (button) { button.disabled = true; button.textContent = '正在同步...'; }
     const shop = curStore === 'all' ? 'all' : curStore;
     const shopName = shop === 'all' ? '全部店铺' : (shopInfo(shop).name || shop);
-    toast(`正在同步${shopName}数据...`);
-    const result = await api('/api/sync/shops', { method: 'POST', body: JSON.stringify({ shop }) });
+    toast(`正在增量同步${shopName}最近 30 天样品...`);
+    const result = await api('/api/sync/samples', { method: 'POST', body: JSON.stringify({ shop, days: 30 }) });
     await refreshAll();
     const failed = result.results.filter(r => r.status === 'failed').length;
     const skipped = result.results.filter(r => r.status === 'skipped').length;
@@ -2176,14 +2210,17 @@ async function manualSyncShops() {
       const sampleTotal = result.results.reduce((sum, r) => sum + Number(r.detail?.samples?.total || 0), 0);
       const sampleCreated = result.results.reduce((sum, r) => sum + Number(r.detail?.samples?.created || 0), 0);
       const sampleUpdated = result.results.reduce((sum, r) => sum + Number(r.detail?.samples?.updated || 0), 0);
-      toast(`同步成功：样品申请 ${sampleTotal} 条，新增 ${sampleCreated} 条，更新 ${sampleUpdated} 条`);
+      toast(`样品同步成功：读取 ${sampleTotal} 条，新增 ${sampleCreated} 条，更新 ${sampleUpdated} 条`);
     }
   } catch (error) {
     showSyncResult(null, error);
     toast(error.message || '同步失败');
+  } finally {
+    if (button) { button.disabled = false; button.textContent = '同步样品信息'; }
   }
 }
 (async function init() {
+  CURRENT_USER = await api('/api/me').catch(() => null);
   await loadShopsAndBD();
   showPage('invite');
 })();

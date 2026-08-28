@@ -15,7 +15,7 @@ agimia-erp-shell/
 
 `agimia-erp-shell` is the company system shell. It owns login, users, global navigation, and shared PostgreSQL data.
 
-`modules/tk-creator-system` is mounted by the shell at `/tk`. It keeps its own SQLite database under `modules/tk-creator-system/data/`, so the TikTok creator data is independent from the main ERP database.
+`modules/tk-creator-system` is the only TK creator module mounted by the shell at `/tk`. Its SQLite data stays under `modules/tk-creator-system/data/` and is excluded from code releases, so creator data remains independent from the main ERP database.
 
 ## Module rules
 

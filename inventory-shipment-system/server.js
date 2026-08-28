@@ -11,7 +11,7 @@ const MODULE_INFO = {
     {
       id: 'inventory-detail',
       label: '库存明细',
-      url: 'http://47.110.59.28/',
+      url: 'http://47.110.59.28:5174/inventory',
       order: 10,
     },
     {

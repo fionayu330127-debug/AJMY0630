@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Agimia ERP backup every day
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=agimia-backup.service
+
+[Install]
+WantedBy=timers.target

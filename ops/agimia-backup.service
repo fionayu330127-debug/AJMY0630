@@ -1,0 +1,10 @@
+[Unit]
+Description=Agimia ERP consistent backup
+After=postgresql.service agimia-erp.service
+
+[Service]
+Type=oneshot
+User=ecs-user
+Group=ecs-user
+ExecStart=/home/ecs-user/ecs-daily-backup.sh
+Nice=10

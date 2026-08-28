@@ -403,6 +403,16 @@ function modulePanel(active) {
     `;
   }
 
+  if (active.id === 'tk-trend') {
+    return `
+      <section class="panel work-panel">
+        <div class="panel-head"><h3>TK trend</h3><small>/tk-trend/</small></div>
+        <div class="module-frame"><iframe src="/tk-trend/" title="TK trend"></iframe></div>
+        <div class="footer-row"><span>TK trend 已作为独立模块接入选品中心。</span><a href="/tk-trend/" target="_self">打开完整模块</a></div>
+      </section>
+    `;
+  }
+
   if (active.id === 'tk-creator') {
     return `
       <section class="panel work-panel">
@@ -411,7 +421,7 @@ function modulePanel(active) {
           <small>/tk/</small>
         </div>
         <div class="module-frame tk-frame-wrap">
-          <iframe src="/tk/?v=20260629-tk-frame" title="TK 达人管理系统" onload="handleTkFrameLoad(this)"></iframe>
+          <iframe src="/tk/?v=20260828-sample-sync-1" title="TK 达人管理系统" onload="handleTkFrameLoad(this)"></iframe>
           <div class="tk-frame-fallback" id="tk-frame-fallback">
             <strong>TK 达人管理系统未在当前框内正常显示</strong>
             <span>可以直接打开完整 TK 页面继续操作。</span>

@@ -24,7 +24,7 @@ const IMAGE_BASE_URL = Object.prototype.hasOwnProperty.call(process.env, 'OPENAI
   : env('OPENAI_BASE_URL');
 
 const TEXT_MODEL = env('OPENAI_TEXT_MODEL', 'gpt-4o');
-const IMAGE_MODEL = 'gpt-image-2';
+const IMAGE_MODEL = env('OPENAI_IMAGE_MODEL', 'gpt-image-2');
 const IMAGE_SIZE = env('OPENAI_IMAGE_SIZE');
 const TEXT_LIKE_MODEL_RE = /^(gpt-[45]|o[134]|chatgpt-|claude-|gemini-|deepseek-)/i;
 

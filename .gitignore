@@ -14,5 +14,11 @@ modules/*/data/*.db
 modules/*/data/*.db-wal
 modules/*/data/*.db-shm
 modules/*/cloudflared-windows-amd64.exe
-tk-creator-system/
+/tk-creator-system/
 modules/product-test-system/
+/product-test-system/data/
+modules/*/scripts/.tmp-*
+modules/tk-trend-system/browser-extension.pem
+modules/tk-trend-system/browser-extension.crx
+modules/tk-trend-system/browser-extension.rar
+.release-revision

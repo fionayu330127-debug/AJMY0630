@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "AJMY TK trend 本地同步",
+  "version": "1.0.0",
+  "description": "从已登录的 TikTok Seller 热卖商品榜同步分页数据到本机 TK trend。",
+  "permissions": ["activeTab", "scripting", "webRequest", "downloads", "alarms", "storage", "tabs", "notifications"],
+  "host_permissions": [
+    "https://seller-jp.tiktok.com/*",
+    "https://*.tiktok.com/*",
+    "https://*.tiktokglobalshop.com/*",
+    "http://127.0.0.1:3111/*",
+    "http://localhost:3111/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*.tiktok.com/*", "https://*.tiktokglobalshop.com/*"],
+      "js": ["capture-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.tiktok.com/*", "https://*.tiktokglobalshop.com/*"],
+      "js": ["capture-relay.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "同步 TK trend",
+    "default_popup": "popup.html"
+  }
+}

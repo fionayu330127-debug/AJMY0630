@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><link rel="stylesheet" href="popup.css"></head>
+<body><main>
+  <h1>TK trend 同步</h1>
+  <p id="status">正在检查当前榜单...</p>
+  <button id="sync" disabled>同步当前榜单全部分页</button>
+  <section class="schedule">
+    <label class="check"><input type="checkbox" id="autoEnabled">每天自动同步默认榜单</label>
+    <label>执行时间<input type="time" id="autoTime" value="09:00"></label>
+    <button id="saveSchedule" class="secondary">保存自动同步设置</button>
+    <p id="scheduleStatus"></p>
+  </section>
+  <small>自动同步要求电脑、HubStudio、本机 TK trend 服务和 TikTok 登录状态均有效。本工具不会保存登录凭证。</small>
+</main><script src="popup.js"></script></body></html>

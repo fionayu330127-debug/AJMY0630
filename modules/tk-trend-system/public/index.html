@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TK trend</title><link rel="stylesheet" href="./styles.css?v=1"></head>
+<body><main class="app">
+  <header><div><h1>TK trend</h1><p>日本 TikTok Shop 热卖商品榜</p></div><div class="summary" id="summary"></div></header>
+  <nav id="tabs"></nav>
+  <section class="toolbar">
+    <label>日期范围<input type="date" id="startDate"><span>至</span><input type="date" id="endDate"></label>
+    <label>类目<select id="category"><option value="all">全部类目</option></select></label>
+    <label>相似商品数<select id="similar"><option value="0">不限</option><option value="10">10 以上</option><option value="50">50 以上</option><option value="100">100 以上</option></select></label>
+    <label class="search"><input id="keyword" placeholder="搜索商品、店铺或商品 ID"></label>
+    <button class="primary" id="importBtn">导入响应 JSON</button><input hidden type="file" id="fileInput" accept="application/json,.json">
+  </section>
+  <section class="notice" id="notice"></section>
+  <section class="table-wrap"><table><thead><tr><th>排名</th><th>商品</th><th>价格</th><th>评分</th><th>GMV</th><th>点击次数</th><th>CTR</th><th>相似商品</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></section>
+  <footer><span id="pageInfo"></span><div><button id="prev">上一页</button><button id="next">下一页</button></div></footer>
+</main><script src="./app.js?v=1"></script></body></html>

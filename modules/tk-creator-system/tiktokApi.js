@@ -143,7 +143,9 @@ async function tiktokRequestOnce({ path, method = 'GET', query = {}, body = {}, 
 }
 
 async function tiktokRequest(args) {
-  const maxRetries = Number(process.env.TK_API_RATE_LIMIT_RETRIES || 2);
+  const maxRetries = Number(process.env.TK_API_RATE_LIMIT_RETRIES || 3);
+  const retryDelays = String(process.env.TK_API_RATE_LIMIT_DELAYS_MS || '5000,15000,30000')
+    .split(',').map(Number).filter((value) => Number.isFinite(value) && value > 0);
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
       return await tiktokRequestOnce(args);
@@ -153,7 +155,7 @@ async function tiktokRequest(args) {
         return tiktokRequestOnce({ ...args, accessToken: nextAccessToken });
       }
       if (attempt < maxRetries && isRateLimited(error.payload, error.status, error.responseText || error.message)) {
-        const delay = Number(process.env.TK_API_RATE_LIMIT_DELAY_MS || 3000) * (attempt + 1);
+        const delay = retryDelays[attempt] || Number(process.env.TK_API_RATE_LIMIT_DELAY_MS || 5000) * (2 ** attempt);
         await sleep(delay);
         continue;
       }

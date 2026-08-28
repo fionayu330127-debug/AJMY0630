@@ -7,7 +7,7 @@ const https = require('https');
 const querystring = require('querystring');
 const fs = require('fs');
 const { Pool } = require('pg');
-const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncTikTokShop } = require('./syncTikTok');
+const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncSampleApplications, syncTikTokShop } = require('./syncTikTok');
 const { tiktokRequest } = require('./tiktokApi');
 const { getAppConfig, getAppSecretStatus } = require('./tiktokSecrets');
 
@@ -30,6 +30,20 @@ app.use(express.static(path.join(__dirname, 'public'), {
     res.setHeader('Cache-Control', 'no-store');
   },
 }));
+
+async function currentErpUser(req) {
+  return typeof app.getCurrentUser === 'function' ? app.getCurrentUser(req) : null;
+}
+
+app.get('/api/me', async (req, res) => {
+  try {
+    const user = await currentErpUser(req);
+    if (!user) return res.status(401).json({ error: '未登录' });
+    res.json({ id: user.id, name: user.name, role: user.role, is_admin: user.role === 'admin' });
+  } catch (error) {
+    res.status(500).json({ error: '读取登录用户失败' });
+  }
+});
 
 // ════════════════════════════════════════
 //  工具函数 + TikTok OAuth Token交换函数
@@ -1811,13 +1825,9 @@ async function syncAllShops(source = 'manual', shopId = 'all') {
 
 function msUntilNextSchedule() {
   const now = new Date();
-  const targets = [7, 12, 18].map((hour) => {
-    const d = new Date(now);
-    d.setHours(hour, 0, 0, 0);
-    if (d <= now) d.setDate(d.getDate() + 1);
-    return d;
-  });
-  const next = targets.sort((a, b) => a - b)[0];
+  const next = new Date(now);
+  next.setHours(Number(process.env.TK_SAMPLE_DAILY_SYNC_HOUR || 7), 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
   return { next, ms: next.getTime() - now.getTime() };
 }
 
@@ -1826,8 +1836,8 @@ function scheduleShopSync() {
   console.log(`[sync] next shop sync at ${next.toLocaleString()}`);
   syncTimer = setTimeout(async () => {
     try {
-      const result = await syncAllShops('schedule');
-      console.log(`[sync] scheduled shop sync finished: ${result.total} shops`);
+      const result = await syncSamplesForShops('schedule-samples', 'all', 0);
+      console.log(`[sync] scheduled sample sync finished: ${result.total} shops`);
     } catch (error) {
       console.error('[sync] scheduled shop sync failed:', error);
       writeSyncLog(null, 'schedule', 'failed', error.message || '同步失败');
@@ -1861,7 +1871,12 @@ function startShopSyncScheduler() {
 // ════════════════════════════════════════
 app.get('/api/shops', (req, res) => {
   const shops = db.prepare(`
-    SELECT id, name, color, last_sync_at, last_sync_status, last_sync_message
+    SELECT shops.id, shops.name, shops.color, shops.last_sync_at, shops.last_sync_status, shops.last_sync_message,
+      (SELECT created_at FROM sync_logs
+       WHERE sync_logs.shop_id = shops.id
+         AND sync_logs.status = 'success'
+         AND sync_logs.source IN ('samples-manual', 'schedule-samples', 'manual')
+       ORDER BY sync_logs.id DESC LIMIT 1) AS last_success_sync_at
     FROM shops
   `).all();
   res.json(shops);
@@ -1869,9 +1884,14 @@ app.get('/api/shops', (req, res) => {
 
 app.get('/api/sync/status', (req, res) => {
   const shops = db.prepare(`
-    SELECT id, name, color, last_sync_at, last_sync_status, last_sync_message
+    SELECT shops.id, shops.name, shops.color, shops.last_sync_at, shops.last_sync_status, shops.last_sync_message,
+      (SELECT created_at FROM sync_logs
+       WHERE sync_logs.shop_id = shops.id
+         AND sync_logs.status = 'success'
+         AND sync_logs.source IN ('samples-manual', 'schedule-samples', 'manual')
+       ORDER BY sync_logs.id DESC LIMIT 1) AS last_success_sync_at
     FROM shops
-    ORDER BY id
+    ORDER BY shops.id
   `).all();
   const logs = db.prepare(`
     SELECT id, shop_id, source, status, message, created_at
@@ -2369,6 +2389,45 @@ app.post('/api/sync/shops', async (req, res) => {
   }
 });
 
+async function syncSamplesForShops(source = 'samples-manual', shopId = 'all', incrementalDays = 30) {
+  const requestedShop = String(shopId || 'all');
+  const shops = db.prepare(`SELECT * FROM shops ${requestedShop !== 'all' ? 'WHERE id = ?' : ''} ORDER BY id`)
+    .all(...(requestedShop !== 'all' ? [requestedShop] : []));
+  const results = [];
+  for (const shop of shops) {
+    if (!shop.access_token || !shop.shop_cipher) {
+      results.push({ shop_id: shop.id, shop_name: shop.name, status: 'skipped', message: '店铺未授权或缺少 shop_cipher' });
+      continue;
+    }
+    try {
+      const samples = await syncSampleApplications(db, shop, { incrementalDays });
+      const mode = samples.mode === 'full' ? '全量校准' : '快速增量';
+      const message = `样品${mode}同步完成：扫描 ${samples.scanned_pages} 页/${samples.total} 条，新增 ${samples.created} 条，更新 ${samples.updated} 条`;
+      db.prepare(`UPDATE shops SET last_sync_at = ?, last_sync_status = 'success', last_sync_message = ? WHERE id = ?`)
+        .run(nowText(), message, shop.id);
+      writeSyncLog(shop.id, source, 'success', message);
+      results.push({ shop_id: shop.id, shop_name: shop.name, status: 'success', message, detail: { samples } });
+    } catch (error) {
+      const message = error.message || '样品同步失败';
+      db.prepare(`UPDATE shops SET last_sync_at = ?, last_sync_status = 'failed', last_sync_message = ? WHERE id = ?`)
+        .run(nowText(), message, shop.id);
+      writeSyncLog(shop.id, source, 'failed', message);
+      results.push({ shop_id: shop.id, shop_name: shop.name, status: 'failed', message });
+    }
+  }
+  return { success: results.every(row => row.status === 'success'), total: results.length, results };
+}
+
+app.post('/api/sync/samples', async (req, res) => {
+  try {
+    const shop = req.body?.shop || req.query.shop || 'all';
+    const days = Math.min(90, Math.max(1, Number(req.body?.days || req.query.days || 30)));
+    res.json(await syncSamplesForShops('samples-manual', shop, days));
+  } catch (error) {
+    res.status(500).json({ error: error.message || '样品同步失败' });
+  }
+});
+
 app.post('/api/sync/products', async (req, res) => {
   try {
     ensureSyncSchema(db);
@@ -2615,7 +2674,7 @@ app.get('/api/orders', (req, res) => {
 app.get('/api/data/bd-report', async (req, res) => {
   await listBdMembers();
   const shop = String(req.query.shop || 'all');
-  const bdId = Number(req.query.bd || 0);
+  const bdIds = new Set(String(req.query.bd || '').split(',').map(Number).filter(Number.isInteger).filter((id) => id > 0));
   const period = ['month', 'quarter', 'halfyear', 'year'].includes(req.query.period) ? req.query.period : 'month';
   const now = new Date();
   const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
@@ -2637,16 +2696,26 @@ app.get('/api/data/bd-report', async (req, res) => {
     ${sampleWhere.length ? `WHERE ${sampleWhere.join(' AND ')}` : ''}
     ORDER BY datetime(s.applied_at), s.id
   `).all(...sampleArgs);
-  const firstSampleByUid = new Map();
-  db.prepare(`SELECT uid, MIN(datetime(applied_at)) AS first_at FROM samples GROUP BY uid`).all()
-    .forEach((row) => firstSampleByUid.set(row.uid, row.first_at));
+  const creatorKey = (sample) => {
+    const handle = normalizeCreatorHandle(sample.creator_handle);
+    return handle ? `handle:${handle}` : `uid:${String(sample.uid || '').trim()}`;
+  };
+  const uniqueCreatorCount = (samples) => new Set(samples.map(creatorKey).filter((key) => key !== 'uid:')).size;
+  const firstSampleByCreator = new Map();
+  allSamples.forEach((sample) => {
+    const key = creatorKey(sample);
+    const appliedAt = String(sample.applied_at || '');
+    if (appliedAt && (!firstSampleByCreator.has(key) || appliedAt < firstSampleByCreator.get(key))) {
+      firstSampleByCreator.set(key, appliedAt);
+    }
+  });
   const inRange = (value, from = startText, to = endText) => value && value >= from && value < to;
-  const validOwner = (sample) => !bdId || Number(sample.owner_bd_id) === bdId;
+  const validOwner = (sample) => !bdIds.size || bdIds.has(Number(sample.owner_bd_id));
   const scopedSamples = allSamples.filter(validOwner);
   const periodSamples = scopedSamples.filter((sample) => inRange(sample.applied_at));
   const acceptedStatuses = new Set(['approved', 'assigned', 'shipped', 'published']);
   const sqliteTime = (value) => value ? String(value).replace('T', ' ').slice(0, 19) : '';
-  const isNew = (sample) => sqliteTime(firstSampleByUid.get(sample.uid)) === sqliteTime(sample.applied_at);
+  const isNew = (sample) => sqliteTime(firstSampleByCreator.get(creatorKey(sample))) === sqliteTime(sample.applied_at);
   const publishedAt = (sample) => sample.published_at || (sample.status === 'published' ? sample.synced_at || sample.library_added_at : null);
 
   const handleOwners = new Map();
@@ -2658,24 +2727,25 @@ app.get('/api/data/bd-report', async (req, res) => {
   const orderArgs = [sqlDate(previousStart), endText];
   if (shop !== 'all') { orderWhere.push('shop_id = ?'); orderArgs.push(shop); }
   let rangeOrders = db.prepare(`SELECT * FROM affiliate_orders WHERE ${orderWhere.join(' AND ')}`).all(...orderArgs);
-  if (bdId) rangeOrders = rangeOrders.filter((order) => handleOwners.get(normalizeCreatorHandle(order.creator_username)) === bdId);
+  if (bdIds.size) rangeOrders = rangeOrders.filter((order) => bdIds.has(handleOwners.get(normalizeCreatorHandle(order.creator_username))));
   const periodOrders = rangeOrders.filter((order) => inRange(order.order_created_at));
 
   const summarize = (samples, orders) => {
-    const targeted = samples.filter((s) => s.collab_type === 'targeted');
+    const targeted = samples.filter((s) => Number(s.commission_rate) >= 0.15);
+    const open = samples.filter((s) => s.commission_rate != null && Number(s.commission_rate) < 0.15);
     const received = samples.filter((s) => s.sample_received_at);
     const fulfilled = received.filter((s) => {
       const pub = publishedAt(s);
       if (!pub) return false;
       return new Date(pub).getTime() <= new Date(s.sample_received_at).getTime() + 7 * 86400000;
     });
-    const targetedCreators = new Set(targeted.map((s) => s.uid)).size;
-    const acceptedTargeted = new Set(targeted.filter((s) => acceptedStatuses.has(s.status)).map((s) => s.uid)).size;
-    const receivedCreators = new Set(received.map((s) => s.uid)).size;
-    const fulfilledCreators = new Set(fulfilled.map((s) => s.uid)).size;
+    const targetedCreators = uniqueCreatorCount(targeted);
+    const acceptedTargeted = uniqueCreatorCount(targeted.filter((s) => acceptedStatuses.has(s.status)));
+    const receivedCreators = uniqueCreatorCount(received);
+    const fulfilledCreators = uniqueCreatorCount(fulfilled);
     return {
       targetedInvites: targetedCreators,
-      openInvites: new Set(samples.filter((s) => s.collab_type === 'open').map((s) => s.uid)).size,
+      openInvites: uniqueCreatorCount(open),
       acceptedTargeted,
       sampleCooperations: samples.filter((s) => acceptedStatuses.has(s.status)).length,
       newCooperations: samples.filter((s) => acceptedStatuses.has(s.status) && isNew(s)).length,
@@ -2689,15 +2759,15 @@ app.get('/api/data/bd-report', async (req, res) => {
     };
   };
   const metrics = summarize(periodSamples, periodOrders);
-  metrics.totalCreators = new Set(scopedSamples.filter((s) => s.applied_at < endText && s.owner_bd_id).map((s) => s.uid)).size;
+  metrics.totalCreators = uniqueCreatorCount(scopedSamples.filter((s) => s.applied_at < endText && s.owner_bd_id));
   metrics.acceptanceRate = metrics.targetedInvites ? Math.round(metrics.acceptedTargeted / metrics.targetedInvites * 1000) / 10 : null;
   metrics.fulfillmentRate = metrics.receivedCreators ? Math.round(metrics.fulfilledCreators / metrics.receivedCreators * 1000) / 10 : null;
 
   const bdMap = new Map(db.prepare(`SELECT id, name FROM bd_members WHERE active = 1 OR id IN (SELECT DISTINCT bd_id FROM samples WHERE bd_id IS NOT NULL) ORDER BY name`).all().map((b) => [Number(b.id), b.name]));
-  const selectedBdIds = bdId ? [bdId] : [...bdMap.keys()];
+  const selectedBdIds = bdIds.size ? [...bdIds].filter((id) => bdMap.has(id)) : [...bdMap.keys()];
   const inviteRows = selectedBdIds.map((id) => {
     const rows = periodSamples.filter((s) => Number(s.owner_bd_id) === id);
-    return { bdId: id, name: bdMap.get(id) || `BD ${id}`, totalCreators: new Set(scopedSamples.filter((s) => Number(s.owner_bd_id) === id).map((s) => s.uid)).size, targetedInvites: new Set(rows.filter((s) => s.collab_type === 'targeted').map((s) => s.uid)).size, openInvites: new Set(rows.filter((s) => s.collab_type === 'open').map((s) => s.uid)).size };
+    return { bdId: id, name: bdMap.get(id) || `BD ${id}`, totalCreators: uniqueCreatorCount(scopedSamples.filter((s) => Number(s.owner_bd_id) === id)), targetedInvites: uniqueCreatorCount(rows.filter((s) => Number(s.commission_rate) >= 0.15)), openInvites: uniqueCreatorCount(rows.filter((s) => s.commission_rate != null && Number(s.commission_rate) < 0.15)) };
   });
   const conversionRows = [];
   selectedBdIds.forEach((id) => {
@@ -2708,21 +2778,34 @@ app.get('/api/data/bd-report', async (req, res) => {
       const fulfilled = received.filter((s) => publishedAt(s) && new Date(publishedAt(s)).getTime() <= new Date(s.sample_received_at).getTime() + 7 * 86400000);
       const handles = new Set(typed.map((s) => normalizeCreatorHandle(s.creator_handle)).filter(Boolean));
       const orders = periodOrders.filter((o) => handles.has(normalizeCreatorHandle(o.creator_username)));
-      const receivedCreators = new Set(received.map((s) => s.uid)).size;
-      const fulfilledCreators = new Set(fulfilled.map((s) => s.uid)).size;
+      const receivedCreators = uniqueCreatorCount(received);
+      const fulfilledCreators = uniqueCreatorCount(fulfilled);
       conversionRows.push({ bdId: id, name: bdMap.get(id) || `BD ${id}`, type, samples: typed.filter((s) => acceptedStatuses.has(s.status)).length, receivedCreators, fulfilledCreators, fulfillmentRate: receivedCreators ? Math.round(fulfilledCreators / receivedCreators * 1000) / 10 : null, videos: typed.filter((s) => s.status === 'published' && inRange(publishedAt(s))).length, conversions: new Set(orders.map((o) => o.external_order_id)).size });
     });
   });
 
-  const trends = [];
-  for (let i = 0; i < monthCount; i += 1) {
-    const from = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, 1));
-    const to = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i + 1, 1));
-    const fromText = sqlDate(from); const toText = sqlDate(to);
-    const monthSamples = scopedSamples.filter((s) => inRange(s.applied_at, fromText, toText));
-    const monthOrders = periodOrders.filter((o) => inRange(o.order_created_at, fromText, toText));
-    trends.push({ key: fromText.slice(0, 7), label: `${from.getUTCMonth() + 1}月`, ...summarize(monthSamples, monthOrders) });
+  const trendBuckets = [];
+  if (period === 'month') {
+    const tomorrow = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+    const dailyEnd = tomorrow < end ? tomorrow : end;
+    for (let from = new Date(start); from < dailyEnd; from = new Date(from.getTime() + 86400000)) {
+      const to = new Date(Math.min(from.getTime() + 86400000, dailyEnd.getTime()));
+      trendBuckets.push({ from, to, key: sqlDate(from).slice(0, 10), label: `${from.getUTCMonth() + 1}/${from.getUTCDate()}` });
+    }
+  } else {
+    for (let i = 0; i < monthCount; i += 1) {
+      const from = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i, 1));
+      const to = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + i + 1, 1));
+      trendBuckets.push({ from, to, key: sqlDate(from).slice(0, 7), label: `${from.getUTCMonth() + 1}月` });
+    }
   }
+  const trends = trendBuckets.map((bucket) => {
+    const { from, to, key, label } = bucket;
+    const fromText = sqlDate(from); const toText = sqlDate(to);
+    const bucketSamples = scopedSamples.filter((s) => inRange(s.applied_at, fromText, toText));
+    const bucketOrders = periodOrders.filter((o) => inRange(o.order_created_at, fromText, toText));
+    return { key, label, from: fromText, to: toText, ...summarize(bucketSamples, bucketOrders) };
+  });
   const previousSamples = scopedSamples.filter((s) => inRange(s.applied_at, sqlDate(previousStart), startText));
   const previousOrders = rangeOrders.filter((order) => inRange(order.order_created_at, sqlDate(previousStart), startText));
   const previous = summarize(previousSamples, previousOrders);
@@ -2736,13 +2819,13 @@ app.get('/api/data/bd-report', async (req, res) => {
     bdId: id,
     name: bdMap.get(id) || `BD ${id}`,
     values: trends.map((trend) => {
-      const monthSamples = scopedSamples.filter((s) => Number(s.owner_bd_id) === id && inRange(s.applied_at, `${trend.key}-01 00:00:00`, sqlDate(new Date(Date.UTC(Number(trend.key.slice(0, 4)), Number(trend.key.slice(5, 7)), 1)))));
-      const handles = new Set(monthSamples.map((s) => normalizeCreatorHandle(s.creator_handle)).filter(Boolean));
-      const monthOrders = periodOrders.filter((o) => inRange(o.order_created_at, `${trend.key}-01 00:00:00`, sqlDate(new Date(Date.UTC(Number(trend.key.slice(0, 4)), Number(trend.key.slice(5, 7)), 1)))) && handles.has(normalizeCreatorHandle(o.creator_username)));
-      return { key: trend.key, label: trend.label, ...summarize(monthSamples, monthOrders) };
+      const bucketSamples = scopedSamples.filter((s) => Number(s.owner_bd_id) === id && inRange(s.applied_at, trend.from, trend.to));
+      const handles = new Set(bucketSamples.map((s) => normalizeCreatorHandle(s.creator_handle)).filter(Boolean));
+      const bucketOrders = periodOrders.filter((o) => inRange(o.order_created_at, trend.from, trend.to) && handles.has(normalizeCreatorHandle(o.creator_username)));
+      return { key: trend.key, label: trend.label, ...summarize(bucketSamples, bucketOrders) };
     }),
   }));
-  res.json({ filters: { shop, bd: bdId || 'all', period, start: startText, end: endText }, metrics, previous, bds: [...bdMap].map(([id, name]) => ({ id, name })), inviteRows, conversionRows, trends, trendSeries, byBd });
+  res.json({ filters: { shop, bd: selectedBdIds.length === bdMap.size ? 'all' : selectedBdIds, period, start: startText, end: endText }, metrics, previous, bds: [...bdMap].map(([id, name]) => ({ id, name })), inviteRows, conversionRows, trends, trendSeries, byBd });
 });
 
 app.get('/api/data/overview', async (req, res) => {
@@ -2950,12 +3033,20 @@ app.post('/api/samples', (req, res) => {
 });
 
 // 更新样品申请的某个字段（状态/合作类型/分配BD/备注）
-app.patch('/api/samples/:id', (req, res) => {
+app.patch('/api/samples/:id', async (req, res) => {
   const { id } = req.params;
   const allowed = ['status', 'collab_type', 'bd_id', 'note'];
   const updates = [];
   const params = [];
   const previous = db.prepare('SELECT status, bd_id FROM samples WHERE id = ?').get(id);
+  if (!previous) return res.status(404).json({ error: '样品申请不存在' });
+
+  const changesBd = 'bd_id' in req.body && Number(previous.bd_id || 0) !== Number(req.body.bd_id || 0);
+  const isReassignment = changesBd && Boolean(previous.bd_id);
+  if (isReassignment) {
+    const user = await currentErpUser(req);
+    if (!user || user.role !== 'admin') return res.status(403).json({ error: '只有管理员可以修改已分配的 BD' });
+  }
 
   for (const key of allowed) {
     if (key in req.body) {
@@ -2971,7 +3062,7 @@ app.patch('/api/samples/:id', (req, res) => {
   const current = db.prepare('SELECT status, bd_id FROM samples WHERE id = ?').get(id);
 
   // 如果是分配BD，模拟生成一条通知（实际项目可换成站内信/邮件/webhook）
-  if ('bd_id' in req.body && req.body.bd_id) {
+  if ('bd_id' in req.body && req.body.bd_id && changesBd && !previous.bd_id) {
     const bd = db.prepare('SELECT name, wecom_userid FROM bd_members WHERE id = ?').get(req.body.bd_id);
     console.log(`📨 [通知] 已将样品 ${id} 分配给 BD: ${bd?.name}`);
     notifyBdAssigned(id).catch((error) => {
@@ -3104,13 +3195,31 @@ app.get('/api/library', async (req, res) => {
   const libMap = {};
   for (const l of libRows) libMap[l.uid] = l;
 
+  const historicalBdByUid = new Map();
+  const historicalBdByHandle = new Map();
+  db.prepare(`
+    SELECT uid, creator_handle, bd_id
+    FROM samples
+    WHERE bd_id IS NOT NULL
+    ORDER BY datetime(applied_at) DESC, id DESC
+  `).all().forEach((sample) => {
+    const uid = String(sample.uid || '').trim();
+    const handle = normalizeCreatorHandle(sample.creator_handle);
+    if (uid && !historicalBdByUid.has(uid)) historicalBdByUid.set(uid, sample.bd_id);
+    if (handle && !historicalBdByHandle.has(handle)) historicalBdByHandle.set(handle, sample.bd_id);
+  });
+
   creators = creators.map(c => {
     const latestSample = c.samples[0] || null;
+    const libraryBdId = c.uids.map(uid => libMap[uid]?.bd_id).find(Boolean) || null;
+    const historicalBdId = c.uids.map(uid => historicalBdByUid.get(uid)).find(Boolean)
+      || historicalBdByHandle.get(normalizeCreatorHandle(c.handle))
+      || null;
     return {
       ...c,
       star: c.uids.map(uid => libMap[uid]?.star || 0).reduce((max, value) => Math.max(max, value), 0),
       libNote: c.uids.map(uid => libMap[uid]?.note).find(Boolean) || '',
-      bd_id: latestSample ? (latestSample.bd_id || null) : (c.uids.map(uid => libMap[uid]?.bd_id).find(Boolean) || null),
+      bd_id: latestSample?.bd_id || libraryBdId || historicalBdId,
       bd_name: ''
     };
   });

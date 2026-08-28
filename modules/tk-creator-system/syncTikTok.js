@@ -874,7 +874,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchPaged({ path, body, shop, listKeys, pageSize = 50, maxPages = 0, pageDelayMs = Number(process.env.TK_API_PAGE_DELAY_MS || 800) }) {
+async function fetchPaged({ path, body, shop, listKeys, pageSize = 50, maxPages = 0, pageDelayMs = Number(process.env.TK_API_PAGE_DELAY_MS || 800), stopAfterPage = null }) {
   const items = [];
   let pageToken = '';
   let searchKey = body?.search_key || '';
@@ -903,6 +903,7 @@ async function fetchPaged({ path, body, shop, listKeys, pageSize = 50, maxPages 
     searchKey = searchKey || data.search_key || '';
     pageToken = data.next_page_token || '';
     pageCount += 1;
+    if (typeof stopAfterPage === 'function' && stopAfterPage(list, pageCount)) break;
     if (maxPages && pageCount >= maxPages) break;
     if (pageToken && pageDelayMs > 0) await sleep(pageDelayMs);
   } while (pageToken);
@@ -1145,7 +1146,7 @@ async function syncAffiliateOrders(db, shop) {
   return { total: rows.length, lines, skipped };
 }
 
-async function syncSampleApplications(db, shop) {
+async function syncSampleApplications(db, shop, options = {}) {
   const samplePath = process.env.TK_SAMPLE_SYNC_PATH || '';
   if (!samplePath) {
     return {
@@ -1157,11 +1158,28 @@ async function syncSampleApplications(db, shop) {
     };
   }
 
+  const incrementalDays = Math.max(0, Number(options.incrementalDays || 0));
+  let scannedPages = 0;
+  let consecutiveKnownPages = 0;
+  const existingExternalIds = incrementalDays
+    ? new Set(db.prepare(`SELECT external_sample_id FROM samples WHERE shop_id = ? AND external_sample_id IS NOT NULL`).all(shop.id).map(row => String(row.external_sample_id)))
+    : null;
   const rows = await fetchPaged({
     path: samplePath,
     shop,
     body: {},
     listKeys: ['sample_applications', 'sample_requests', 'applications', 'requests', 'samples', 'list'],
+    pageSize: Number(process.env.TK_SAMPLE_SYNC_PAGE_SIZE || 50),
+    pageDelayMs: Number(process.env.TK_SAMPLE_SYNC_PAGE_DELAY_MS || 2500),
+    stopAfterPage: incrementalDays ? (pageRows, pageCount) => {
+      scannedPages = pageCount;
+      const allKnown = pageRows.length > 0 && pageRows.every(raw => {
+        const item = normalizeSampleApplication(raw);
+        return item.externalId && existingExternalIds.has(String(item.externalId));
+      });
+      consecutiveKnownPages = allKnown ? consecutiveKnownPages + 1 : 0;
+      return consecutiveKnownPages >= Number(process.env.TK_SAMPLE_INCREMENTAL_KNOWN_PAGES || 2);
+    } : (_, pageCount) => { scannedPages = pageCount; return false; },
   });
 
   let created = 0;
@@ -1174,7 +1192,7 @@ async function syncSampleApplications(db, shop) {
     if (result === 'skipped') skipped += 1;
   }
 
-  return { status: 'success', total: rows.length, created, updated, skipped };
+  return { status: 'success', mode: incrementalDays ? 'incremental' : 'full', scanned_pages: scannedPages, total: rows.length, created, updated, skipped };
 }
 
 async function syncTikTokShop(db, shop) {
@@ -1194,5 +1212,6 @@ module.exports = {
   syncAffiliateOrders,
   syncMissingProductImages,
   syncProducts,
+  syncSampleApplications,
   syncTikTokShop,
 };
