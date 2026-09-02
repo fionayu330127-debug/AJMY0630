@@ -331,6 +331,24 @@ function homePanel() {
 }
 
 function modulePanel(active) {
+  if (active.id === 'ai-video') {
+    return `
+      <section class="panel work-panel">
+        <div class="panel-head">
+          <h3>AI 剪视频</h3>
+          <small>/ai-video/</small>
+        </div>
+        <div class="module-frame ai-video-frame">
+          <iframe src="/ai-video/" title="AI 剪视频工作台" allow="clipboard-write"></iframe>
+        </div>
+        <div class="footer-row">
+          <span>AI 剪视频已作为独立模块接入，不与其他业务模块共享数据和状态。</span>
+          <a href="/ai-video/" target="_blank" rel="noopener">在新窗口打开</a>
+        </div>
+      </section>
+    `;
+  }
+
   if (active.id === 'ai-image') {
     return `
       <section class="panel work-panel">

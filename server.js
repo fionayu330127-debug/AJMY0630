@@ -11,6 +11,7 @@ const ABA_DATA_DIR = path.join(__dirname, 'modules', 'aba-data-system');
 const TK_TREND_DIR = path.join(__dirname, 'modules', 'tk-trend-system');
 const PRODUCT_TEST_DIR = path.join(__dirname, 'product-test-system');
 const AI_IMAGE_DIR = path.join(__dirname, 'ai-image-system');
+const AI_VIDEO_DIR = path.join(__dirname, 'modules', 'ai-video-system', 'public');
 const INVENTORY_SHIPMENT_DIR = path.join(__dirname, 'inventory-shipment-system');
 const express = require('express');
 process.env.TK_CREATOR_DATA_DIR ||= TK_DATA_DIR;
@@ -453,6 +454,7 @@ app.use('/product-test', productTestApp);
 app.use('/aba-data', abaDataApp);
 app.use('/tk-trend', tkTrendApp);
 app.use('/ai-draw', aiImageApp);
+app.use('/ai-video', express.static(AI_VIDEO_DIR, { index: 'index.html' }));
 app.use('/inventory', inventoryShipmentApp);
 
 const INVENTORY_DETAIL_ORIGIN = 'http://47.110.59.28:5174';

@@ -1,0 +1,1173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 剪视频 · 奥吉米亚 ERP</title>
+<style>
+  :root{
+    --navy-900:#0b1220;
+    --navy-800:#111a2c;
+    --navy-700:#182541;
+    --teal-600:#0d9488;
+    --teal-500:#14b8a6;
+    --teal-50:#ecfdf9;
+    --bg:#eef1f5;
+    --card:#ffffff;
+    --border:#e3e7ee;
+    --ink-900:#0f172a;
+    --ink-600:#475569;
+    --ink-400:#94a3b8;
+    --amber:#d97706;
+    --rose:#e11d48;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);
+    color:var(--ink-900);
+    display:flex;
+    height:100vh;
+    overflow:hidden;
+    font-size:14px;
+  }
+
+  /* ---------- Sidebar ---------- */
+  .sidebar{
+    width:230px;
+    flex-shrink:0;
+    background:var(--navy-900);
+    color:#cbd5e1;
+    display:flex;
+    flex-direction:column;
+    height:100%;
+    overflow-y:auto;
+  }
+  .brand{
+    display:flex;align-items:center;gap:10px;
+    padding:18px 18px 14px 18px;
+    border-bottom:1px solid rgba(255,255,255,.06);
+  }
+  .brand-icon{
+    width:32px;height:32px;border-radius:8px;
+    background:linear-gradient(135deg,var(--teal-500),#0891b2);
+    display:flex;align-items:center;justify-content:center;
+    color:#fff;font-weight:700;font-size:14px;flex-shrink:0;
+  }
+  .brand-name{font-size:14px;font-weight:700;color:#fff;line-height:1.3;}
+  .brand-sub{font-size:11px;color:var(--ink-400);margin-top:1px;}
+  .nav{padding:10px 10px;flex:1;}
+  .nav-item{
+    display:flex;align-items:center;gap:9px;
+    padding:9px 10px;margin-bottom:2px;
+    border-radius:8px;font-size:13.5px;color:#b6c0d1;
+    cursor:pointer;user-select:none;
+  }
+  .nav-item:hover{background:rgba(255,255,255,.05);color:#fff;}
+  .nav-item svg{width:16px;height:16px;flex-shrink:0;opacity:.85;}
+  .nav-group-label{
+    padding:9px 10px 4px 10px;font-size:12px;color:#64748b;display:flex;align-items:center;gap:8px;
+  }
+  .nav-sub{padding-left:6px;margin-top:2px;margin-bottom:8px;border-left:1px solid rgba(255,255,255,.08);margin-left:16px;}
+  .nav-sub .nav-item{padding-left:16px;font-size:13px;}
+  .nav-item.active-parent{background:var(--navy-700);color:#fff;font-weight:600;}
+  .nav-sub .nav-item.active{
+    background:var(--teal-600);color:#fff;font-weight:600;
+    box-shadow:0 1px 3px rgba(0,0,0,.2);
+  }
+
+  /* ---------- Top bar ---------- */
+  .main{flex:1;display:flex;flex-direction:column;height:100%;overflow:hidden;}
+  .topbar{
+    background:var(--card);
+    border-bottom:1px solid var(--border);
+    padding:14px 26px;
+    display:flex;align-items:center;justify-content:space-between;
+    flex-shrink:0;
+  }
+  .topbar h1{font-size:17px;margin:0;font-weight:700;}
+  .topbar .crumb{font-size:12px;color:var(--ink-400);margin-top:2px;}
+  .topbar-right{display:flex;align-items:center;gap:10px;}
+  .pill{
+    display:flex;align-items:center;gap:6px;
+    background:#f1f5f9;border-radius:999px;padding:5px 12px;font-size:12px;color:var(--ink-600);
+  }
+  .dot{width:6px;height:6px;border-radius:50%;background:#22c55e;}
+  .avatar{
+    width:30px;height:30px;border-radius:50%;background:var(--teal-50);color:var(--teal-600);
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+  }
+
+  .content{flex:1;overflow-y:auto;padding:24px 26px 60px 26px;}
+  .page{display:none;}
+  .page.active{display:block;}
+
+  h2.section-title{font-size:15px;font-weight:700;margin:0 0 2px 0;}
+  p.section-desc{font-size:12.5px;color:var(--ink-400);margin:0 0 18px 0;}
+
+  /* ---------- Buttons ---------- */
+  .btn{
+    border:none;cursor:pointer;font-size:13px;border-radius:8px;padding:8px 14px;
+    display:inline-flex;align-items:center;gap:6px;font-weight:600;transition:filter .12s;
+  }
+  .btn:active{filter:brightness(.92);}
+  .btn-primary{background:var(--teal-600);color:#fff;}
+  .btn-primary:hover{background:#0f766e;}
+  .btn-secondary{background:#fff;color:var(--ink-900);border:1px solid var(--border);}
+  .btn-secondary:hover{background:#f8fafc;}
+  .btn-ghost{background:transparent;color:var(--ink-600);}
+  .btn-ghost:hover{background:#f1f5f9;}
+  .btn-danger{background:#fff;color:var(--rose);border:1px solid #fecdd3;}
+  .btn-sm{padding:5px 10px;font-size:12px;}
+  .btn:disabled{opacity:.45;cursor:not-allowed;}
+  .btn svg{width:14px;height:14px;}
+
+  /* ---------- Tabs ---------- */
+  .tabs{display:flex;gap:4px;background:#e7eaf0;padding:3px;border-radius:9px;width:max-content;margin-bottom:18px;}
+  .tab{padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;color:var(--ink-600);cursor:pointer;}
+  .tab.active{background:#fff;color:var(--ink-900);box-shadow:0 1px 2px rgba(0,0,0,.08);}
+
+  /* ---------- Cards / grids ---------- */
+  .toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;}
+  .search{
+    display:flex;align-items:center;gap:6px;background:#fff;border:1px solid var(--border);
+    border-radius:8px;padding:6px 10px;font-size:12.5px;color:var(--ink-400);width:220px;
+  }
+  .search input{border:none;outline:none;font-size:12.5px;width:100%;color:var(--ink-900);}
+  .search svg{width:14px;height:14px;flex-shrink:0;}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;}
+  .card{
+    background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+    overflow:hidden;display:flex;flex-direction:column;
+  }
+  .thumb{
+    height:106px;position:relative;display:flex;align-items:center;justify-content:center;color:#fff;
+  }
+  .thumb svg{width:26px;height:26px;opacity:.85;}
+  .thumb .dur-badge{
+    position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.55);color:#fff;
+    font-size:10.5px;padding:2px 6px;border-radius:5px;
+  }
+  .thumb .check{
+    position:absolute;top:7px;left:7px;width:19px;height:19px;border-radius:5px;
+    background:rgba(255,255,255,.85);display:flex;align-items:center;justify-content:center;
+  }
+  .thumb .check svg{width:12px;height:12px;color:var(--teal-600);opacity:0;}
+  .card.selected .thumb .check{background:var(--teal-600);}
+  .card.selected .thumb .check svg{opacity:1;color:#fff;}
+  .card.selected{outline:2px solid var(--teal-500);outline-offset:-1px;}
+  .card-body{padding:10px 12px 12px 12px;}
+  .card-name{font-size:12.5px;font-weight:600;color:var(--ink-900);margin-bottom:3px;line-height:1.35;
+    display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;}
+  .card-meta{font-size:11px;color:var(--ink-400);display:flex;justify-content:space-between;align-items:center;}
+  .tag{
+    display:inline-block;font-size:10.5px;padding:1.5px 7px;border-radius:5px;background:var(--teal-50);color:var(--teal-600);font-weight:600;
+  }
+  .card-actions{display:flex;gap:5px;margin-top:8px;}
+
+  /* material grid variant selectable */
+  .pick-card{cursor:pointer;}
+
+  /* ---------- Music rows ---------- */
+  .music-row{
+    display:flex;align-items:center;gap:12px;background:#fff;border:1px solid var(--border);
+    border-radius:9px;padding:10px 14px;margin-bottom:8px;
+  }
+  .music-row.selected{outline:2px solid var(--teal-500);outline-offset:-1px;}
+  .play-btn{
+    width:32px;height:32px;border-radius:50%;background:var(--teal-50);color:var(--teal-600);
+    display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer;border:none;
+  }
+  .play-btn svg{width:13px;height:13px;}
+  .wave{flex:1;display:flex;align-items:center;gap:2px;height:22px;overflow:hidden;}
+  .wave span{width:2.5px;background:#cbd5e1;border-radius:2px;flex-shrink:0;}
+  .music-row.selected .wave span{background:var(--teal-500);}
+  .music-info{width:150px;flex-shrink:0;}
+  .music-name{font-size:12.5px;font-weight:600;}
+  .music-sub{font-size:11px;color:var(--ink-400);margin-top:1px;}
+  .music-dur{width:44px;flex-shrink:0;font-size:11.5px;color:var(--ink-400);text-align:right;}
+
+  /* ---------- Empty state ---------- */
+  .empty{
+    text-align:center;padding:60px 20px;color:var(--ink-400);
+  }
+  .empty svg{width:38px;height:38px;margin-bottom:12px;opacity:.5;}
+  .empty p{font-size:13px;margin:0 0 14px 0;}
+
+  /* ---------- Folder grid ---------- */
+  .folder-card{
+    background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:16px;cursor:pointer;
+    display:flex;flex-direction:column;gap:10px;
+  }
+  .folder-card:hover{border-color:var(--teal-500);}
+  .folder-top{display:flex;align-items:center;justify-content:space-between;}
+  .folder-icon{width:34px;height:34px;border-radius:8px;background:#fff7ed;color:var(--amber);display:flex;align-items:center;justify-content:center;}
+  .folder-icon svg{width:18px;height:18px;}
+  .folder-name{font-size:13.5px;font-weight:700;}
+  .folder-count{font-size:11.5px;color:var(--ink-400);}
+  .new-folder-card{
+    border:1.5px dashed #cbd5e1;background:transparent;border-radius:var(--radius);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;
+    color:var(--ink-400);cursor:pointer;padding:20px;font-size:12.5px;font-weight:600;min-height:96px;
+  }
+  .new-folder-card:hover{border-color:var(--teal-500);color:var(--teal-600);}
+  .new-folder-card svg{width:20px;height:20px;}
+
+  .crumb-nav{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-400);margin-bottom:16px;}
+  .crumb-nav .cur{color:var(--ink-900);font-weight:700;}
+  .crumb-nav .back{cursor:pointer;color:var(--teal-600);font-weight:600;}
+
+  /* ---------- Wizard ---------- */
+  .stepper{display:flex;align-items:flex-start;margin-bottom:26px;max-width:760px;}
+  .step{display:flex;flex-direction:column;align-items:center;flex:1;position:relative;}
+  .step-circle{
+    width:30px;height:30px;border-radius:50%;background:#fff;border:2px solid #d7dce3;
+    display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--ink-400);z-index:2;
+  }
+  .step.done .step-circle{background:var(--teal-600);border-color:var(--teal-600);color:#fff;}
+  .step.current .step-circle{border-color:var(--teal-600);color:var(--teal-600);}
+  .step-label{font-size:12px;margin-top:7px;color:var(--ink-400);font-weight:600;text-align:center;}
+  .step.current .step-label,.step.done .step-label{color:var(--ink-900);}
+  .step-line{
+    position:absolute;top:15px;left:calc(-50% + 15px);width:calc(100% - 30px);height:2px;background:#d7dce3;z-index:1;
+  }
+  .step.done .step-line{background:var(--teal-600);}
+  .step:first-child .step-line{display:none;}
+
+  .wizard-panel{
+    background:#fff;border:1px solid var(--border);border-radius:12px;padding:24px;max-width:900px;
+  }
+  .wizard-title{font-size:14.5px;font-weight:700;margin:0 0 4px 0;}
+  .wizard-sub{font-size:12px;color:var(--ink-400);margin:0 0 18px 0;}
+  textarea{
+    width:100%;border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:13px;
+    font-family:inherit;resize:vertical;min-height:78px;color:var(--ink-900);outline:none;
+  }
+  textarea:focus{border-color:var(--teal-500);}
+  .row{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap;}
+  .num-input{
+    width:64px;border:1px solid var(--border);border-radius:8px;padding:7px 8px;font-size:13px;text-align:center;outline:none;
+  }
+  .copy-list{margin-top:16px;display:flex;flex-direction:column;gap:8px;}
+  .copy-item{
+    display:flex;gap:10px;align-items:flex-start;background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px 12px;
+  }
+  .copy-idx{
+    width:20px;height:20px;border-radius:5px;background:var(--teal-50);color:var(--teal-600);font-size:11px;font-weight:700;
+    display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;
+  }
+  .copy-text{
+    flex:1;font-size:12.5px;line-height:1.55;border:none;background:transparent;outline:none;resize:none;font-family:inherit;color:var(--ink-900);
+  }
+  .copy-item .del{flex-shrink:0;cursor:pointer;color:var(--ink-400);background:none;border:none;padding:2px;}
+  .copy-item .del:hover{color:var(--rose);}
+  .copy-item .del svg{width:14px;height:14px;}
+
+  .dur-options{display:flex;gap:8px;margin-top:10px;}
+  .dur-opt{
+    padding:7px 16px;border-radius:8px;border:1px solid var(--border);background:#fff;font-size:12.5px;font-weight:600;color:var(--ink-600);cursor:pointer;
+  }
+  .dur-opt.active{background:var(--teal-600);border-color:var(--teal-600);color:#fff;}
+
+  .field-label{font-size:12.5px;font-weight:700;color:var(--ink-900);margin:18px 0 8px 0;display:flex;align-items:center;gap:6px;}
+  .field-hint{font-size:11.5px;color:var(--ink-400);font-weight:500;}
+
+  .wizard-footer{display:flex;justify-content:space-between;margin-top:24px;border-top:1px solid var(--border);padding-top:18px;}
+
+  .plan-table{width:100%;border-collapse:collapse;margin-top:14px;font-size:12.5px;}
+  .plan-table th{
+    text-align:left;color:var(--ink-400);font-weight:600;font-size:11.5px;padding:6px 10px;border-bottom:1px solid var(--border);
+  }
+  .plan-table td{padding:9px 10px;border-bottom:1px solid #f1f5f9;vertical-align:top;}
+  .plan-table tr:last-child td{border-bottom:none;}
+  .mini-tag{font-size:10.5px;background:#f1f5f9;color:var(--ink-600);padding:1.5px 6px;border-radius:5px;display:inline-block;margin:1px 3px 1px 0;}
+
+  .progress-wrap{margin-top:18px;}
+  .progress-bar-bg{height:8px;background:#eef1f5;border-radius:99px;overflow:hidden;}
+  .progress-bar-fg{height:100%;background:linear-gradient(90deg,var(--teal-500),var(--teal-600));width:0%;transition:width .25s;}
+  .progress-status{font-size:12px;color:var(--ink-400);margin-top:8px;}
+
+  .result-card{position:relative;}
+  .result-card .thumb{cursor:default;}
+  .result-badge{
+    position:absolute;top:7px;right:7px;background:rgba(0,0,0,.5);color:#fff;font-size:10px;padding:2px 6px;border-radius:5px;
+  }
+
+  /* ---------- Modal ---------- */
+  .overlay{
+    position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;align-items:center;justify-content:center;z-index:50;
+  }
+  .overlay.show{display:flex;}
+  .modal{
+    background:#fff;border-radius:12px;padding:22px;width:380px;max-width:90vw;box-shadow:0 20px 50px rgba(0,0,0,.25);
+  }
+  .modal h3{margin:0 0 4px 0;font-size:14.5px;}
+  .modal p.sub{margin:0 0 16px 0;font-size:12px;color:var(--ink-400);}
+  .modal input[type=text], .modal select{
+    width:100%;border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;outline:none;margin-bottom:12px;font-family:inherit;
+  }
+  .modal input:focus, .modal select:focus{border-color:var(--teal-500);}
+  .modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:6px;}
+  .drop-zone{
+    border:1.5px dashed #cbd5e1;border-radius:9px;padding:22px;text-align:center;color:var(--ink-400);font-size:12.5px;margin-bottom:14px;cursor:pointer;
+  }
+  .drop-zone:hover{border-color:var(--teal-500);color:var(--teal-600);}
+  .drop-zone svg{width:22px;height:22px;margin-bottom:6px;}
+
+  .toast-stack{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:8px;z-index:80;}
+  .toast{
+    background:var(--navy-900);color:#fff;padding:10px 16px;border-radius:8px;font-size:12.5px;
+    box-shadow:0 8px 24px rgba(0,0,0,.25);display:flex;align-items:center;gap:8px;
+  }
+  .toast svg{width:14px;height:14px;color:var(--teal-500);flex-shrink:0;}
+
+  ::-webkit-scrollbar{width:9px;height:9px;}
+  ::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:99px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+</style>
+<style>
+  /* The ERP shell owns global navigation when this standalone module is embedded. */
+  .sidebar,
+  .topbar { display: none; }
+  .main { width: 100%; }
+  .content { padding: 20px 22px 48px; }
+
+  @media (max-width: 720px) {
+    .content { padding: 14px 12px 36px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ SIDEBAR ============ -->
+<div class="sidebar">
+  <div class="brand">
+    <div class="brand-icon">奥</div>
+    <div>
+      <div class="brand-name">奥吉米亚 ERP</div>
+      <div class="brand-sub">AI 剪视频</div>
+    </div>
+  </div>
+  <div class="nav">
+    <div class="nav-item active-parent">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>
+      AI 工作台
+    </div>
+    <div class="nav-sub">
+      <div class="nav-item" data-page="draw">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5-9 9"/></svg>
+        AI 做图
+      </div>
+      <div class="nav-item active-parent" data-toggle="mixGroup">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h4v4H4zM16 16h4v4h-4zM4 20l16-16"/></svg>
+        AI 剪视频
+      </div>
+      <div class="nav-sub" id="mixGroup" style="margin-left:14px;">
+        <div class="nav-item" data-page="materials">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          素材库
+        </div>
+        <div class="nav-item active" data-page="mix">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h4v4H4zM16 16h4v4h-4zM4 20l16-16"/></svg>
+          AI 混剪
+        </div>
+        <div class="nav-item" data-page="products">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7 12 3l9 4-9 4-9-4Z"/><path d="M3 7v10l9 4 9-4V7"/><path d="M12 11v10"/></svg>
+          成品库
+        </div>
+      </div>
+    </div>
+    <div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 8l10 6 10-6-10-6ZM2 16l10 6 10-6"/></svg>销售中心</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4.5 5-6 8-6s6.5 1.5 8 6"/></svg>TK 达人管理中心</div>
+    <div class="nav-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>运营中心</div>
+  </div>
+</div>
+
+<!-- ============ MAIN ============ -->
+<div class="main">
+  <div class="topbar">
+    <div>
+      <h1 id="pageTitle">AI 混剪</h1>
+      <div class="crumb" id="pageCrumb">AI 工作台 / AI 混剪</div>
+    </div>
+    <div class="topbar-right">
+      <div class="pill"><span class="dot"></span>在线</div>
+      <div class="avatar">余</div>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ================= PAGE: AI 做图（原有功能，保持不变，此处仅作占位） ================= -->
+    <div class="page" id="page-draw">
+      <div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:70px 20px;text-align:center;">
+        <div style="color:var(--teal-600);font-size:12.5px;font-weight:700;margin-bottom:6px;">AI 工作台</div>
+        <div style="font-size:19px;font-weight:700;margin-bottom:8px;">AI 做图</div>
+        <div style="color:var(--ink-400);font-size:13px;">该模块为原有功能，保持不变。</div>
+      </div>
+    </div>
+
+    <!-- ================= PAGE: 素材库 ================= -->
+    <div class="page" id="page-materials">
+      <div class="tabs">
+        <div class="tab active" data-mtab="video">视频素材</div>
+        <div class="tab" data-mtab="music">音乐素材</div>
+      </div>
+
+      <div id="mtab-video">
+        <div class="toolbar">
+          <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input placeholder="搜索视频素材"></div>
+          <button class="btn btn-primary" onclick="openUploadModal('video')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0-12 4 4m-4-4-4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            上传视频素材
+          </button>
+        </div>
+        <div class="grid" id="videoGrid"></div>
+      </div>
+
+      <div id="mtab-music" style="display:none;">
+        <div class="toolbar">
+          <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input placeholder="搜索背景音乐"></div>
+          <button class="btn btn-primary" onclick="openUploadModal('music')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0-12 4 4m-4-4-4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            上传音乐素材
+          </button>
+        </div>
+        <div id="musicList"></div>
+      </div>
+    </div>
+
+    <!-- ================= PAGE: 成品库 ================= -->
+    <div class="page" id="page-products">
+      <div id="folderView">
+        <h2 class="section-title">成品库</h2>
+        <p class="section-desc">按产品名称创建文件夹，AI 混剪生成的视频可保存至对应文件夹中。</p>
+        <div class="grid" id="folderGrid"></div>
+      </div>
+      <div id="folderDetail" style="display:none;">
+        <div class="crumb-nav"><span class="back" onclick="backToFolders()">成品库</span><span>/</span><span class="cur" id="folderDetailName"></span></div>
+        <div class="toolbar">
+          <div></div>
+          <button class="btn btn-secondary btn-sm" onclick="switchPage('mix')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>
+            去混剪生成
+          </button>
+        </div>
+        <div class="grid" id="folderVideoGrid"></div>
+      </div>
+    </div>
+
+    <!-- ================= PAGE: AI混剪 ================= -->
+    <div class="page active" id="page-mix">
+      <div class="stepper" id="stepper"></div>
+      <div class="wizard-panel" id="wizardPanel"></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============ Upload Modal ============ -->
+<div class="overlay" id="uploadOverlay">
+  <div class="modal">
+    <h3 id="uploadModalTitle">上传视频素材</h3>
+    <p class="sub" id="uploadModalSub">支持批量上传，建议单个文件不超过 200MB。</p>
+    <div class="drop-zone" onclick="mockPickFiles()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0-12 4 4m-4-4-4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+      <div>点击选择文件，或将文件拖拽到此处</div>
+    </div>
+    <input type="text" id="uploadNameInput" placeholder="素材名称（可选，默认自动命名）">
+    <select id="uploadTagInput"></select>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('uploadOverlay')">取消</button>
+      <button class="btn btn-primary" onclick="confirmUpload()">确认上传</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ New Folder Modal ============ -->
+<div class="overlay" id="folderOverlay">
+  <div class="modal">
+    <h3>新建产品文件夹</h3>
+    <p class="sub">用于分类存放该产品的 AI 混剪成品视频。</p>
+    <input type="text" id="folderNameInput" placeholder="例如：秋季羽绒服 A01">
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('folderOverlay')">取消</button>
+      <button class="btn btn-primary" onclick="confirmCreateFolder()">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Save-to-library Modal ============ -->
+<div class="overlay" id="saveOverlay">
+  <div class="modal">
+    <h3>保存到成品库</h3>
+    <p class="sub">选择要保存的产品文件夹，或新建一个。</p>
+    <select id="saveFolderSelect"></select>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('saveOverlay')">取消</button>
+      <button class="btn btn-primary" onclick="confirmSaveResult()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toastStack"></div>
+
+<script>
+/* =====================================================================
+   MOCK DATA / STATE
+   In production, replace the localState-backed functions below with
+   real API calls to your backend (see API_HOOKS section at bottom).
+===================================================================== */
+const THUMB_COLORS = ['#0f766e','#1d4ed8','#7c3aed','#be123c','#b45309','#0369a1','#4d7c0f','#a21caf'];
+function colorFor(id){ return THUMB_COLORS[id % THUMB_COLORS.length]; }
+
+const VIDEO_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg>`;
+const MUSIC_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
+const PLAY_ICON = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+const PAUSE_ICON = `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>`;
+const CHECK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6 9 17l-5-5"/></svg>`;
+const TRASH_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>`;
+const DL_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v13m0 0 4-4m-4 4-4-4"/><path d="M4 19h16"/></svg>`;
+const PLUS_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>`;
+const FOLDER_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>`;
+const SPARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v4M12 17v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M3 12h4M17 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>`;
+
+let state = {
+  page: 'mix',
+  materials: {
+    video: [
+      {id:1, name:'开箱_产品外观01.mp4', dur:'0:12', tag:'开箱'},
+      {id:2, name:'开箱_产品外观02.mp4', dur:'0:09', tag:'开箱'},
+      {id:3, name:'穿着展示_正面.mp4', dur:'0:15', tag:'展示'},
+      {id:4, name:'穿着展示_细节.mp4', dur:'0:08', tag:'展示'},
+      {id:5, name:'场景_户外街拍.mp4', dur:'0:20', tag:'场景'},
+      {id:6, name:'场景_室内特写.mp4', dur:'0:11', tag:'场景'},
+      {id:7, name:'模特_微笑转身.mp4', dur:'0:07', tag:'人物'},
+      {id:8, name:'测评_面料特写.mp4', dur:'0:13', tag:'测评'},
+    ],
+    music: [
+      {id:101, name:'轻快节奏 - Pop Beat', dur:'0:30', mood:'欢快'},
+      {id:102, name:'舒缓氛围 - Soft Piano', dur:'0:45', mood:'舒缓'},
+      {id:103, name:'燃系鼓点 - Drive', dur:'0:32', mood:'燃'},
+      {id:104, name:'温馨治愈 - Warm Day', dur:'0:40', mood:'温馨'},
+    ]
+  },
+  products: {
+    '秋季羽绒服 A01': [
+      {id:9001, name:'混剪成品_01.mp4', dur:'0:15', date:'2026-08-28'},
+      {id:9002, name:'混剪成品_02.mp4', dur:'0:15', date:'2026-08-28'},
+    ]
+  },
+  currentFolder: null,
+  wizard: {
+    step: 1,
+    sourceCopy: '这款秋季羽绒服采用90%白鸭绒填充，轻盈保暖不显臃肿，多色可选，通勤出街都好看。',
+    copies: [
+      '90%白鸭绒填充，秋冬保暖不臃肿，这件羽绒服有多好穿？',
+      '别再穿又厚又丑的羽绒服了，这件轻盈款直接封神！',
+      '同事都在问链接的羽绒服，暖和还显瘦，闭眼入！'
+    ],
+    selectedVideos: [1,3,5,7],
+    selectedMusic: [101],
+    duration: 15,
+    results: []
+  },
+  playingMusic: null,
+  uploadTargetType: null,
+  saveResultIndex: null,
+};
+let nextId = 200;
+
+/* =====================================================================
+   NAVIGATION
+===================================================================== */
+function switchPage(page){
+  if(!page) return;
+  state.page = page;
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+page).classList.add('active');
+  document.querySelectorAll('.nav-sub .nav-item[data-page]').forEach(n=>n.classList.remove('active'));
+  const navEl = document.querySelector('.nav-sub .nav-item[data-page="'+page+'"]');
+  if(navEl) navEl.classList.add('active');
+  const mixGroupSub = ['materials','mix','products'].includes(page);
+  document.querySelector('.nav-item[data-toggle="mixGroup"]').classList.toggle('active-parent', mixGroupSub);
+  const titles = {
+    draw:['AI 做图','AI 工作台 / AI 做图'],
+    materials:['素材库','AI 工作台 / AI 剪视频 / 素材库'],
+    mix:['AI 混剪','AI 工作台 / AI 剪视频 / AI 混剪'],
+    products:['成品库','AI 工作台 / AI 剪视频 / 成品库']
+  };
+  document.getElementById('pageTitle').textContent = titles[page][0];
+  document.getElementById('pageCrumb').textContent = titles[page][1];
+  if(page==='materials') renderMaterials();
+  if(page==='products') renderProducts();
+  if(page==='mix') renderWizard();
+}
+document.querySelectorAll('.nav-sub .nav-item[data-page]').forEach(el=>{
+  el.addEventListener('click', (e)=>{ e.stopPropagation(); switchPage(el.dataset.page); });
+});
+document.querySelectorAll('.nav-item[data-toggle]').forEach(el=>{
+  el.addEventListener('click', ()=>{
+    const group = document.getElementById(el.dataset.toggle);
+    group.style.display = group.style.display === 'none' ? 'block' : 'none';
+  });
+});
+document.querySelectorAll('.tab').forEach(el=>{
+  el.addEventListener('click', ()=>{
+    document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+    el.classList.add('active');
+    const tab = el.dataset.mtab;
+    document.getElementById('mtab-video').style.display = tab==='video' ? 'block' : 'none';
+    document.getElementById('mtab-music').style.display = tab==='music' ? 'block' : 'none';
+  });
+});
+
+/* =====================================================================
+   TOAST
+===================================================================== */
+function toast(msg){
+  const stack = document.getElementById('toastStack');
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = CHECK_ICON + '<span>'+msg+'</span>';
+  stack.appendChild(el);
+  setTimeout(()=>{ el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(()=>el.remove(),300); }, 2400);
+}
+
+/* =====================================================================
+   PAGE: 素材库
+===================================================================== */
+function renderMaterials(){
+  const vGrid = document.getElementById('videoGrid');
+  vGrid.innerHTML = state.materials.video.map(v=>`
+    <div class="card">
+      <div class="thumb" style="background:${colorFor(v.id)}">
+        ${VIDEO_ICON}
+        <div class="dur-badge">${v.dur}</div>
+      </div>
+      <div class="card-body">
+        <div class="card-name">${v.name}</div>
+        <div class="card-meta"><span class="tag">${v.tag}</span></div>
+        <div class="card-actions">
+          <button class="btn btn-secondary btn-sm" style="flex:1" onclick="switchPage('mix')">用于混剪</button>
+          <button class="btn btn-danger btn-sm" onclick="removeMaterial('video',${v.id})">${TRASH_ICON}</button>
+        </div>
+      </div>
+    </div>
+  `).join('') || emptyHtml('video');
+
+  const mList = document.getElementById('musicList');
+  mList.innerHTML = state.materials.music.map(m=>`
+    <div class="music-row" id="mrow-${m.id}">
+      <button class="play-btn" onclick="toggleMusic(${m.id})" id="mplay-${m.id}">${PLAY_ICON}</button>
+      <div class="music-info">
+        <div class="music-name">${m.name}</div>
+        <div class="music-sub">${m.mood}</div>
+      </div>
+      <div class="wave">${waveBars(m.id)}</div>
+      <div class="music-dur">${m.dur}</div>
+      <button class="btn btn-danger btn-sm" onclick="removeMaterial('music',${m.id})">${TRASH_ICON}</button>
+    </div>
+  `).join('') || emptyHtml('music');
+}
+function waveBars(seed){
+  let out='';
+  for(let i=0;i<48;i++){
+    const h = 4 + Math.abs(Math.sin(seed*i*0.7))*16;
+    out += `<span style="height:${h.toFixed(1)}px"></span>`;
+  }
+  return out;
+}
+function toggleMusic(id){
+  if(state.playingMusic === id){
+    state.playingMusic = null;
+  } else {
+    state.playingMusic = id;
+    toast('正在试听音乐（模拟播放）');
+  }
+  document.querySelectorAll('.music-row').forEach(r=>r.classList.remove('selected'));
+  document.querySelectorAll('.play-btn').forEach(b=>b.innerHTML = PLAY_ICON);
+  if(state.playingMusic){
+    document.getElementById('mrow-'+state.playingMusic).classList.add('selected');
+    document.getElementById('mplay-'+state.playingMusic).innerHTML = PAUSE_ICON;
+  }
+}
+function emptyHtml(kind){
+  const label = kind==='video' ? '视频素材' : '音乐素材';
+  return `<div class="empty" style="grid-column:1/-1;">${VIDEO_ICON.replace('currentColor','#cbd5e1')}<p>暂无${label}，点击上方按钮上传</p></div>`;
+}
+function removeMaterial(type, id){
+  state.materials[type] = state.materials[type].filter(m=>m.id!==id);
+  renderMaterials();
+  toast('已删除');
+}
+
+/* Upload modal */
+function openUploadModal(type){
+  state.uploadTargetType = type;
+  document.getElementById('uploadModalTitle').textContent = type==='video' ? '上传视频素材' : '上传音乐素材';
+  document.getElementById('uploadModalSub').textContent = type==='video' ? '支持批量上传 MP4/MOV，建议单个文件不超过 200MB。' : '支持批量上传 MP3/WAV，建议单个文件不超过 30MB。';
+  const sel = document.getElementById('uploadTagInput');
+  sel.innerHTML = type==='video'
+    ? ['开箱','展示','场景','人物','测评'].map(t=>`<option>${t}</option>`).join('')
+    : ['欢快','舒缓','燃','温馨'].map(t=>`<option>${t}</option>`).join('');
+  document.getElementById('uploadNameInput').value = '';
+  document.getElementById('uploadOverlay').classList.add('show');
+}
+function mockPickFiles(){
+  toast('已选择本地文件（演示环境已模拟选择）');
+}
+function confirmUpload(){
+  const type = state.uploadTargetType;
+  const name = document.getElementById('uploadNameInput').value.trim();
+  const tag = document.getElementById('uploadTagInput').value;
+  const id = nextId++;
+  if(type==='video'){
+    state.materials.video.push({id, name: name || `新素材_${id}.mp4`, dur: randomDur(), tag});
+  } else {
+    state.materials.music.push({id, name: name || `新音乐_${id}`, dur: randomDur(true), mood: tag});
+  }
+  closeModal('uploadOverlay');
+  renderMaterials();
+  toast('上传成功');
+}
+function randomDur(long){
+  const s = long ? (25+Math.floor(Math.random()*20)) : (6+Math.floor(Math.random()*15));
+  return '0:'+String(s).padStart(2,'0');
+}
+function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+
+/* =====================================================================
+   PAGE: 成品库
+===================================================================== */
+function renderProducts(){
+  document.getElementById('folderDetail').style.display = 'none';
+  document.getElementById('folderView').style.display = 'block';
+  const grid = document.getElementById('folderGrid');
+  const names = Object.keys(state.products);
+  grid.innerHTML = names.map(name=>`
+    <div class="folder-card" onclick="openFolder('${escapeAttr(name)}')">
+      <div class="folder-top">
+        <div class="folder-icon">${FOLDER_ICON}</div>
+      </div>
+      <div>
+        <div class="folder-name">${name}</div>
+        <div class="folder-count">${state.products[name].length} 个视频</div>
+      </div>
+    </div>
+  `).join('') + `
+    <div class="new-folder-card" onclick="openModal('folderOverlay')">
+      ${PLUS_ICON}
+      新建产品文件夹
+    </div>
+  `;
+}
+function escapeAttr(s){ return s.replace(/'/g,"\\'"); }
+function openModal(id){ document.getElementById(id).classList.add('show'); }
+function confirmCreateFolder(){
+  const name = document.getElementById('folderNameInput').value.trim();
+  if(!name){ toast('请输入产品文件夹名称'); return; }
+  if(!state.products[name]) state.products[name] = [];
+  document.getElementById('folderNameInput').value = '';
+  closeModal('folderOverlay');
+  renderProducts();
+  toast('文件夹已创建');
+}
+function openFolder(name){
+  state.currentFolder = name;
+  document.getElementById('folderView').style.display = 'none';
+  document.getElementById('folderDetail').style.display = 'block';
+  document.getElementById('folderDetailName').textContent = name;
+  const grid = document.getElementById('folderVideoGrid');
+  const items = state.products[name] || [];
+  grid.innerHTML = items.map(v=>`
+    <div class="card">
+      <div class="thumb" style="background:${colorFor(v.id)}">
+        ${VIDEO_ICON}
+        <div class="dur-badge">${v.dur}</div>
+      </div>
+      <div class="card-body">
+        <div class="card-name">${v.name}</div>
+        <div class="card-meta"><span>${v.date}</span></div>
+        <div class="card-actions">
+          <button class="btn btn-secondary btn-sm" style="flex:1">${DL_ICON} 下载</button>
+        </div>
+      </div>
+    </div>
+  `).join('') || emptyHtml('video').replace('视频素材','混剪成品');
+}
+function backToFolders(){ renderProducts(); }
+
+/* =====================================================================
+   PAGE: AI 混剪 (WIZARD)
+===================================================================== */
+const STEP_LABELS = ['输入文案','选择素材','背景音乐 · 时长','生成混剪'];
+
+function renderWizard(){
+  const w = state.wizard;
+  document.getElementById('stepper').innerHTML = STEP_LABELS.map((label,i)=>{
+    const n = i+1;
+    let cls = '';
+    if(n < w.step) cls = 'done';
+    if(n === w.step) cls = 'current';
+    const inner = n < w.step ? CHECK_ICON.replace('width="24" height="24"','width="14" height="14"') : n;
+    return `<div class="step ${cls}"><div class="step-line"></div><div class="step-circle">${n<w.step? '✓' : n}</div><div class="step-label">${label}</div></div>`;
+  }).join('');
+
+  const panel = document.getElementById('wizardPanel');
+  if(w.step===1) panel.innerHTML = stepCopyHtml();
+  if(w.step===2) panel.innerHTML = stepVideoHtml();
+  if(w.step===3) panel.innerHTML = stepMusicHtml();
+  if(w.step===4) panel.innerHTML = stepGenerateHtml();
+
+  if(w.step===2) bindVideoPicker();
+  if(w.step===3) bindMusicPicker();
+}
+
+/* ---- Step 1: 文案 ---- */
+function stepCopyHtml(){
+  const w = state.wizard;
+  return `
+    <div class="wizard-title">步骤一 · 输入视频文案</div>
+    <div class="wizard-sub">粘贴一段原始文案，AI 可据此裂变出多条不同角度的文案 —— 每条文案最终会独立混剪成一支风格不同的视频。</div>
+    <textarea id="sourceCopyInput" placeholder="例如：这款秋季羽绒服采用90%白鸭绒填充……">${w.sourceCopy}</textarea>
+    <div class="row">
+      <span class="field-hint">裂变数量</span>
+      <input type="number" class="num-input" id="fissionCount" value="3" min="1" max="10">
+      <button class="btn btn-primary btn-sm" onclick="runFission()">${SPARK_ICON} AI 裂变生成</button>
+    </div>
+
+    <div class="field-label">文案列表 <span class="field-hint">（共 ${w.copies.length} 条，每条对应生成 1 支视频，可编辑或删除）</span></div>
+    <div class="copy-list" id="copyList">
+      ${w.copies.map((c,i)=>`
+        <div class="copy-item">
+          <div class="copy-idx">${i+1}</div>
+          <textarea class="copy-text" rows="2" oninput="updateCopy(${i}, this.value)">${c}</textarea>
+          <button class="del" onclick="deleteCopy(${i})">${TRASH_ICON}</button>
+        </div>
+      `).join('')}
+    </div>
+    <button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="addCopy()">${PLUS_ICON} 手动添加一条文案</button>
+
+    <div class="wizard-footer">
+      <div></div>
+      <button class="btn btn-primary" onclick="nextStep()" ${w.copies.length===0?'disabled':''}>下一步：选择视频素材</button>
+    </div>
+  `;
+}
+function runFission(){
+  const src = document.getElementById('sourceCopyInput').value.trim();
+  const count = parseInt(document.getElementById('fissionCount').value) || 3;
+  if(!src){ toast('请先输入原始文案'); return; }
+  state.wizard.sourceCopy = src;
+  // --- MOCK AI fission logic. In production call your copywriting LLM endpoint here. ---
+  const openers = ['别再纠结了，','谁懂啊，','测评了20款之后发现，','说真的，','闺蜜安利过来的，','没想到今年会为它上头，'];
+  const closers = ['真的闭眼入不踩雷。','评论区都在问链接。','建议直接冲。','越穿越上头。','性价比直接拉满。','谁买谁知道。'];
+  const generated = [];
+  for(let i=0;i<count;i++){
+    const opener = openers[Math.floor(Math.random()*openers.length)];
+    const closer = closers[Math.floor(Math.random()*closers.length)];
+    let core = src.replace(/[。！]$/,'');
+    if(core.length>28) core = core.slice(0,28)+'…';
+    generated.push(opener + core + '，' + closer);
+  }
+  state.wizard.copies = state.wizard.copies.concat(generated);
+  renderWizard();
+  toast('AI 已生成 '+count+' 条新文案');
+}
+function updateCopy(i, val){ state.wizard.copies[i] = val; }
+function deleteCopy(i){ state.wizard.copies.splice(i,1); renderWizard(); }
+function addCopy(){ state.wizard.copies.push(''); renderWizard(); }
+
+/* ---- Step 2: 视频素材 ---- */
+function stepVideoHtml(){
+  const w = state.wizard;
+  return `
+    <div class="wizard-title">步骤二 · 选择视频素材</div>
+    <div class="wizard-sub">选择用于混剪的素材，建议每类场景至少选择 2 段，便于 AI 尽量不重复地组合。也可直接上传新素材。</div>
+    <div class="toolbar">
+      <span class="field-hint">已选 ${w.selectedVideos.length} 段素材</span>
+      <button class="btn btn-secondary btn-sm" onclick="openUploadModal('video')">${PLUS_ICON} 上传新素材</button>
+    </div>
+    <div class="grid" id="pickVideoGrid">
+      ${state.materials.video.map(v=>`
+        <div class="card pick-card ${w.selectedVideos.includes(v.id)?'selected':''}" data-id="${v.id}">
+          <div class="thumb" style="background:${colorFor(v.id)}">
+            ${VIDEO_ICON}
+            <div class="check">${CHECK_ICON}</div>
+            <div class="dur-badge">${v.dur}</div>
+          </div>
+          <div class="card-body">
+            <div class="card-name">${v.name}</div>
+            <span class="tag">${v.tag}</span>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="wizard-footer">
+      <button class="btn btn-secondary" onclick="prevStep()">上一步</button>
+      <button class="btn btn-primary" onclick="nextStep()" ${w.selectedVideos.length<2?'disabled':''}>下一步：背景音乐与时长</button>
+    </div>
+  `;
+}
+function bindVideoPicker(){
+  document.querySelectorAll('#pickVideoGrid .pick-card').forEach(card=>{
+    card.addEventListener('click', ()=>{
+      const id = parseInt(card.dataset.id);
+      const w = state.wizard;
+      const idx = w.selectedVideos.indexOf(id);
+      if(idx>-1) w.selectedVideos.splice(idx,1); else w.selectedVideos.push(id);
+      renderWizard();
+    });
+  });
+}
+
+/* ---- Step 3: 音乐 + 时长 ---- */
+function stepMusicHtml(){
+  const w = state.wizard;
+  const durs = [15,30,60];
+  return `
+    <div class="wizard-title">步骤三 · 背景音乐与视频时长</div>
+    <div class="wizard-sub">可多选背景音乐，AI 会为不同文案生成的视频分配不同曲目，让每支视频风格更有区分度。</div>
+
+    <div class="field-label">背景音乐 <span class="field-hint">（已选 ${w.selectedMusic.length} 首）</span></div>
+    <div id="pickMusicList">
+      ${state.materials.music.map(m=>`
+        <div class="music-row pick-card ${w.selectedMusic.includes(m.id)?'selected':''}" data-id="${m.id}">
+          <div class="play-btn" style="pointer-events:none;">${w.selectedMusic.includes(m.id)?CHECK_ICON:MUSIC_ICON}</div>
+          <div class="music-info">
+            <div class="music-name">${m.name}</div>
+            <div class="music-sub">${m.mood}</div>
+          </div>
+          <div class="wave">${waveBars(m.id)}</div>
+          <div class="music-dur">${m.dur}</div>
+        </div>
+      `).join('')}
+    </div>
+
+    <div class="field-label">视频时长</div>
+    <div class="dur-options">
+      ${durs.map(d=>`<div class="dur-opt ${w.duration===d?'active':''}" onclick="setDuration(${d})">${d} 秒</div>`).join('')}
+      <div class="dur-opt ${![15,30,60].includes(w.duration)?'active':''}" onclick="setDuration('custom')">自定义</div>
+      ${![15,30,60].includes(w.duration) ? `<input type="number" class="num-input" value="${w.duration}" oninput="state.wizard.duration=parseInt(this.value)||15">` : ''}
+    </div>
+
+    <div class="wizard-footer">
+      <button class="btn btn-secondary" onclick="prevStep()">上一步</button>
+      <button class="btn btn-primary" onclick="nextStep()" ${w.selectedMusic.length===0?'disabled':''}>下一步：生成混剪</button>
+    </div>
+  `;
+}
+function bindMusicPicker(){
+  document.querySelectorAll('#pickMusicList .pick-card').forEach(row=>{
+    row.addEventListener('click', ()=>{
+      const id = parseInt(row.dataset.id);
+      const w = state.wizard;
+      const idx = w.selectedMusic.indexOf(id);
+      if(idx>-1) w.selectedMusic.splice(idx,1); else w.selectedMusic.push(id);
+      renderWizard();
+    });
+  });
+}
+function setDuration(d){
+  state.wizard.duration = d==='custom' ? 20 : d;
+  renderWizard();
+}
+
+/* ---- Step 4: 生成 ---- */
+function stepGenerateHtml(){
+  const w = state.wizard;
+  const videos = state.materials.video.filter(v=>w.selectedVideos.includes(v.id));
+  const musics = state.materials.music.filter(m=>w.selectedMusic.includes(m.id));
+
+  let plan = '';
+  if(w.results.length===0){
+    plan = `
+      <div class="field-label">生成方案预览</div>
+      <table class="plan-table">
+        <tr><th style="width:32px;">#</th><th>文案</th><th style="width:230px;">匹配素材（AI 智能匹配，避免重复）</th><th style="width:90px;">背景音乐</th></tr>
+        ${w.copies.map((c,i)=>{
+          const assigned = assignVideosForIndex(i, videos, 3);
+          const music = musics[i % musics.length];
+          return `<tr>
+            <td>${i+1}</td>
+            <td>${c || '<span style="color:#cbd5e1">（空文案）</span>'}</td>
+            <td>${assigned.map(v=>`<span class="mini-tag">${v.tag}</span>`).join('')}</td>
+            <td>${music ? music.name.split(' - ')[0] : '-'}</td>
+          </tr>`;
+        }).join('')}
+      </table>
+      <div class="row" style="margin-top:16px;">
+        <span class="field-hint">时长 ${w.duration} 秒 · 共将生成 ${w.copies.length} 支视频</span>
+      </div>
+      <div id="genProgressWrap"></div>
+      <div class="wizard-footer">
+        <button class="btn btn-secondary" onclick="prevStep()">上一步</button>
+        <button class="btn btn-primary" id="genBtn" onclick="startGenerate()">${SPARK_ICON} 开始 AI 混剪</button>
+      </div>
+    `;
+  } else {
+    plan = `
+      <div class="field-label">生成结果 <span class="field-hint">（共 ${w.results.length} 支，可预览、下载或保存到成品库）</span></div>
+      <div class="grid">
+        ${w.results.map((r,i)=>`
+          <div class="card result-card">
+            <div class="thumb" style="background:${colorFor(r.videoIds[0])}">
+              ${VIDEO_ICON}
+              <div class="result-badge">${r.duration}s</div>
+            </div>
+            <div class="card-body">
+              <div class="card-name">${r.copy.slice(0,16)}${r.copy.length>16?'…':''}</div>
+              <div class="card-meta"><span>${r.music}</span></div>
+              <div class="card-actions">
+                <button class="btn btn-secondary btn-sm" style="flex:1" onclick="openSaveModal(${i})">存入成品库</button>
+                <button class="btn btn-secondary btn-sm">${DL_ICON}</button>
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="wizard-footer">
+        <button class="btn btn-secondary" onclick="resetGenerate()">重新配置方案</button>
+        <button class="btn btn-primary" onclick="startNewMix()">${PLUS_ICON} 开始新的混剪任务</button>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="wizard-title">步骤四 · AI 混剪生成</div>
+    <div class="wizard-sub">AI 会依据每条文案的语义，从已选素材中智能匹配镜头，尽量让素材在各视频间不重复复用，并为每支视频呈现不同的剪辑风格与转场节奏。</div>
+    ${plan}
+  `;
+}
+
+// deterministic-ish mock matching so results look consistent across renders
+function assignVideosForIndex(i, videos, count){
+  const out = [];
+  for(let k=0;k<count && k<videos.length;k++){
+    out.push(videos[(i*2+k) % videos.length]);
+  }
+  return out;
+}
+
+function startGenerate(){
+  const w = state.wizard;
+  const btn = document.getElementById('genBtn');
+  btn.disabled = true;
+  const wrap = document.getElementById('genProgressWrap');
+  wrap.innerHTML = `
+    <div class="progress-wrap">
+      <div class="progress-bar-bg"><div class="progress-bar-fg" id="progFg"></div></div>
+      <div class="progress-status" id="progStatus">正在初始化 AI 混剪任务…</div>
+    </div>
+  `;
+  const statuses = ['正在解析文案语义…','正在智能匹配素材镜头…','正在按文案生成分镜脚本…','正在合成画面与背景音乐…','正在导出视频文件…'];
+  let pct = 0;
+  const timer = setInterval(()=>{
+    pct += 100/statuses.length;
+    const idx = Math.min(statuses.length-1, Math.floor(pct/(100/statuses.length)));
+    document.getElementById('progFg').style.width = Math.min(pct,100)+'%';
+    document.getElementById('progStatus').textContent = statuses[idx];
+    if(pct>=100){
+      clearInterval(timer);
+      finishGenerate();
+    }
+  }, 550);
+
+  // ---- REAL INTEGRATION POINT ----
+  // Replace the setInterval mock above with a call to your generation API, e.g.:
+  // const job = await api.createMixJob({ copies: w.copies, videoIds: w.selectedVideos, musicIds: w.selectedMusic, duration: w.duration });
+  // then poll job status and populate w.results from the response.
+}
+function finishGenerate(){
+  const w = state.wizard;
+  const videos = state.materials.video.filter(v=>w.selectedVideos.includes(v.id));
+  const musics = state.materials.music.filter(m=>w.selectedMusic.includes(m.id));
+  w.results = w.copies.map((c,i)=>{
+    const assigned = assignVideosForIndex(i, videos, 3);
+    const music = musics[i % musics.length];
+    return {
+      copy: c,
+      videoIds: assigned.map(v=>v.id),
+      music: music ? music.name.split(' - ')[0] : '-',
+      duration: w.duration
+    };
+  });
+  renderWizard();
+  toast('AI 混剪已完成，共生成 '+w.results.length+' 支视频');
+}
+function resetGenerate(){ state.wizard.results = []; renderWizard(); }
+function startNewMix(){
+  state.wizard = {step:1, sourceCopy:'', copies:[], selectedVideos:[], selectedMusic:[], duration:15, results:[]};
+  renderWizard();
+}
+
+function nextStep(){ state.wizard.step = Math.min(4, state.wizard.step+1); renderWizard(); }
+function prevStep(){ state.wizard.step = Math.max(1, state.wizard.step-1); renderWizard(); }
+
+/* Save result to product library */
+function openSaveModal(i){
+  state.saveResultIndex = i;
+  const sel = document.getElementById('saveFolderSelect');
+  const names = Object.keys(state.products);
+  sel.innerHTML = names.map(n=>`<option value="${n}">${n}</option>`).join('') + `<option value="__new__">+ 新建文件夹…</option>`;
+  openModal('saveOverlay');
+}
+function confirmSaveResult(){
+  const sel = document.getElementById('saveFolderSelect');
+  let folder = sel.value;
+  if(folder === '__new__'){
+    folder = prompt('请输入新文件夹名称（产品名称）：');
+    if(!folder) return;
+    if(!state.products[folder]) state.products[folder] = [];
+  }
+  const r = state.wizard.results[state.saveResultIndex];
+  const id = nextId++;
+  state.products[folder].push({
+    id, name: `混剪_${r.copy.slice(0,8)}_${id}.mp4`, dur: '0:'+String(r.duration).padStart(2,'0'),
+    date: new Date().toISOString().slice(0,10)
+  });
+  closeModal('saveOverlay');
+  toast('已保存到「'+folder+'」');
+}
+
+/* =====================================================================
+   INIT
+===================================================================== */
+renderMaterials();
+renderProducts();
+renderWizard();
+
+/* =====================================================================
+   API_HOOKS (for backend integration)
+   ---------------------------------------------------------------------
+   This file is a front-end framework/prototype. To wire it to a real
+   system, replace the mock functions above with calls such as:
+
+   GET    /api/materials/videos            list video materials
+   GET    /api/materials/music             list music materials
+   POST   /api/materials/videos            upload video material
+   POST   /api/materials/music             upload music material
+   DELETE /api/materials/:type/:id         remove a material
+
+   GET    /api/products                    list product folders
+   POST   /api/products                    create a product folder
+   GET    /api/products/:name/videos       list finished videos in a folder
+   POST   /api/products/:name/videos       save a generated video to a folder
+
+   POST   /api/ai/copy-fission             { sourceCopy, count } -> string[]
+   POST   /api/ai/mix-jobs                 { copies[], videoIds[], musicIds[], duration }
+                                            -> { jobId }
+   GET    /api/ai/mix-jobs/:jobId          -> { status, progress, results[] }
+
+   Embedding into the ERP: this file is fully self-contained (no external
+   requests) and can be dropped into an <iframe src="ai_video_mixer.html">
+   or have its <body> contents mounted directly into an existing ERP page
+   shell, matching the ERP's dark sidebar + light content visual system.
+===================================================================== */
+</script>
+</body>
+</html>
