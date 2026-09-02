@@ -466,6 +466,43 @@ button {
   background: rgba(15, 118, 110, 0.3);
 }
 
+.nav-submenu-title {
+  justify-content: space-between;
+}
+
+.nav-submenu-title.active-parent {
+  color: #f8fafc;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.nav-submenu-chevron {
+  font-size: 18px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 0.16s ease;
+}
+
+.nav-submenu.open .nav-submenu-chevron {
+  transform: rotate(90deg);
+}
+
+.nav-submenu-items {
+  display: none;
+  margin: 2px 0 6px 18px;
+  padding-left: 7px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.nav-submenu.open .nav-submenu-items {
+  display: grid;
+  gap: 2px;
+}
+
+.nav-group-items .nav-child-item {
+  padding-left: 14px;
+  font-size: 12px;
+}
+
 .main {
   padding: 20px;
 }

@@ -5,6 +5,7 @@ const state = {
   dashboard: null,
   activeModule: 'home',
   openGroup: null,
+  openSubmenu: null,
   tkProducts: null,
   tkProductShop: 'oku',
   tkProductSearch: '',
@@ -36,7 +37,15 @@ const navGroups = [
     icon: 'AI',
     items: [
       { id: 'ai-image', label: 'AI 做图' },
-      { id: 'ai-video', label: 'AI 剪视频' },
+      {
+        id: 'ai-video',
+        label: 'AI 剪视频',
+        children: [
+          { id: 'ai-video-materials', label: '素材库', view: 'materials' },
+          { id: 'ai-video-mix', label: 'AI 混剪', view: 'mix' },
+          { id: 'ai-video-products', label: '成品库', view: 'products' },
+        ],
+      },
     ],
   },
   {
@@ -112,12 +121,20 @@ function findModule(id) {
   for (const group of navGroups) {
     const item = group.items.find((entry) => entry.id === id);
     if (item) return { ...item, group: group.title, groupId: group.id };
+    for (const parent of group.items) {
+      const child = parent.children?.find((entry) => entry.id === id);
+      if (child) return { ...child, group: `${group.title} / ${parent.label}`, groupId: group.id, parentId: parent.id };
+    }
   }
   return { id: 'home', label: '首页', group: '首页' };
 }
 
 function groupHasActiveItem(group) {
-  return group.items.some((item) => item.id === state.activeModule);
+  return group.items.some((item) => item.id === state.activeModule || item.children?.some((child) => child.id === state.activeModule));
+}
+
+function itemHasActiveChild(item) {
+  return item.children?.some((child) => child.id === state.activeModule);
 }
 
 function escapeHtml(value) {
@@ -231,7 +248,20 @@ function sidebarView() {
           <span class="nav-title-main"><span class="nav-icon">${escapeHtml(group.icon)}</span>${escapeHtml(group.title)}</span>
         </button>
         <div class="nav-group-items">
-          ${group.items.map((item) => `
+          ${group.items.map((item) => item.children ? `
+            <div class="nav-submenu ${state.openSubmenu === item.id || itemHasActiveChild(item) ? 'open' : ''}">
+              <button class="nav-item nav-submenu-title ${itemHasActiveChild(item) ? 'active-parent' : ''}" data-submenu="${item.id}" type="button">
+                <span>${escapeHtml(item.label)}</span><span class="nav-submenu-chevron">›</span>
+              </button>
+              <div class="nav-submenu-items">
+                ${item.children.map((child) => `
+                  <button class="nav-item nav-child-item ${state.activeModule === child.id ? 'active' : ''}" data-module="${child.id}" type="button">
+                    ${escapeHtml(child.label)}
+                  </button>
+                `).join('')}
+              </div>
+            </div>
+          ` : `
             <button class="nav-item ${state.activeModule === item.id ? 'active' : ''}" data-module="${item.id}" type="button">
               ${escapeHtml(item.label)}
             </button>
@@ -331,15 +361,15 @@ function homePanel() {
 }
 
 function modulePanel(active) {
-  if (active.id === 'ai-video') {
+  if (active.parentId === 'ai-video') {
     return `
       <section class="panel work-panel">
         <div class="panel-head">
-          <h3>AI 剪视频</h3>
-          <small>/ai-video/</small>
+          <h3>${escapeHtml(active.label)}</h3>
+          <small>/ai-video/?view=${escapeHtml(active.view)}</small>
         </div>
         <div class="module-frame ai-video-frame">
-          <iframe src="/ai-video/" title="AI 剪视频工作台" allow="clipboard-write"></iframe>
+          <iframe src="/ai-video/?view=${encodeURIComponent(active.view)}" title="AI 剪视频 - ${escapeHtml(active.label)}" allow="clipboard-write"></iframe>
         </div>
         <div class="footer-row">
           <span>AI 剪视频已作为独立模块接入，不与其他业务模块共享数据和状态。</span>
@@ -1433,9 +1463,20 @@ function bindDashboard() {
     });
   });
 
+  document.querySelectorAll('[data-submenu]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const parent = navGroups.flatMap((group) => group.items).find((item) => item.id === button.dataset.submenu);
+      state.openSubmenu = state.openSubmenu === parent?.id ? null : parent?.id;
+      if (parent?.children?.length && !itemHasActiveChild(parent)) state.activeModule = parent.children[0].id;
+      render();
+    });
+  });
+
   document.querySelectorAll('[data-module]').forEach((button) => {
     button.addEventListener('click', () => {
       state.activeModule = button.dataset.module;
+      const active = findModule(state.activeModule);
+      if (active.parentId) state.openSubmenu = active.parentId;
       if (state.activeModule === 'home') state.openGroup = null;
       render();
     });

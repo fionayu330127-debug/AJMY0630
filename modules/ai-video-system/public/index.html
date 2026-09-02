@@ -1140,6 +1140,8 @@ function confirmSaveResult(){
 renderMaterials();
 renderProducts();
 renderWizard();
+const initialPage = new URLSearchParams(window.location.search).get('view');
+if(['materials', 'mix', 'products'].includes(initialPage)) switchPage(initialPage);
 
 /* =====================================================================
    API_HOOKS (for backend integration)
