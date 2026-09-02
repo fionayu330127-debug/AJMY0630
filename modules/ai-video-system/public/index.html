@@ -170,6 +170,15 @@
 
   /* material grid variant selectable */
   .pick-card{cursor:pointer;}
+  .material-folders{display:flex;align-items:stretch;gap:10px;margin-bottom:16px;overflow-x:auto;padding-bottom:2px;}
+  .material-folder{min-width:150px;padding:11px 13px;border:1px solid var(--border);border-radius:8px;background:#fff;cursor:pointer;text-align:left;color:var(--ink-900);}
+  .material-folder:hover,.material-folder.drag-over{border-color:var(--teal-500);background:var(--teal-50);}
+  .material-folder.active{border-color:var(--teal-600);box-shadow:inset 0 0 0 1px var(--teal-600);}
+  .material-folder strong{display:block;font-size:12.5px;margin-bottom:3px;white-space:nowrap;}
+  .material-folder span{font-size:11px;color:var(--ink-400);}
+  .material-folder-new{min-width:130px;border-style:dashed;color:var(--teal-600);display:flex;align-items:center;justify-content:center;gap:6px;font-weight:600;}
+  .video-material-card[draggable="true"]{cursor:grab;}
+  .video-material-card[draggable="true"]:active{cursor:grabbing;}
 
   /* ---------- Music rows ---------- */
   .music-row{
@@ -418,6 +427,7 @@
       </div>
 
       <div id="mtab-video">
+        <div class="material-folders" id="materialFolderBar"></div>
         <div class="toolbar">
           <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input placeholder="搜索视频素材"></div>
           <button class="btn btn-primary" onclick="openUploadModal('video')">
@@ -523,6 +533,9 @@
 ===================================================================== */
 const THUMB_COLORS = ['#0f766e','#1d4ed8','#7c3aed','#be123c','#b45309','#0369a1','#4d7c0f','#a21caf'];
 function colorFor(id){ return THUMB_COLORS[id % THUMB_COLORS.length]; }
+function escapeText(value){
+  return String(value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
+}
 
 const VIDEO_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg>`;
 const MUSIC_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
@@ -537,16 +550,19 @@ const SPARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 
 let state = {
   page: 'mix',
+  activeMaterialFolder: '全部素材',
+  wizardMaterialFolder: '全部素材',
+  materialFolders: ['未分类','开箱素材','展示素材','场景素材'],
   materials: {
     video: [
-      {id:1, name:'开箱_产品外观01.mp4', dur:'0:12', tag:'开箱'},
-      {id:2, name:'开箱_产品外观02.mp4', dur:'0:09', tag:'开箱'},
-      {id:3, name:'穿着展示_正面.mp4', dur:'0:15', tag:'展示'},
-      {id:4, name:'穿着展示_细节.mp4', dur:'0:08', tag:'展示'},
-      {id:5, name:'场景_户外街拍.mp4', dur:'0:20', tag:'场景'},
-      {id:6, name:'场景_室内特写.mp4', dur:'0:11', tag:'场景'},
-      {id:7, name:'模特_微笑转身.mp4', dur:'0:07', tag:'人物'},
-      {id:8, name:'测评_面料特写.mp4', dur:'0:13', tag:'测评'},
+      {id:1, name:'开箱_产品外观01.mp4', dur:'0:12', tag:'开箱', folder:'开箱素材'},
+      {id:2, name:'开箱_产品外观02.mp4', dur:'0:09', tag:'开箱', folder:'开箱素材'},
+      {id:3, name:'穿着展示_正面.mp4', dur:'0:15', tag:'展示', folder:'展示素材'},
+      {id:4, name:'穿着展示_细节.mp4', dur:'0:08', tag:'展示', folder:'展示素材'},
+      {id:5, name:'场景_户外街拍.mp4', dur:'0:20', tag:'场景', folder:'场景素材'},
+      {id:6, name:'场景_室内特写.mp4', dur:'0:11', tag:'场景', folder:'场景素材'},
+      {id:7, name:'模特_微笑转身.mp4', dur:'0:07', tag:'人物', folder:'未分类'},
+      {id:8, name:'测评_面料特写.mp4', dur:'0:13', tag:'测评', folder:'未分类'},
     ],
     music: [
       {id:101, name:'轻快节奏 - Pop Beat', dur:'0:30', mood:'欢快'},
@@ -641,16 +657,20 @@ function toast(msg){
    PAGE: 素材库
 ===================================================================== */
 function renderMaterials(){
+  renderMaterialFolderBar();
   const vGrid = document.getElementById('videoGrid');
-  vGrid.innerHTML = state.materials.video.map(v=>`
-    <div class="card">
+  const videos = state.activeMaterialFolder === '全部素材'
+    ? state.materials.video
+    : state.materials.video.filter(v=>v.folder === state.activeMaterialFolder);
+  vGrid.innerHTML = videos.map(v=>`
+    <div class="card video-material-card" draggable="true" data-video-id="${v.id}" ondragstart="startVideoDrag(event,${v.id})">
       <div class="thumb" style="background:${colorFor(v.id)}">
         ${VIDEO_ICON}
         <div class="dur-badge">${v.dur}</div>
       </div>
       <div class="card-body">
         <div class="card-name">${v.name}</div>
-        <div class="card-meta"><span class="tag">${v.tag}</span></div>
+        <div class="card-meta"><span class="tag">${v.tag}</span><span>${v.folder || '未分类'}</span></div>
         <div class="card-actions">
           <button class="btn btn-secondary btn-sm" style="flex:1" onclick="switchPage('mix')">用于混剪</button>
           <button class="btn btn-danger btn-sm" onclick="removeMaterial('video',${v.id})">${TRASH_ICON}</button>
@@ -672,6 +692,57 @@ function renderMaterials(){
       <button class="btn btn-danger btn-sm" onclick="removeMaterial('music',${m.id})">${TRASH_ICON}</button>
     </div>
   `).join('') || emptyHtml('music');
+}
+function folderCount(name){ return state.materials.video.filter(v=>v.folder===name).length; }
+function renderMaterialFolderBar(){
+  const bar = document.getElementById('materialFolderBar');
+  if(!bar) return;
+  const names = ['全部素材', ...state.materialFolders];
+  bar.innerHTML = names.map(name=>`
+    <button class="material-folder ${state.activeMaterialFolder===name?'active':''}" type="button"
+      onclick="selectMaterialFolder(decodeURIComponent('${encodeURIComponent(name)}'))"
+      ondragover="allowFolderDrop(event)" ondragleave="leaveFolderDrop(event)"
+      ondrop="dropVideoToFolder(event,decodeURIComponent('${encodeURIComponent(name)}'))">
+      <strong>${escapeText(name)}</strong><span>${name==='全部素材'?state.materials.video.length:folderCount(name)} 个视频</span>
+    </button>`).join('') + `
+    <button class="material-folder material-folder-new" type="button" onclick="createMaterialFolder()">${PLUS_ICON} 新建文件夹</button>`;
+}
+function selectMaterialFolder(name){ state.activeMaterialFolder=name; renderMaterials(); }
+function createMaterialFolder(){
+  const name = prompt('请输入素材文件夹名称：')?.trim();
+  if(!name) return;
+  if(name==='全部素材' || state.materialFolders.includes(name)){ toast('文件夹名称已存在'); return; }
+  state.materialFolders.push(name);
+  state.activeMaterialFolder = name;
+  saveVideoLibrary();
+  renderMaterials();
+  toast('素材文件夹已创建');
+}
+function startVideoDrag(event,id){ event.dataTransfer.setData('text/plain',String(id)); event.dataTransfer.effectAllowed='move'; }
+function allowFolderDrop(event){ event.preventDefault(); event.currentTarget.classList.add('drag-over'); event.dataTransfer.dropEffect='move'; }
+function leaveFolderDrop(event){ event.currentTarget.classList.remove('drag-over'); }
+function dropVideoToFolder(event,name){
+  event.preventDefault(); event.currentTarget.classList.remove('drag-over');
+  if(name==='全部素材') return;
+  const video = state.materials.video.find(v=>v.id===Number(event.dataTransfer.getData('text/plain')));
+  if(!video) return;
+  video.folder=name;
+  saveVideoLibrary();
+  renderMaterials();
+  toast('已移动到「'+name+'」');
+}
+function saveVideoLibrary(){
+  localStorage.setItem('ai-video-library',JSON.stringify({folders:state.materialFolders,videos:state.materials.video}));
+}
+function loadVideoLibrary(){
+  try {
+    const saved=JSON.parse(localStorage.getItem('ai-video-library'));
+    if(Array.isArray(saved?.folders) && Array.isArray(saved?.videos)){
+      state.materialFolders=saved.folders;
+      state.materials.video=saved.videos.map(v=>({...v,folder:v.folder||'未分类'}));
+      nextId=Math.max(nextId,...state.materials.video.map(v=>Number(v.id)||0))+1;
+    }
+  } catch(error) { console.warn('Could not restore video library',error); }
 }
 function waveBars(seed){
   let out='';
@@ -701,6 +772,7 @@ function emptyHtml(kind){
 }
 function removeMaterial(type, id){
   state.materials[type] = state.materials[type].filter(m=>m.id!==id);
+  if(type==='video') saveVideoLibrary();
   renderMaterials();
   toast('已删除');
 }
@@ -726,7 +798,9 @@ function confirmUpload(){
   const tag = document.getElementById('uploadTagInput').value;
   const id = nextId++;
   if(type==='video'){
-    state.materials.video.push({id, name: name || `新素材_${id}.mp4`, dur: randomDur(), tag});
+    const folder = state.activeMaterialFolder==='全部素材' ? '未分类' : state.activeMaterialFolder;
+    state.materials.video.push({id, name: name || `新素材_${id}.mp4`, dur: randomDur(), tag, folder});
+    saveVideoLibrary();
   } else {
     state.materials.music.push({id, name: name || `新音乐_${id}`, dur: randomDur(true), mood: tag});
   }
@@ -885,6 +959,10 @@ function addCopy(){ state.wizard.copies.push(''); renderWizard(); }
 /* ---- Step 2: 视频素材 ---- */
 function stepVideoHtml(){
   const w = state.wizard;
+  const folders = ['全部素材', ...state.materialFolders];
+  const visibleVideos = state.wizardMaterialFolder==='全部素材'
+    ? state.materials.video
+    : state.materials.video.filter(v=>v.folder===state.wizardMaterialFolder);
   return `
     <div class="wizard-title">步骤二 · 选择视频素材</div>
     <div class="wizard-sub">选择用于混剪的素材，建议每类场景至少选择 2 段，便于 AI 尽量不重复地组合。也可直接上传新素材。</div>
@@ -892,8 +970,12 @@ function stepVideoHtml(){
       <span class="field-hint">已选 ${w.selectedVideos.length} 段素材</span>
       <button class="btn btn-secondary btn-sm" onclick="openUploadModal('video')">${PLUS_ICON} 上传新素材</button>
     </div>
+    <div class="field-label">选择素材文件夹</div>
+    <div class="material-folders">
+      ${folders.map(name=>`<button class="material-folder ${state.wizardMaterialFolder===name?'active':''}" type="button" onclick="selectWizardFolder(decodeURIComponent('${encodeURIComponent(name)}'))"><strong>${escapeText(name)}</strong><span>${name==='全部素材'?state.materials.video.length:folderCount(name)} 个视频</span></button>`).join('')}
+    </div>
     <div class="grid" id="pickVideoGrid">
-      ${state.materials.video.map(v=>`
+      ${visibleVideos.map(v=>`
         <div class="card pick-card ${w.selectedVideos.includes(v.id)?'selected':''}" data-id="${v.id}">
           <div class="thumb" style="background:${colorFor(v.id)}">
             ${VIDEO_ICON}
@@ -902,7 +984,7 @@ function stepVideoHtml(){
           </div>
           <div class="card-body">
             <div class="card-name">${v.name}</div>
-            <span class="tag">${v.tag}</span>
+            <div class="card-meta"><span class="tag">${v.tag}</span><span>${v.folder || '未分类'}</span></div>
           </div>
         </div>
       `).join('')}
@@ -913,6 +995,7 @@ function stepVideoHtml(){
     </div>
   `;
 }
+function selectWizardFolder(name){ state.wizardMaterialFolder=name; renderWizard(); }
 function bindVideoPicker(){
   document.querySelectorAll('#pickVideoGrid .pick-card').forEach(card=>{
     card.addEventListener('click', ()=>{
@@ -1137,6 +1220,7 @@ function confirmSaveResult(){
 /* =====================================================================
    INIT
 ===================================================================== */
+loadVideoLibrary();
 renderMaterials();
 renderProducts();
 renderWizard();
