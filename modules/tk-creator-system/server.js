@@ -2713,8 +2713,9 @@ app.get('/api/data/bd-report', async (req, res) => {
   const validOwner = (sample) => !bdIds.size || bdIds.has(Number(sample.owner_bd_id));
   const scopedSamples = allSamples.filter(validOwner);
   const periodSamples = scopedSamples.filter((sample) => inRange(sample.applied_at));
-  const acceptedStatuses = new Set(['approved', 'assigned', 'shipped', 'published']);
-  const libraryStatuses = new Set(['approved', 'shipped', 'published']);
+  // Only records that passed review and entered the cooperation library count
+  // as sample cooperations. `assigned` means assigned but not yet approved.
+  const acceptedStatuses = new Set(['approved', 'shipped', 'published']);
   const sqliteTime = (value) => value ? String(value).replace('T', ' ').slice(0, 19) : '';
   const isNew = (sample) => sqliteTime(firstSampleByCreator.get(creatorKey(sample))) === sqliteTime(sample.applied_at);
   const publishedAt = (sample) => sample.published_at || (sample.status === 'published' ? sample.synced_at || sample.library_added_at : null);
@@ -2768,7 +2769,7 @@ app.get('/api/data/bd-report', async (req, res) => {
   const selectedBdIds = bdIds.size ? [...bdIds].filter((id) => bdMap.has(id)) : [...bdMap.keys()];
   const inviteRows = selectedBdIds.map((id) => {
     const rows = periodSamples.filter((s) => Number(s.owner_bd_id) === id);
-    const sampleCooperations = scopedSamples.filter((s) => Number(s.owner_bd_id) === id && libraryStatuses.has(s.status) && inRange(s.library_added_at)).length;
+    const sampleCooperations = scopedSamples.filter((s) => Number(s.owner_bd_id) === id && acceptedStatuses.has(s.status) && inRange(s.library_added_at)).length;
     return { bdId: id, name: bdMap.get(id) || `BD ${id}`, totalCreators: uniqueCreatorCount(scopedSamples.filter((s) => Number(s.owner_bd_id) === id)), targetedInvites: uniqueCreatorCount(rows.filter((s) => Number(s.commission_rate) >= 0.15)), openInvites: uniqueCreatorCount(rows.filter((s) => s.commission_rate != null && Number(s.commission_rate) < 0.15)), sampleCooperations };
   });
   const conversionRows = [];
