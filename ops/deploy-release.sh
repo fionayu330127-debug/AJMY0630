@@ -13,7 +13,7 @@ mkdir -p "$backup"
 tar \
   --exclude='.git' --exclude='.env' --exclude='node_modules' --exclude='logs' \
   --exclude='data' --exclude='modules/tk-creator-system/data' \
-  --exclude='modules/tk-trend-system/data' --exclude='product-test-system/data' \
+  --exclude='modules/tk-trend-system/data' --exclude='modules/product-test-system/data' --exclude='product-test-system/data' \
   --exclude='*.log' --exclude='*.db' --exclude='*.db-wal' --exclude='*.db-shm' \
   -czf "$backup/code.tar.gz" -C "$root" .
 
@@ -39,7 +39,7 @@ trap rollback ERR
 tar \
   --exclude='.env' --exclude='node_modules' --exclude='logs' --exclude='data' \
   --exclude='modules/tk-creator-system/data' --exclude='modules/tk-trend-system/data' \
-  --exclude='product-test-system/data' --exclude='*.log' --exclude='*.db' --exclude='*.db-wal' --exclude='*.db-shm' \
+  --exclude='modules/product-test-system/data' --exclude='product-test-system/data' --exclude='*.log' --exclude='*.db' --exclude='*.db-wal' --exclude='*.db-shm' \
   -xzf "$release_archive" -C "$root"
 
 cd "$root"

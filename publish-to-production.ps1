@@ -31,7 +31,7 @@ try {
   $backupCode = Join-Path $backup 'code'
   New-Item -ItemType Directory -Path $backupCode -Force | Out-Null
   robocopy $production $backupCode /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 `
-    /XD '.git' 'node_modules' 'logs' 'data' 'modules\tk-creator-system\data' 'modules\tk-trend-system\data' 'product-test-system\data' `
+    /XD '.git' 'node_modules' 'logs' 'data' 'modules\tk-creator-system\data' 'modules\tk-trend-system\data' 'modules\product-test-system\data' 'product-test-system\data' `
     /XF '.env' '*.log' '*.db' '*.db-wal' '*.db-shm' | Out-Host
   if ($LASTEXITCODE -gt 7) { throw "Code backup failed: $LASTEXITCODE" }
 
@@ -41,7 +41,7 @@ try {
   Set-Content -LiteralPath (Join-Path $backup 'release.txt') -Value "revision=$revision`ncreated_at=$((Get-Date).ToString('s'))"
 
   robocopy $releaseDir $production /E /COPY:DAT /DCOPY:DAT /R:2 /W:1 `
-    /XD 'node_modules' 'logs' 'data' 'modules\tk-creator-system\data' 'modules\tk-trend-system\data' 'product-test-system\data' `
+    /XD 'node_modules' 'logs' 'data' 'modules\tk-creator-system\data' 'modules\tk-trend-system\data' 'modules\product-test-system\data' 'product-test-system\data' `
     /XF '.env' '*.log' '*.db' '*.db-wal' '*.db-shm' | Out-Host
   if ($LASTEXITCODE -gt 7) { throw "Code publish failed: $LASTEXITCODE" }
   $codePublished = $true

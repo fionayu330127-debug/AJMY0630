@@ -39,8 +39,8 @@ install -m 600 "$APP_DIR/modules/tk-creator-system/.env" "$WORK_DIR/tk-creator.e
 if [[ -f "$APP_DIR/ai-image-system/.env" ]]; then
   install -m 600 "$APP_DIR/ai-image-system/.env" "$WORK_DIR/ai-image.env"
 fi
-if [[ -f "$APP_DIR/product-test-system/data/submissions.json" ]]; then
-  install -m 600 "$APP_DIR/product-test-system/data/submissions.json" "$WORK_DIR/submissions.json"
+if [[ -f "$APP_DIR/modules/product-test-system/data/submissions.json" ]]; then
+  install -m 600 "$APP_DIR/modules/product-test-system/data/submissions.json" "$WORK_DIR/submissions.json"
 fi
 
 printf '%s\n' "$STAMP" > "$WORK_DIR/created-at.txt"

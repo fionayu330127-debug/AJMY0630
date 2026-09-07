@@ -24,7 +24,7 @@ Releases must not overwrite:
 - root `data`
 - `modules/tk-creator-system/data`
 - `modules/tk-trend-system/data`
-- `product-test-system/data`
+- `modules/product-test-system/data`
 - SQLite `*.db`, `*.db-wal`, and `*.db-shm` files
 
 Database schema changes belong in `database/migrations` and must be repeatable.
