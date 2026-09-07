@@ -44,6 +44,9 @@ tar \
 
 cd "$root"
 npm install --omit=dev
+if [[ -f modules/ai-image-system/package.json ]]; then
+  npm --prefix modules/ai-image-system install --omit=dev
+fi
 node --check server.js
 node --check modules/tk-creator-system/server.js
 printf '%s\n' "$revision" > .release-revision
