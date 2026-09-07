@@ -36,8 +36,8 @@ NODE
 
 install -m 600 "$APP_DIR/.env" "$WORK_DIR/erp.env"
 install -m 600 "$APP_DIR/modules/tk-creator-system/.env" "$WORK_DIR/tk-creator.env"
-if [[ -f "$APP_DIR/ai-image-system/.env" ]]; then
-  install -m 600 "$APP_DIR/ai-image-system/.env" "$WORK_DIR/ai-image.env"
+if [[ -f "$APP_DIR/modules/ai-image-system/.env" ]]; then
+  install -m 600 "$APP_DIR/modules/ai-image-system/.env" "$WORK_DIR/ai-image.env"
 fi
 if [[ -f "$APP_DIR/modules/product-test-system/data/submissions.json" ]]; then
   install -m 600 "$APP_DIR/modules/product-test-system/data/submissions.json" "$WORK_DIR/submissions.json"
