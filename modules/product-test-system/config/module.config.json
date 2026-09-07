@@ -1,0 +1,14 @@
+{
+  "moduleId": "product-test-system",
+  "moduleName": "链接刊登",
+  "basePath": "/product-test",
+  "dataFile": "data/submissions.json",
+  "statusFlow": [
+    { "key": "pending", "label": "链接刊登提交" },
+    { "key": "testing", "label": "刊登人填写ASIN" },
+    { "key": "passed", "label": "确认是否已开广告" },
+    { "key": "failed", "label": "刊登异常" },
+    { "key": "converted", "label": "链接上架成功" }
+  ],
+  "requiredFields": ["product_keywords", "brand", "store_name"]
+}
