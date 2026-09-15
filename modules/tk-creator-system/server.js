@@ -3044,6 +3044,10 @@ app.patch('/api/samples/:id', async (req, res) => {
   const previous = db.prepare('SELECT status, bd_id FROM samples WHERE id = ?').get(id);
   if (!previous) return res.status(404).json({ error: '样品申请不存在' });
 
+  if (previous.status === 'approved' && req.body.status === 'pending') {
+    return res.status(400).json({ error: '已通过记录请使用“撤回审核”操作' });
+  }
+
   const changesBd = 'bd_id' in req.body && Number(previous.bd_id || 0) !== Number(req.body.bd_id || 0);
   const isReassignment = changesBd && Boolean(previous.bd_id);
   if (isReassignment) {
@@ -3083,6 +3087,47 @@ app.patch('/api/samples/:id', async (req, res) => {
     });
   }
   notifyOverdueUnpublishedSamples(id);
+
+  res.json({ success: true });
+});
+
+// 撤回已通过的审核：仅管理员且记录尚未进入分配、物流或发布流程时允许。
+app.post('/api/samples/:id/withdraw-approval', async (req, res) => {
+  const user = await currentErpUser(req);
+  if (!user) return res.status(401).json({ error: '未登录' });
+  if (user.role !== 'admin') return res.status(403).json({ error: '只有管理员可以撤回审核' });
+
+  const sample = db.prepare(`
+    SELECT id, status, bd_id, sample_received_at, published_at
+    FROM samples
+    WHERE id = ?
+  `).get(req.params.id);
+  if (!sample) return res.status(404).json({ error: '样品申请不存在' });
+  if (sample.status !== 'approved') {
+    return res.status(409).json({ error: '只能撤回状态为“已通过”的记录' });
+  }
+  if (sample.bd_id) {
+    return res.status(409).json({ error: '该记录已分配 BD，不能撤回审核' });
+  }
+  if (sample.sample_received_at) {
+    return res.status(409).json({ error: '该记录已进入物流或签收流程，不能撤回审核' });
+  }
+  if (sample.published_at) {
+    return res.status(409).json({ error: '该记录已发布，不能撤回审核' });
+  }
+
+  const result = db.prepare(`
+    UPDATE samples
+    SET status = 'pending', library_added_at = NULL
+    WHERE id = ?
+      AND status = 'approved'
+      AND bd_id IS NULL
+      AND sample_received_at IS NULL
+      AND published_at IS NULL
+  `).run(req.params.id);
+  if (result.changes !== 1) {
+    return res.status(409).json({ error: '记录状态已变更，请刷新后重试' });
+  }
 
   res.json({ success: true });
 });

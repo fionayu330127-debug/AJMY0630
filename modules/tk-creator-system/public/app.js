@@ -842,7 +842,7 @@ async function renderSampleTable() {
         ? `<div class="abtns"><button class="abtn ok" onclick="doApprove('${sid}')">审核通过</button><button class="abtn ng" onclick="doReject('${sid}')">拒绝</button><button class="abtn bl" onclick="openCreatorModal('${sid}')">详情</button></div>`
         : s.status === 'rejected'
           ? `<div class="abtns"><button class="abtn ok" onclick="restoreSample('${sid}')">恢复</button><button class="abtn bl" onclick="openCreatorModal('${sid}')">详情</button></div>`
-          : `<div class="abtns"><button class="abtn bl" onclick="openCreatorModal('${sid}')">达人</button><button class="abtn" onclick="toast('物流记录暂未接入')">物流</button></div>`;
+          : `<div class="abtns"><button class="abtn bl" onclick="openCreatorModal('${sid}')">达人</button><button class="abtn" onclick="toast('物流记录暂未接入')">物流</button>${s.status === 'approved' && !s.bd_id && !s.sample_received_at && !s.published_at && CURRENT_USER?.is_admin ? `<button class="abtn ng" onclick="withdrawSampleApproval('${sid}')">撤回审核</button>` : ''}</div>`;
     return `<tr class="${groupIndex === 0 ? 'sample-group-start' : 'sample-group-sub'}">
       <td><input type="checkbox" class="checkbox"></td>
       ${creatorCell}
@@ -898,6 +898,16 @@ async function restoreSample(id) {
   await api(`/api/samples/${id}`, { method: 'PATCH', body: JSON.stringify({ status: 'pending' }) });
   toast('已恢复到待审核');
   renderSamplePage();
+}
+async function withdrawSampleApproval(id) {
+  if (!confirm('确定撤回该记录的审核吗？撤回后将回到待审核。')) return;
+  try {
+    await api(`/api/samples/${id}/withdraw-approval`, { method: 'POST' });
+    toast('已撤回审核，记录已回到待审核');
+    renderSamplePage();
+  } catch (error) {
+    toast(error.message || '撤回审核失败');
+  }
 }
 
 // ════ NEW SAMPLE MODAL ════
