@@ -687,6 +687,13 @@ async function appendImages(fd, files, fieldName){
   }
 }
 
+function base64ImageFile(b64, filename = 'base-result.png'){
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
+  return new File([bytes], filename, {type:'image/png'});
+}
+
 const LOCAL_API_ORIGIN = 'http://127.0.0.1:3002';
 const IS_LOCAL_HOST = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
 const IS_ERP_MOUNT = window.location.pathname.startsWith('/ai-draw');
@@ -930,11 +937,13 @@ function renderSingleResult(){
     applyBtn.innerHTML = '<span class="spinner"></span>修改中...';
     clearError('singleErr');
     try{
-      const data = await apiJson(`${API_BASE}/edit`, {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({prompt, image_b64: img.b64})
-      });
+      const fd = new FormData();
+      const baseB64 = img.baseB64 || img.b64;
+      fd.append('prompt', prompt);
+      fd.append('image', base64ImageFile(baseB64));
+      await appendImages(fd, state.singleFiles, 'references');
+      const data = await apiJson(`${API_BASE}/edit`, {method:'POST', body:fd});
+      img.baseB64 = baseB64;
       img.b64 = data.b64;
       card.querySelector('img').src = 'data:image/png;base64,' + data.b64;
       card.querySelector('.editbox').classList.remove('open');
@@ -1136,11 +1145,13 @@ function renderSheet(){
       applyBtn.innerHTML = '<span class="spinner"></span>精修中...';
       clearError('err3');
       try{
-        const data = await apiJson(`${API_BASE}/edit`, {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({prompt, image_b64: img.b64})
-        });
+        const fd = new FormData();
+        const baseB64 = img.baseB64 || img.b64;
+        fd.append('prompt', prompt);
+        fd.append('image', base64ImageFile(baseB64));
+        await appendImages(fd, state.files, 'references');
+        const data = await apiJson(`${API_BASE}/edit`, {method:'POST', body:fd});
+        img.baseB64 = baseB64;
         img.b64 = data.b64;
         img.status = 'done';
         card.querySelector('img').src = 'data:image/png;base64,' + data.b64;

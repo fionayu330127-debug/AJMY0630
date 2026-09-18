@@ -26,6 +26,7 @@ const IMAGE_BASE_URL = Object.prototype.hasOwnProperty.call(process.env, 'OPENAI
 const TEXT_MODEL = env('OPENAI_TEXT_MODEL', 'gpt-4o');
 const IMAGE_MODEL = env('OPENAI_IMAGE_MODEL', 'gpt-image-2');
 const IMAGE_SIZE = env('OPENAI_IMAGE_SIZE');
+const IMAGE_QUALITY = env('OPENAI_IMAGE_QUALITY', 'high');
 const TEXT_LIKE_MODEL_RE = /^(gpt-[45]|o[134]|chatgpt-|claude-|gemini-|deepseek-)/i;
 
 const SHOT_LIST = [
@@ -136,6 +137,7 @@ function logImageEditRequest(label, images, prompt) {
     label,
     model: IMAGE_MODEL,
     size: chooseImageSize(images),
+    quality: IMAGE_QUALITY,
     imageCount: images.length,
     imageBytes: images.map((image) => image.buffer?.length || 0),
     filenames: images.map((image) => image.filename || 'image.png'),
@@ -337,7 +339,7 @@ async function withImageRetry(task, label) {
     } catch (err) {
       lastError = err;
       const message = err.message || '';
-      const retryable = isTransientImageNetworkError(err);
+      const retryable = isTransientImageNetworkError(err) || err?.code === 'INVALID_IMAGE_SIZE';
       if (!retryable || attempt === 3) break;
       console.warn(`[ai-image] ${label} failed, retry ${attempt + 1}/3:`, message);
       await wait(3000 * attempt);
@@ -354,10 +356,11 @@ async function cctqImageEdit({ prompt, images, retry = true, label = 'edit' }) {
     model: IMAGE_MODEL,
     prompt: finalPrompt,
     size,
-    quality: 'auto',
+    quality: IMAGE_QUALITY,
   }, images);
 
-  const request = () => postBuffer(imageApiUrl('/images/edits'), {
+  const request = async () => {
+    const resp = await postBuffer(imageApiUrl('/images/edits'), {
       Authorization: `Bearer ${imageApiKey()}`,
       Accept: 'application/json',
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
@@ -365,9 +368,25 @@ async function cctqImageEdit({ prompt, images, retry = true, label = 'edit' }) {
       'User-Agent': 'cctq-image-skill/1.0',
       Connection: 'close',
     }, body);
-  const resp = retry ? await withImageRetry(request, 'cctq images edit') : await request();
-  const payload = await parseImageResponse(resp);
-  return readImageResultAsB64(payload.data[0]);
+    const payload = await parseImageResponse(resp);
+    const b64 = await readImageResultAsB64(payload.data[0]);
+    const resultBuffer = Buffer.from(b64, 'base64');
+    const actualSize = readImageSize(resultBuffer);
+    const [expectedWidth, expectedHeight] = size.split('x').map(Number);
+    console.log('[ai-image] images/edits result', {
+      label,
+      expectedSize: size,
+      actualSize: actualSize ? `${actualSize.width}x${actualSize.height}` : 'unknown',
+      imageBytes: resultBuffer.length,
+    });
+    if (!actualSize || actualSize.width !== expectedWidth || actualSize.height !== expectedHeight) {
+      const error = new Error(`image API returned ${actualSize ? `${actualSize.width}x${actualSize.height}` : 'an unreadable image'}, expected ${size}`);
+      error.code = 'INVALID_IMAGE_SIZE';
+      throw error;
+    }
+    return b64;
+  };
+  return retry ? withImageRetry(request, 'cctq images edit') : request();
 }
 
 async function cctqImageEditStrict({ prompt, images, label }) {
@@ -386,6 +405,7 @@ router.get('/config', (req, res) => {
     imageBaseURL: IMAGE_BASE_URL || 'openai-default',
     textModel: TEXT_MODEL,
     imageModel: IMAGE_MODEL,
+    imageQuality: IMAGE_QUALITY,
     hasTextApiKey: Boolean(env('OPENAI_TEXT_API_KEY') || env('OPENAI_API_KEY')),
     hasImageApiKey: Boolean(env('CCTQ_IMAGE') || env('OPENAI_IMAGE_API_KEY') || env('OPENAI_API_KEY')),
     imageApiMode: 'cctq-image-skill',
@@ -538,7 +558,10 @@ router.post('/single-generate', upload.array('images', 8), async (req, res) => {
   }
 });
 
-router.post('/edit', upload.single('image'), async (req, res) => {
+router.post('/edit', upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'references', maxCount: 8 },
+]), async (req, res) => {
   try {
     assertImageModelConfigured();
 
@@ -546,8 +569,9 @@ router.post('/edit', upload.single('image'), async (req, res) => {
     if (!prompt) return res.status(400).json({ error: '缺少修改提示词（prompt）' });
 
     let imageBuffer;
-    if (req.file) {
-      imageBuffer = await uploadableImage(req.file.buffer, req.file.originalname || 'image.png', req.file.mimetype || 'image/png');
+    const uploadedImage = req.files?.image?.[0];
+    if (uploadedImage) {
+      imageBuffer = await uploadableImage(uploadedImage.buffer, uploadedImage.originalname || 'image.png', uploadedImage.mimetype || 'image/png');
     } else if (image_b64) {
       imageBuffer = await uploadableImage(Buffer.from(image_b64, 'base64'));
     } else {
@@ -555,7 +579,8 @@ router.post('/edit', upload.single('image'), async (req, res) => {
     }
 
     const editPrompt = prompt;
-    const b64 = await cctqImageEdit({ images: [imageBuffer], prompt: editPrompt, label: 'refine-edit' });
+    const references = uploadableImagesFromFiles(req.files?.references || [], 'original-reference');
+    const b64 = await cctqImageEdit({ images: [imageBuffer, ...references], prompt: editPrompt, label: 'refine-edit' });
 
     res.json({ b64 });
   } catch (err) {
