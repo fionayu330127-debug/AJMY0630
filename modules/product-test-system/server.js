@@ -78,11 +78,26 @@ function weekStartString(date = new Date()) {
   return current.toISOString().slice(0, 10);
 }
 
+function shanghaiDateString(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function trackingNoteDate(note) {
+  return String(note?.note_date || note?.week_start || '').slice(0, 10);
+}
+
 function normalizeTracking(row) {
   if (!row.tracking_owner) row.tracking_owner = row.lister || '';
   if (!Number(row.tracking_stars)) row.tracking_stars = 0;
   if (!Array.isArray(row.tracking_notes)) row.tracking_notes = [];
-  row.tracking_notes.sort((a, b) => String(b.week_start || '').localeCompare(String(a.week_start || '')));
+  row.tracking_notes.sort((a, b) => trackingNoteDate(b).localeCompare(trackingNoteDate(a)));
   return row;
 }
 
@@ -715,7 +730,8 @@ app.post('/api/tracking', async (req, res) => {
     tracking_stars: Number.isFinite(stars) ? Math.max(0, Math.min(5, stars)) : 0,
     tracking_notes: trackingNote ? [{
       id: Date.now(),
-      week_start: weekStartString(),
+      note_date: shanghaiDateString(),
+      week_start: shanghaiDateString(),
       content: trackingNote,
       author: userName,
       created_at: now,
@@ -772,11 +788,12 @@ app.post('/api/tracking/:id/notes', async (req, res) => {
 
   const content = String(req.body.content || '').trim();
   if (!content) return res.status(400).json({ error: '请输入跟踪备注' });
-  const weekStart = String(req.body.week_start || weekStartString()).slice(0, 10);
+  const noteDate = shanghaiDateString();
   const now = new Date().toISOString();
   const note = {
     id: Date.now(),
-    week_start: weekStart,
+    note_date: noteDate,
+    week_start: noteDate,
     content,
     author: userName || '链接跟踪模块',
     created_at: now,
@@ -863,7 +880,9 @@ app.patch('/api/tracking/:id/notes/:noteId', async (req, res) => {
 
   const content = String(req.body.content || '').trim();
   if (!content) return res.status(400).json({ error: '请输入跟踪备注' });
-  note.week_start = String(req.body.week_start || note.week_start || weekStartString()).slice(0, 10);
+  const noteDate = String(req.body.week_start || note.note_date || note.week_start || shanghaiDateString()).slice(0, 10);
+  note.note_date = noteDate;
+  note.week_start = noteDate;
   note.content = content;
   note.updated_at = new Date().toISOString();
   row.updated_at = note.updated_at;

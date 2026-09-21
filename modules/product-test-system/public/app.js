@@ -528,7 +528,6 @@ function trackingNotesView(row, latest, notes) {
       ` : ''}
       ${noteFormOpen ? `
         <form class="note-form" data-note-form-id="${Number(row.id)}">
-          <input name="week_start" type="date" value="${escapeHtml(currentWeekStart())}">
           <textarea name="content" rows="3" placeholder="填写本周跟踪内容"></textarea>
           <button class="primary-btn" type="submit">保存备注</button>
         </form>
@@ -544,7 +543,7 @@ function trackingNoteItemView(row, note, isLatest) {
   if (editing) {
     return `
       <form class="${isLatest ? 'latest-note' : ''} note-edit-form" data-edit-note-row-id="${Number(row.id)}" data-edit-note-id="${Number(note.id)}">
-        <input name="week_start" type="date" value="${escapeHtml(String(note.week_start || '').slice(0, 10))}">
+        <input name="week_start" type="date" value="${escapeHtml(String(note.note_date || note.week_start || '').slice(0, 10))}">
         <textarea name="content" rows="3">${escapeHtml(note.content || '')}</textarea>
         <div class="note-actions">
           <button class="primary-btn" type="submit">保存</button>
@@ -556,7 +555,7 @@ function trackingNoteItemView(row, note, isLatest) {
   return `
     <div class="${isLatest ? 'latest-note' : ''} note-item">
       <div class="note-title-row">
-        <strong>${escapeHtml(note.week_start || '')}</strong>
+        <strong>${escapeHtml(note.note_date || note.week_start || '')}</strong>
         ${isLatest ? `
           <button class="ghost-btn note-toggle-btn" data-note-row-id="${Number(row.id)}" type="button">新增本周备注</button>
           <button class="ghost-btn" data-edit-note-row-id="${Number(row.id)}" data-edit-note-id="${Number(note.id)}" type="button">修改</button>
@@ -572,14 +571,6 @@ function trackingNoteItemView(row, note, isLatest) {
       `}
     </div>
   `;
-}
-
-function currentWeekStart() {
-  const current = new Date();
-  current.setHours(0, 0, 0, 0);
-  const day = current.getDay() || 7;
-  current.setDate(current.getDate() - day + 1);
-  return current.toISOString().slice(0, 10);
 }
 
 function modalView() {
@@ -1404,7 +1395,6 @@ async function submitTrackingNote(event) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      week_start: String(formData.get('week_start') || '').trim(),
       content: String(formData.get('content') || '').trim(),
     }),
   });
