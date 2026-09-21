@@ -379,8 +379,14 @@ async function cctqImageEdit({ prompt, images, retry = true, label = 'edit' }) {
       actualSize: actualSize ? `${actualSize.width}x${actualSize.height}` : 'unknown',
       imageBytes: resultBuffer.length,
     });
-    if (!actualSize || actualSize.width !== expectedWidth || actualSize.height !== expectedHeight) {
-      const error = new Error(`image API returned ${actualSize ? `${actualSize.width}x${actualSize.height}` : 'an unreadable image'}, expected ${size}`);
+    const expectedRatio = expectedWidth / expectedHeight;
+    const actualRatio = actualSize ? actualSize.width / actualSize.height : 0;
+    const ratioMatches = actualSize && Math.abs(actualRatio - expectedRatio) / expectedRatio <= 0.03;
+    const dimensionsAreUsable = actualSize
+      && actualSize.width >= Math.round(expectedWidth * 0.9)
+      && actualSize.height >= Math.round(expectedHeight * 0.9);
+    if (!actualSize || !ratioMatches || !dimensionsAreUsable) {
+      const error = new Error(`image API returned ${actualSize ? `${actualSize.width}x${actualSize.height}` : 'an unreadable image'}, expected aspect/size near ${size}`);
       error.code = 'INVALID_IMAGE_SIZE';
       throw error;
     }
