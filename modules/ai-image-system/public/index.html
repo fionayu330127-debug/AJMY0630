@@ -405,6 +405,10 @@
         <span>作图需求 <span class="key">PROMPT</span></span>
         <textarea id="singlePrompt" rows="4" placeholder="例如：保留产品主体，改成蓝色背景，光线干净，突出质感"></textarea>
       </label>
+      <label class="field"><span>输出尺寸</span>
+        <select id="singleSize"><option value="auto">自动匹配</option><option value="1024x1024">1024 × 1024</option><option value="1536x1024">1536 × 1024</option><option value="1024x1536">1024 × 1536</option><option value="custom">自定义像素</option></select>
+      </label>
+      <div class="row" id="singleCustomSize" hidden><input id="singleWidth" type="number" min="256" max="4096" placeholder="宽度"><span>×</span><input id="singleHeight" type="number" min="256" max="4096" placeholder="高度"></div>
 
       <div class="row">
         <button class="btn" id="btnSingleGenerate">生成图片 →</button>
@@ -540,6 +544,9 @@ function collectTaskDraft(){
     fields,
     images: state.images,
     singlePrompt: document.getElementById('singlePrompt')?.value || '',
+    singleSize: document.getElementById('singleSize')?.value || 'auto',
+    singleWidth: document.getElementById('singleWidth')?.value || '',
+    singleHeight: document.getElementById('singleHeight')?.value || '',
     singleImage: state.singleImage
   };
 }
@@ -589,6 +596,10 @@ function resetWorkbenchDraft(){
   state.singleImage = null;
   document.getElementById('productLink').value = '';
   document.getElementById('singlePrompt').value = '';
+  document.getElementById('singleSize').value = 'auto';
+  document.getElementById('singleWidth').value = '';
+  document.getElementById('singleHeight').value = '';
+  document.getElementById('singleCustomSize').hidden = true;
   document.getElementById('thumbs').innerHTML = '';
   document.getElementById('singleThumbs').innerHTML = '';
   document.getElementById('fields').innerHTML = '';
@@ -616,6 +627,10 @@ function restoreTaskDraft(taskId){
   }
   document.getElementById('productLink').value = draft.productLink || '';
   document.getElementById('singlePrompt').value = draft.singlePrompt || '';
+  document.getElementById('singleSize').value = draft.singleSize || 'auto';
+  document.getElementById('singleWidth').value = draft.singleWidth || '';
+  document.getElementById('singleHeight').value = draft.singleHeight || '';
+  document.getElementById('singleCustomSize').hidden = document.getElementById('singleSize').value !== 'custom';
   state.extracted = draft.extracted || draft.fields || null;
   state.images = Array.isArray(draft.images) ? draft.images : [];
   state.singleImage = draft.singleImage || null;
@@ -840,6 +855,17 @@ document.getElementById('modeSingle').addEventListener('click', ()=>setMode('sin
 document.getElementById('modeMulti').addEventListener('click', ()=>setMode('multi'));
 document.getElementById('singlePrompt').addEventListener('input', saveCurrentTaskDraft);
 document.getElementById('productLink').addEventListener('input', saveCurrentTaskDraft);
+document.getElementById('singleSize').addEventListener('change', ()=>{ document.getElementById('singleCustomSize').hidden = document.getElementById('singleSize').value !== 'custom'; saveCurrentTaskDraft(); });
+['singleWidth','singleHeight'].forEach(id=>document.getElementById(id).addEventListener('input', saveCurrentTaskDraft));
+
+function getRequestedSize(){
+  const value = document.getElementById('singleSize').value;
+  if(value !== 'custom') return value;
+  const width = Number(document.getElementById('singleWidth').value);
+  const height = Number(document.getElementById('singleHeight').value);
+  if(!Number.isInteger(width) || !Number.isInteger(height) || width < 256 || height < 256 || width > 4096 || height > 4096) throw new Error('自定义尺寸需为 256 至 4096 之间的整数');
+  return `${width}x${height}`;
+}
 
 // ---- Single mode ----
 const singleDropzone = document.getElementById('singleDropzone');
@@ -888,6 +914,7 @@ document.getElementById('btnSingleGenerate').addEventListener('click', async ()=
     const fd = new FormData();
     await appendImages(fd, state.singleFiles, 'images');
     fd.append('prompt', prompt);
+    fd.append('size', getRequestedSize());
     const data = await apiJson(`${API_BASE}/single-generate`, {method:'POST', body:fd});
     state.singleImage = data.image;
     renderSingleResult();

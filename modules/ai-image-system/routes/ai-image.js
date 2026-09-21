@@ -190,6 +190,25 @@ function chooseImageSize(images = []) {
   return '1024x1024';
 }
 
+function requestedImageSize(value, images = []) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw || raw === 'auto') return chooseImageSize(images);
+  const match = raw.match(/^(\d{3,4})x(\d{3,4})$/);
+  if (!match) {
+    const error = new Error('size must use WIDTHxHEIGHT, for example 2170x725');
+    error.statusCode = 400;
+    throw error;
+  }
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (width < 256 || height < 256 || width > 4096 || height > 4096) {
+    const error = new Error('size must be between 256x256 and 4096x4096');
+    error.statusCode = 400;
+    throw error;
+  }
+  return `${width}x${height}`;
+}
+
 function buildMultipartBody(fields, images = []) {
   const boundary = `----ai-image-system-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const chunks = [];
@@ -348,9 +367,9 @@ async function withImageRetry(task, label) {
   throw lastError;
 }
 
-async function cctqImageEdit({ prompt, images, retry = true, label = 'edit' }) {
+async function cctqImageEdit({ prompt, images, size: requestedSize, retry = true, label = 'edit' }) {
   const finalPrompt = String(prompt || '').trim();
-  const size = chooseImageSize(images);
+  const size = requestedImageSize(requestedSize, images);
   logImageEditRequest(label, images, finalPrompt);
   const { body, boundary } = buildMultipartBody({
     model: IMAGE_MODEL,
@@ -395,9 +414,9 @@ async function cctqImageEdit({ prompt, images, retry = true, label = 'edit' }) {
   return retry ? withImageRetry(request, 'cctq images edit') : request();
 }
 
-async function cctqImageEditStrict({ prompt, images, label }) {
+async function cctqImageEditStrict({ prompt, images, size, label }) {
   try {
-    return await cctqImageEdit({ prompt, images, label });
+    return await cctqImageEdit({ prompt, images, size, label });
   } catch (err) {
     if (!isImageEditGatewayFailure(err)) throw err;
     console.warn('[ai-image] images/edits failed; refusing text-to-image fallback:', err.message);
@@ -489,6 +508,7 @@ router.post('/generate', upload.array('images', 8), async (req, res) => {
       const b64 = await cctqImageEditStrict({
         images: [referenceImage],
         prompt: baseInfo,
+        size: req.body.size,
         label: `generate:${shot.key}`,
       });
 
@@ -522,6 +542,7 @@ router.post('/generate-one', upload.array('images', 8), async (req, res) => {
     const b64 = await cctqImageEditStrict({
       images: [referenceImage],
       prompt,
+      size: req.body.size,
       label: `generate-one:${shot.key}`,
     });
 
@@ -548,6 +569,7 @@ router.post('/single-generate', upload.array('images', 8), async (req, res) => {
     const b64 = await cctqImageEditStrict({
       images: referenceImages,
       prompt: imagePrompt,
+      size: req.body.size,
       label: 'single-generate',
     });
 
