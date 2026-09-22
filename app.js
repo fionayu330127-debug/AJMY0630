@@ -114,7 +114,7 @@ const navGroups = [
   { id: 'agent-center', title: 'Agent 中心', icon: 'AG', items: [{ id: 'agent', label: 'Agent 中心' }] },
   { id: 'data-assistant-center', title: '数据助手', icon: '数', items: [{ id: 'data-assistant', label: '数据助手' }] },
   { id: 'toolbox-center', title: '工具箱', icon: '具', items: [{ id: 'toolbox', label: '工具箱' }] },
-  { id: 'settings-center', title: '系统设置', icon: '设', items: [{ id: 'settings', label: '系统设置' }] },
+  { id: 'settings-center', title: '系统设置', icon: '设', items: [{ id: 'settings', label: '系统设置' }, { id: 'profile', label: '个人中心' }] },
 ];
 
 function findModule(id) {
@@ -540,6 +540,8 @@ function modulePanel(active) {
     return weeklyReportPanel();
   }
 
+  if (active.id === 'profile') return profilePanel();
+
   return `
     <section class="panel placeholder-panel">
       <div>
@@ -549,6 +551,15 @@ function modulePanel(active) {
       </div>
     </section>
   `;
+}
+
+function profilePanel() {
+  const isAdmin = state.auth?.role === 'admin';
+  const members = state.team?.members || [];
+  return `<section class="panel profile-panel"><div class="panel-head"><div><h3>个人中心</h3><small>修改登录密码</small></div></div>
+    <form id="profilePasswordForm" class="form-grid password-form"><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label><label>新密码<input name="new_password" type="password" minlength="6" autocomplete="new-password" required></label><label>确认新密码<input name="confirm_password" type="password" minlength="6" required></label><div id="profilePasswordError" class="form-error"></div><button class="btn primary" type="submit">修改我的密码</button></form>
+    ${isAdmin ? `<div class="admin-password-section"><h4>员工密码管理</h4><p>管理员可为员工重置密码，系统不显示员工当前密码。</p>${members.filter(m=>m.status==='active').map(m=>`<div class="password-member-row"><span>${escapeHtml(m.name)}（${escapeHtml(m.login_name || '')}）</span><button class="ghost-btn" data-reset-password="${m.id}" type="button">重置密码</button></div>`).join('')}</div>` : ''}
+  </section>`;
 }
 
 function shopLabel(shopId) {
@@ -1511,6 +1522,29 @@ function bindDashboard() {
   if (state.activeModule === 'weekly-report') {
     bindWeeklyReport();
     if (!state.weeklyReport) loadWeeklyReport();
+  }
+
+  if (state.activeModule === 'profile') {
+    if (state.auth?.role === 'admin' && !state.team) loadTeam();
+    document.getElementById('profilePasswordForm')?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const error = document.getElementById('profilePasswordError');
+      const current = String(form.get('current_password') || '');
+      const next = String(form.get('new_password') || '');
+      if (next !== String(form.get('confirm_password') || '')) { error.textContent = '两次输入的新密码不一致'; return; }
+      const response = await fetch('/api/me/password', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current_password: current, new_password: next }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) { error.textContent = payload.error || '密码修改失败'; return; }
+      event.currentTarget.reset(); error.textContent = '密码修改成功';
+    });
+    document.querySelectorAll('[data-reset-password]').forEach((button) => button.addEventListener('click', async () => {
+      const password = window.prompt('请输入新的员工密码（至少 6 位）');
+      if (password === null) return;
+      const response = await fetch(`/api/team/members/${button.dataset.resetPassword}/password`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_password: password }) });
+      const payload = await response.json().catch(() => ({}));
+      window.alert(response.ok ? '员工密码已重置' : (payload.error || '密码重置失败'));
+    }));
   }
 }
 

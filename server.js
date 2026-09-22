@@ -1219,6 +1219,32 @@ app.get('/api/tk/products', async (req, res) => {
   res.json({ shop, shops, summary, products: rows });
 });
 
+app.patch('/api/me/password', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const currentPassword = String(req.body.current_password || '');
+  const newPassword = String(req.body.new_password || '');
+  if (newPassword.length < 6) return sendError(res, 400, '新密码至少需要 6 位');
+  const result = await query('SELECT password_salt, password_hash FROM users WHERE id = $1 AND status = \'active\'', [user.id]);
+  const row = result.rows[0];
+  if (!row || hashPassword(currentPassword, row.password_salt) !== row.password_hash) return sendError(res, 400, '当前密码不正确');
+  const salt = crypto.randomBytes(16).toString('hex');
+  await query('UPDATE users SET password_salt = $1, password_hash = $2, updated_at = now() WHERE id = $3', [salt, hashPassword(newPassword, salt), user.id]);
+  res.json({ ok: true });
+});
+
+app.patch('/api/team/members/:id/password', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  if (user.role !== 'admin') return sendError(res, 403, '只有管理员可以修改员工密码');
+  const newPassword = String(req.body.new_password || '');
+  if (newPassword.length < 6) return sendError(res, 400, '新密码至少需要 6 位');
+  const salt = crypto.randomBytes(16).toString('hex');
+  const result = await query('UPDATE users SET password_salt = $1, password_hash = $2, updated_at = now() WHERE id = $3 AND status = \'active\' RETURNING id', [salt, hashPassword(newPassword, salt), req.params.id]);
+  if (!result.rows[0]) return sendError(res, 404, '员工不存在或已停用');
+  res.json({ ok: true });
+});
+
 app.use('/api', createOperationCenter({ query, getSessionUser, sendError }));
 
 const sampleSubmissionColumns = [
