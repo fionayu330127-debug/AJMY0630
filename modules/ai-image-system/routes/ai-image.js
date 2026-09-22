@@ -369,6 +369,8 @@ async function withImageRetry(task, label) {
 
 async function cctqImageEdit({ prompt, images, size: requestedSize, retry = true, label = 'edit' }) {
   const finalPrompt = String(prompt || '').trim();
+  const rawRequestedSize = String(requestedSize || '').trim().toLowerCase();
+  const enforceRequestedSize = Boolean(IMAGE_SIZE || (rawRequestedSize && rawRequestedSize !== 'auto'));
   const size = requestedImageSize(requestedSize, images);
   logImageEditRequest(label, images, finalPrompt);
   const { body, boundary } = buildMultipartBody({
@@ -404,7 +406,8 @@ async function cctqImageEdit({ prompt, images, size: requestedSize, retry = true
     const dimensionsAreUsable = actualSize
       && actualSize.width >= Math.round(expectedWidth * 0.9)
       && actualSize.height >= Math.round(expectedHeight * 0.9);
-    if (!actualSize || !ratioMatches || !dimensionsAreUsable) {
+    const autoSizeIsUsable = actualSize && actualSize.width >= 256 && actualSize.height >= 256;
+    if (!actualSize || (enforceRequestedSize ? (!ratioMatches || !dimensionsAreUsable) : !autoSizeIsUsable)) {
       const error = new Error(`image API returned ${actualSize ? `${actualSize.width}x${actualSize.height}` : 'an unreadable image'}, expected aspect/size near ${size}`);
       error.code = 'INVALID_IMAGE_SIZE';
       throw error;
