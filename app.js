@@ -248,7 +248,7 @@ function sidebarView() {
           <span class="nav-title-main"><span class="nav-icon">${escapeHtml(group.icon)}</span>${escapeHtml(group.title)}</span>
         </button>
         <div class="nav-group-items">
-          ${group.items.map((item) => item.children ? `
+          ${group.items.filter((item) => item.id !== 'team' || state.auth?.can_manage_team).map((item) => item.children ? `
             <div class="nav-submenu ${state.openSubmenu === item.id || itemHasActiveChild(item) ? 'open' : ''}">
               <button class="nav-item nav-submenu-title ${itemHasActiveChild(item) ? 'active-parent' : ''}" data-submenu="${item.id}" type="button">
                 <span>${escapeHtml(item.label)}</span><span class="nav-submenu-chevron">›</span>
@@ -289,6 +289,10 @@ function sidebarView() {
 }
 
 function dashboardView() {
+  if (state.activeModule === 'team' && !state.auth?.can_manage_team) {
+    state.activeModule = 'weekly-report';
+    state.team = null;
+  }
   const active = findModule(state.activeModule);
 
   return `
@@ -1463,7 +1467,7 @@ function bindDashboard() {
   document.querySelectorAll('[data-group]').forEach((button) => {
     button.addEventListener('click', () => {
       const group = navGroups.find((entry) => entry.id === button.dataset.group);
-      const firstItem = group?.items?.[0];
+      const firstItem = group?.items?.find((item) => item.id !== 'team' || state.auth?.can_manage_team);
       if (firstItem) {
         state.activeModule = firstItem.id;
         state.openGroup = group.id;
@@ -1496,6 +1500,7 @@ function bindDashboard() {
   document.getElementById('logoutBtn')?.addEventListener('click', async () => {
     await fetch('/api/logout', { method: 'POST' });
     state.auth = null;
+    state.team = null;
     state.dashboard = null;
     state.activeModule = 'home';
     state.openGroup = null;
@@ -1934,6 +1939,7 @@ function bindTeam() {
 }
 
 async function loadTeam() {
+  if (!state.auth?.can_manage_team) { state.team = null; return; }
   try {
     const response = await fetch('/api/team');
     if (!response.ok) throw new Error('团队数据加载失败');

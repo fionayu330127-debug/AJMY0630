@@ -233,7 +233,7 @@ async function getSessionUser(req) {
   if (!token) return null;
 
   const { rows } = await query(
-    `SELECT u.id, u.name, u.role, s.expires_at
+    `SELECT u.id, u.name, u.role, u.team_group, s.expires_at
      FROM sessions s
      JOIN users u ON u.id = s.user_id
      WHERE s.token = $1 AND u.status = 'active'`,
@@ -247,6 +247,10 @@ async function getSessionUser(req) {
     return null;
   }
   return row;
+}
+
+function canManageTeam(user) {
+  return user?.role === 'admin' || user?.role === 'boss' || ['管理员', 'BOSS'].includes(user?.team_group);
 }
 
 function dashboardPayload(user) {
@@ -763,7 +767,7 @@ app.post('/api/login', async (req, res) => {
     if (!name || !password) return sendError(res, 400, '请选择成员并输入密码');
 
     const { rows } = await query(
-      `SELECT id, name, role, password_salt, password_hash
+      `SELECT id, name, role, team_group, password_salt, password_hash
        FROM users
        WHERE (name = $1 OR login_name = $1) AND status = 'active'`,
       [name]
@@ -783,7 +787,7 @@ app.post('/api/login', async (req, res) => {
     );
 
     res.setHeader('Set-Cookie', `agi_session=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`);
-    res.json({ ok: true, user: { id: user.id, name: user.name, role: user.role } });
+    res.json({ ok: true, user: { id: user.id, name: user.name, role: user.role, can_manage_team: canManageTeam(user) } });
   } catch (err) {
     console.error('login failed', err);
     sendError(res, 500, '登录服务异常');
@@ -800,7 +804,7 @@ app.post('/api/logout', async (req, res) => {
 app.get('/api/me', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');
-  res.json({ user: { id: user.id, name: user.name, role: user.role } });
+  res.json({ user: { id: user.id, name: user.name, role: user.role, can_manage_team: canManageTeam(user) } });
 });
 
 app.get('/api/ai-draw/tasks', async (req, res) => {
@@ -899,7 +903,7 @@ app.delete('/api/ai-draw/tasks/:id', async (req, res) => {
 app.get('/api/dashboard', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');
-  res.json(dashboardPayload({ id: user.id, name: user.name, role: user.role }));
+  res.json(dashboardPayload({ id: user.id, name: user.name, role: user.role, can_manage_team: canManageTeam(user) }));
 });
 
 app.get('/api/members', async (req, res) => {
@@ -915,6 +919,7 @@ app.get('/api/members', async (req, res) => {
 app.get('/api/team', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');
+  if (!canManageTeam(user)) return sendError(res, 403, '只有管理员或BOSS可以查看和修改团队管理');
 
   const { rows: groups } = await query(`
     SELECT
@@ -941,6 +946,7 @@ app.get('/api/team', async (req, res) => {
 app.post('/api/team/members', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');
+  if (!canManageTeam(user)) return sendError(res, 403, '只有管理员或BOSS可以查看和修改团队管理');
 
   const name = String(req.body.name || '').trim();
   const phone = String(req.body.phone || '').trim();
@@ -973,6 +979,7 @@ app.post('/api/team/members', async (req, res) => {
 app.patch('/api/team/members/:id', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');
+  if (!canManageTeam(user)) return sendError(res, 403, '只有管理员或BOSS可以查看和修改团队管理');
 
   const id = Number(req.params.id);
   const name = String(req.body.name || '').trim();
@@ -1009,6 +1016,7 @@ app.patch('/api/team/members/:id', async (req, res) => {
 app.patch('/api/team/members/:id/status', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');
+  if (!canManageTeam(user)) return sendError(res, 403, '只有管理员或BOSS可以查看和修改团队管理');
 
   const id = Number(req.params.id);
   const status = String(req.body.status || '').trim();
