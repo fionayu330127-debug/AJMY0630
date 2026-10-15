@@ -917,7 +917,7 @@ async function confirmUpload(){
     for(const file of files){
       const result = await aiVideoApi('/api/ai-video/materials/'+type+'/upload', {
         method:'POST',
-        headers:{'Content-Type':file.type || 'application/octet-stream', 'X-File-Name':name || file.name, 'X-Folder':type==='music' && state.activeMusicFolder !== '全部音乐' ? state.activeMusicFolder : folder, 'X-Tag':tag},
+        headers:{'Content-Type':file.type || 'application/octet-stream', 'X-File-Name':encodeURIComponent(name || file.name), 'X-Folder':encodeURIComponent(type==='music' && state.activeMusicFolder !== '全部音乐' ? state.activeMusicFolder : folder), 'X-Tag':encodeURIComponent(tag)},
         body:file
       });
       const material = result.material;

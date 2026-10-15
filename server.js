@@ -83,6 +83,10 @@ function safeFileName(name) {
   return path.basename(String(name || 'upload.bin')).replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
+function decodeAiVideoHeader(value, fallback = '') {
+  try { return decodeURIComponent(String(value || fallback)); } catch { return String(value || fallback); }
+}
+
 function aiVideoBinary(packageName, fallback) {
   try {
     const value = require(packageName);
@@ -626,9 +630,9 @@ app.post('/api/ai-video/materials/:type/upload', async (req, res) => {
   if (contentLength > maxBytes) return sendError(res, 413, '文件超过大小限制');
 
   const id = crypto.randomUUID();
-  const fileName = safeFileName(req.headers['x-file-name']);
-  const folder = String(req.headers['x-folder'] || '未分类').trim() || '未分类';
-  const tag = String(req.headers['x-tag'] || '').trim();
+  const fileName = safeFileName(decodeAiVideoHeader(req.headers['x-file-name'], 'upload.bin'));
+  const folder = decodeAiVideoHeader(req.headers['x-folder'], '未分类').trim() || '未分类';
+  const tag = decodeAiVideoHeader(req.headers['x-tag']).trim();
   const dir = path.join(AI_VIDEO_UPLOAD_DIR, type);
   const target = path.join(dir, `${id}-${fileName}`);
   await fsp.mkdir(dir, { recursive: true });
