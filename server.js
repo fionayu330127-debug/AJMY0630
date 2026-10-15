@@ -124,7 +124,62 @@ async function runFfmpeg(args) {
   await execFileAsync(FFMPEG, ['-hide_banner', '-loglevel', 'error', ...args], { maxBuffer: 1024 * 1024 * 4 });
 }
 
-async function createMixedVideo({ jobId, index, videoFiles, musicFile, duration, outputFile, updateProgress }) {
+async function extractAiVideoFrame(file) {
+  const { stdout } = await execFileAsync(FFMPEG, [
+    '-hide_banner', '-loglevel', 'error', '-ss', '1', '-i', file, '-frames:v', '1',
+    '-vf', 'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2',
+    '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1',
+  ], { encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 });
+  return stdout;
+}
+
+async function analyzeSubtitleRegion(file) {
+  const fallback = { found: true, lineCount: 2, x: 0.08, y: 0.78, w: 0.84, h: 0.14, method: 'fallback', confidence: 0.2 };
+  const apiKey = process.env.OPENAI_VISION_API_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey) return fallback;
+  try {
+    const OpenAI = require('openai');
+    const client = new OpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL || undefined });
+    const image = (await extractAiVideoFrame(file)).toString('base64');
+    const completion = await client.chat.completions.create({
+      model: process.env.OPENAI_VISION_MODEL || process.env.OPENAI_TEXT_MODEL || 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: '分析这张 720x1280 视频抽帧，只识别画面中已经烧录的字幕，不要把商品文字、Logo 或水印当作字幕。只输出 JSON：{"found":true,"lineCount":2,"x":0.08,"y":0.78,"w":0.84,"h":0.14,"confidence":0.9}。坐标和宽高均为 0 到 1 的相对值；没有字幕时 found=false、lineCount=0。' },
+          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${image}` } },
+        ],
+      }],
+    });
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || '{}');
+    if (!parsed.found || Number(parsed.lineCount) <= 0) return { found: false, lineCount: 0, method: 'vision', confidence: Number(parsed.confidence) || 0 };
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, Number(value) || min));
+    return {
+      found: true,
+      lineCount: Math.min(4, Math.max(1, Math.round(Number(parsed.lineCount) || 1))),
+      x: clamp(parsed.x, 0, 0.9), y: clamp(parsed.y, 0, 0.9),
+      w: clamp(parsed.w, 0.05, 1), h: clamp(parsed.h, 0.04, 0.3),
+      method: 'vision', confidence: clamp(parsed.confidence, 0, 1),
+    };
+  } catch (error) {
+    console.warn('AI video subtitle analysis failed:', error.message);
+    return fallback;
+  }
+}
+
+function subtitleFilter(analysis, mode) {
+  if (mode === 'none' || !analysis?.found) return null;
+  const x = Math.round(720 * analysis.x);
+  const y = Math.round(1280 * analysis.y);
+  const w = Math.min(720 - x, Math.round(720 * analysis.w));
+  const h = Math.min(1280 - y, Math.round(1280 * analysis.h));
+  if (w < 20 || h < 20) return null;
+  return `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0`;
+}
+
+async function createMixedVideo({ jobId, index, videoFiles, musicFile, duration, outputFile, subtitleAnalyses, subtitleRepair, updateProgress }) {
   const temp = path.join(AI_VIDEO_DATA_DIR, 'tmp', jobId, String(index));
   await fsp.mkdir(temp, { recursive: true });
   try {
@@ -132,9 +187,13 @@ async function createMixedVideo({ jobId, index, videoFiles, musicFile, duration,
     const clips = [];
     for (let i = 0; i < videoFiles.length; i += 1) {
       const clip = path.join(temp, `clip-${i}.mp4`);
+      const filters = ['scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2'];
+      const repair = subtitleFilter(subtitleAnalyses?.[i], subtitleRepair);
+      if (repair) filters.push(repair);
+      filters.push('format=yuv420p');
       await runFfmpeg([
         '-y', '-stream_loop', '-1', '-i', videoFiles[i], '-t', String(clipDuration),
-        '-vf', 'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,format=yuv420p',
+        '-vf', filters.join(','),
         '-an', '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-movflags', '+faststart', clip,
       ]);
       clips.push(clip);
@@ -768,6 +827,7 @@ app.post('/api/ai-video/mix-jobs', async (req, res) => {
   const copies = Array.isArray(req.body.copies) ? req.body.copies.map((item) => String(item).trim()).filter(Boolean) : [];
   const videoIds = Array.isArray(req.body.videoIds) ? req.body.videoIds.map(String) : [];
   const musicMode = req.body.musicMode === 'auto' ? 'auto' : 'manual';
+  const subtitleRepair = ['auto', 'none'].includes(req.body.subtitleRepair) ? req.body.subtitleRepair : 'auto';
   const musicIds = Array.isArray(req.body.musicIds) ? req.body.musicIds.map(String) : [];
   const duration = Math.min(300, Math.max(3, Number(req.body.duration) || 15));
   if (!copies.length || !videoIds.length) return sendError(res, 400, '文案和视频素材不能为空');
@@ -791,7 +851,7 @@ app.post('/api/ai-video/mix-jobs', async (req, res) => {
 
   const jobId = crypto.randomUUID();
   const selectedMusicIds = musics.map((item) => String(item.id));
-  const job = { id: jobId, status: 'queued', progress: 0, copies, videoIds, musicIds: selectedMusicIds, musicMode, duration, results: [], created_at: new Date().toISOString() };
+  const job = { id: jobId, status: 'queued', progress: 0, copies, videoIds, musicIds: selectedMusicIds, musicMode, subtitleRepair, duration, results: [], created_at: new Date().toISOString() };
   store.jobs[jobId] = job;
   await writeAiVideoStore(store);
   setImmediate(() => runMixJob(jobId, videoFiles, musicFile).catch((error) => console.error('AI video mix job failed', error)));
@@ -809,6 +869,10 @@ async function runMixJob(jobId, videoFiles, musicFile) {
   };
   try {
     await setJob({ status: 'running', progress: 1 });
+    const subtitleAnalyses = job.subtitleRepair === 'none'
+      ? videoFiles.map(() => ({ found: false, lineCount: 0, method: 'disabled' }))
+      : await Promise.all(videoFiles.map((file) => analyzeSubtitleRegion(file)));
+    await setJob({ subtitleAnalyses, progress: 5 });
     await fsp.mkdir(AI_VIDEO_OUTPUT_DIR, { recursive: true });
     const results = [];
     for (let i = 0; i < job.copies.length; i += 1) {
@@ -816,7 +880,7 @@ async function runMixJob(jobId, videoFiles, musicFile) {
       const fileName = `${resultId}.mp4`;
       const outputFile = path.join(AI_VIDEO_OUTPUT_DIR, fileName);
       await createMixedVideo({
-        jobId, index: i, videoFiles, musicFile, duration: job.duration, outputFile,
+        jobId, index: i, videoFiles, musicFile, duration: job.duration, subtitleAnalyses, subtitleRepair: job.subtitleRepair, outputFile,
         updateProgress: async (part) => setJob({ progress: Math.min(99, Math.round((i / job.copies.length) * 100 + part / job.copies.length)) }),
       });
       results.push({

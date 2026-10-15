@@ -1209,6 +1209,13 @@ function stepMusicHtml(){
       ${![15,30,60].includes(w.duration) ? `<input type="number" class="num-input" value="${w.duration}" oninput="state.wizard.duration=parseInt(this.value)||15">` : ''}
     </div>
 
+    <div class="field-label">中文字幕修复</div>
+    <select class="select-input" onchange="state.wizard.subtitleRepair=this.value">
+      <option value="auto" ${w.subtitleRepair!=='none'?'selected':''}>自动识别字幕行数并近似修复</option>
+      <option value="none" ${w.subtitleRepair==='none'?'selected':''}>不处理字幕</option>
+    </select>
+    <div class="field-hint" style="margin-top:6px;">自动模式会抽帧识别中文字幕区域；原视频声音始终静音，避免保留中文配音。</div>
+
     <div class="wizard-footer">
       <button class="btn btn-secondary" onclick="prevStep()">上一步</button>
       <button class="btn btn-primary" onclick="nextStep()" ${w.musicMode!=='auto' && w.selectedMusic.length===0?'disabled':''}>下一步：生成混剪</button>
@@ -1360,7 +1367,7 @@ function finishGenerate(){
 }
 function resetGenerate(){ state.wizard.results = []; renderWizard(); }
 function startNewMix(){
-  state.wizard = {step:1, sourceCopy:'', copyRequirements:'', copies:[], selectedVideos:[], selectedMusic:[], musicMode:'manual', duration:15, results:[]};
+  state.wizard = {step:1, sourceCopy:'', copyRequirements:'', copies:[], selectedVideos:[], selectedMusic:[], musicMode:'manual', subtitleRepair:'auto', duration:15, results:[]};
   renderWizard();
 }
 
@@ -1423,7 +1430,7 @@ async function startGenerate(){
   try {
     const created = await aiVideoApi('/api/ai-video/mix-jobs', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({copies:w.copies, videoIds:w.selectedVideos, musicIds:w.selectedMusic, musicMode:w.musicMode, duration:w.duration})
+      body:JSON.stringify({copies:w.copies, videoIds:w.selectedVideos, musicIds:w.selectedMusic, musicMode:w.musicMode, subtitleRepair:w.subtitleRepair, duration:w.duration})
     });
     const poll = async()=>{
       const job = await aiVideoApi('/api/ai-video/mix-jobs/'+encodeURIComponent(created.jobId));
