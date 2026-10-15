@@ -488,6 +488,8 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0-12 4 4m-4-4-4 4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
       <div>点击选择文件，或将文件拖拽到此处</div>
     </div>
+    <input type="file" id="uploadFileInput" multiple hidden>
+    <div id="uploadFileHint" class="field-hint" style="margin-top:8px;"></div>
     <input type="text" id="uploadNameInput" placeholder="素材名称（可选，默认自动命名）">
     <select id="uploadTagInput"></select>
     <div class="modal-actions">
@@ -596,6 +598,32 @@ let state = {
   saveResultIndex: null,
 };
 let nextId = 200;
+let pendingUploadFiles = [];
+
+async function aiVideoApi(url, options = {}){
+  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  const payload = await response.json().catch(()=>({}));
+  if(!response.ok) throw new Error(payload.error || payload.message || '请求失败');
+  return payload;
+}
+
+async function loadAiVideoLibrary(){
+  try {
+    const library = await aiVideoApi('/api/ai-video/library');
+    if(Array.isArray(library.folders?.video)) state.materialFolders = library.folders.video;
+    if(Array.isArray(library.materials?.video) && library.materials.video.length){
+      state.materials.video = library.materials.video.map(item=>({...item, dur:item.dur || '-'}));
+    }
+    if(Array.isArray(library.materials?.music) && library.materials.music.length){
+      state.materials.music = library.materials.music.map(item=>({...item, dur:item.dur || '-', mood:item.mood || item.tag || ''}));
+    }
+    if(library.products && typeof library.products === 'object') state.products = library.products;
+    renderMaterials();
+  } catch(error) {
+    // The shell can still be previewed with its local demo data when logged out.
+    console.debug('AI video library is unavailable:', error.message);
+  }
+}
 
 /* =====================================================================
    NAVIGATION
@@ -808,11 +836,75 @@ function confirmUpload(){
   renderMaterials();
   toast('上传成功');
 }
+// Real upload flow. The original mock handlers remain above for backward-compatible UI state.
+function createMaterialFolder(){
+  const name = prompt('请输入素材文件夹名称')?.trim();
+  if(!name || state.materialFolders.includes(name) || name==='全部素材') return;
+  state.materialFolders.push(name);
+  state.activeMaterialFolder = name;
+  saveVideoLibrary();
+  aiVideoApi('/api/ai-video/folders', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'video', name})})
+    .catch(error=>toast('文件夹已在本地创建：'+error.message));
+  renderMaterials();
+}
+async function removeMaterial(type, id){
+  try {
+    await aiVideoApi('/api/ai-video/materials/'+type+'/'+encodeURIComponent(id), {method:'DELETE'});
+  } catch(error) {
+    if(!String(id).startsWith('demo-')) toast('删除失败：'+error.message);
+  }
+  state.materials[type] = state.materials[type].filter(item=>String(item.id)!==String(id));
+  if(type==='video') saveVideoLibrary();
+  renderMaterials();
+  toast('已删除');
+}
+function mockPickFiles(){
+  document.getElementById('uploadFileInput').click();
+}
+async function confirmUpload(){
+  const type = state.uploadTargetType;
+  const files = pendingUploadFiles;
+  if(!files.length){ toast('请选择要上传的文件'); return; }
+  const name = document.getElementById('uploadNameInput').value.trim();
+  const tag = document.getElementById('uploadTagInput').value;
+  const folder = type==='video' && state.activeMaterialFolder!=='鍏ㄩ儲绱犳潗' && state.activeMaterialFolder!=='鍏ㄩ儴绱犳潗' && state.activeMaterialFolder!=='全部素材' ? state.activeMaterialFolder : '未分类';
+  const button = document.querySelector('#uploadOverlay .btn-primary');
+  button.disabled = true;
+  try {
+    for(const file of files){
+      const result = await aiVideoApi('/api/ai-video/materials/'+type+'/upload', {
+        method:'POST',
+        headers:{'Content-Type':file.type || 'application/octet-stream', 'X-File-Name':name || file.name, 'X-Folder':folder, 'X-Tag':tag},
+        body:file
+      });
+      const material = result.material;
+      if(type==='video') state.materials.video.push({...material, dur:'-', tag:material.tag || tag, folder:material.folder || folder});
+      else state.materials.music.push({...material, dur:'-', mood:material.tag || tag});
+    }
+    if(type==='video') saveVideoLibrary();
+    closeModal('uploadOverlay');
+    pendingUploadFiles = [];
+    document.getElementById('uploadFileInput').value = '';
+    document.getElementById('uploadFileHint').textContent = '';
+    renderMaterials();
+    toast('上传成功');
+  } catch(error) {
+    toast('上传失败：'+error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
 function randomDur(long){
   const s = long ? (25+Math.floor(Math.random()*20)) : (6+Math.floor(Math.random()*15));
   return '0:'+String(s).padStart(2,'0');
 }
 function closeModal(id){ document.getElementById(id).classList.remove('show'); }
+document.getElementById('uploadFileInput').addEventListener('change', event=>{
+  pendingUploadFiles = Array.from(event.target.files || []);
+  document.getElementById('uploadFileHint').textContent = pendingUploadFiles.length
+    ? `已选择 ${pendingUploadFiles.length} 个文件：${pendingUploadFiles.map(file=>file.name).join('、')}`
+    : '';
+});
 
 /* =====================================================================
    PAGE: 成品库
@@ -908,6 +1000,7 @@ function stepCopyHtml(){
     <div class="wizard-title">步骤一 · 输入视频文案</div>
     <div class="wizard-sub">粘贴一段原始文案，AI 可据此裂变出多条不同角度的文案 —— 每条文案最终会独立混剪成一支风格不同的视频。</div>
     <textarea id="sourceCopyInput" placeholder="例如：这款秋季羽绒服采用90%白鸭绒填充……">${w.sourceCopy}</textarea>
+    <textarea id="copyRequirements" rows="2" placeholder="文案要求：突出哪些卖点、目标人群、语气和合规要求">${w.copyRequirements || ''}</textarea>
     <div class="row">
       <span class="field-hint">裂变数量</span>
       <input type="number" class="num-input" id="fissionCount" value="3" min="1" max="10">
@@ -999,7 +1092,7 @@ function selectWizardFolder(name){ state.wizardMaterialFolder=name; renderWizard
 function bindVideoPicker(){
   document.querySelectorAll('#pickVideoGrid .pick-card').forEach(card=>{
     card.addEventListener('click', ()=>{
-      const id = parseInt(card.dataset.id);
+      const id = String(card.dataset.id);
       const w = state.wizard;
       const idx = w.selectedVideos.indexOf(id);
       if(idx>-1) w.selectedVideos.splice(idx,1); else w.selectedVideos.push(id);
@@ -1047,7 +1140,7 @@ function stepMusicHtml(){
 function bindMusicPicker(){
   document.querySelectorAll('#pickMusicList .pick-card').forEach(row=>{
     row.addEventListener('click', ()=>{
-      const id = parseInt(row.dataset.id);
+      const id = String(row.dataset.id);
       const w = state.wizard;
       const idx = w.selectedMusic.indexOf(id);
       if(idx>-1) w.selectedMusic.splice(idx,1); else w.selectedMusic.push(id);
@@ -1218,9 +1311,85 @@ function confirmSaveResult(){
 }
 
 /* =====================================================================
+   REAL AI VIDEO INTEGRATION
+===================================================================== */
+async function runFission(){
+  const sourceCopy = document.getElementById('sourceCopyInput').value.trim();
+  const requirements = document.getElementById('copyRequirements').value.trim();
+  const count = parseInt(document.getElementById('fissionCount').value, 10) || 3;
+  if(!sourceCopy){ toast('请先输入原始文案'); return; }
+  try {
+    const result = await aiVideoApi('/api/ai-video/copy-fission', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sourceCopy, requirements, count, style:'短视频口语化带货风格'})
+    });
+    state.wizard.sourceCopy = sourceCopy;
+    state.wizard.copyRequirements = requirements;
+    state.wizard.copies = state.wizard.copies.concat(result.copies || []);
+    renderWizard();
+    toast('GPT 已生成 '+(result.copies || []).length+' 条文案');
+  } catch(error) { toast('文案生成失败：'+error.message); }
+}
+
+async function startGenerate(){
+  const w = state.wizard;
+  const wrap = document.getElementById('genProgressWrap');
+  const btn = document.getElementById('genBtn');
+  btn.disabled = true;
+  wrap.innerHTML = '<div class="progress-wrap"><div class="progress-bar-bg"><div class="progress-bar-fg" id="progFg"></div></div><div class="progress-status" id="progStatus">正在创建混剪任务…</div></div>';
+  try {
+    const created = await aiVideoApi('/api/ai-video/mix-jobs', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({copies:w.copies, videoIds:w.selectedVideos, musicIds:w.selectedMusic, duration:w.duration})
+    });
+    const poll = async()=>{
+      const job = await aiVideoApi('/api/ai-video/mix-jobs/'+encodeURIComponent(created.jobId));
+      const fg = document.getElementById('progFg');
+      const status = document.getElementById('progStatus');
+      if(fg) fg.style.width = `${job.progress || 0}%`;
+      if(status) status.textContent = job.status==='completed' ? '视频已生成' : (job.status==='failed' ? job.error : '正在裁剪、拼接视频并处理背景音乐…');
+      if(job.status==='completed'){
+        w.results = job.results || [];
+        renderWizard();
+        toast('AI 混剪已完成，共生成 '+w.results.length+' 支视频');
+      } else if(job.status==='failed') {
+        btn.disabled = false;
+        toast('混剪失败：'+job.error);
+      } else setTimeout(()=>poll().catch(error=>toast('任务查询失败：'+error.message)), 1000);
+    };
+    await poll();
+  } catch(error) {
+    btn.disabled = false;
+    toast('混剪任务创建失败：'+error.message);
+  }
+}
+
+async function confirmSaveResult(){
+  const folderSelect = document.getElementById('saveFolderSelect');
+  let folder = folderSelect.value;
+  if(folder === '__new__'){
+    folder = prompt('请输入新的成品文件夹名称')?.trim();
+    if(!folder) return;
+    await aiVideoApi('/api/ai-video/folders', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'products', name:folder})});
+    state.products[folder] ||= [];
+  }
+  const result = state.wizard.results[state.saveResultIndex];
+  try {
+    await aiVideoApi('/api/ai-video/products/'+encodeURIComponent(folder), {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({result})
+    });
+    state.products[folder] ||= [];
+    if(!state.products[folder].some(item=>item.id===result.id)) state.products[folder].push(result);
+    closeModal('saveOverlay');
+    toast('已保存到 '+folder);
+  } catch(error) { toast('保存失败：'+error.message); }
+}
+
+/* =====================================================================
    INIT
 ===================================================================== */
 loadVideoLibrary();
+loadAiVideoLibrary();
 renderMaterials();
 renderProducts();
 renderWizard();

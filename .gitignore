@@ -13,6 +13,10 @@ modules/*/tiktokSecrets.js
 modules/*/data/*.db
 modules/*/data/*.db-wal
 modules/*/data/*.db-shm
+modules/ai-video-system/data/store.json
+modules/ai-video-system/data/uploads/
+modules/ai-video-system/data/products/
+modules/ai-video-system/data/tmp/
 modules/*/cloudflared-windows-amd64.exe
 /tk-creator-system/
 modules/product-test-system/

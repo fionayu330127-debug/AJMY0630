@@ -2,6 +2,11 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const { pipeline } = require('node:stream/promises');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 const { Pool } = require('pg');
 
 const TK_DIR = path.join(__dirname, 'modules', 'tk-creator-system');
@@ -12,6 +17,11 @@ const TK_TREND_DIR = path.join(__dirname, 'modules', 'tk-trend-system');
 const PRODUCT_TEST_DIR = path.join(__dirname, 'modules', 'product-test-system');
 const AI_IMAGE_DIR = path.join(__dirname, 'modules', 'ai-image-system');
 const AI_VIDEO_DIR = path.join(__dirname, 'modules', 'ai-video-system', 'public');
+const AI_VIDEO_DATA_DIR = path.join(__dirname, 'modules', 'ai-video-system', 'data');
+const AI_VIDEO_UPLOAD_DIR = path.join(AI_VIDEO_DATA_DIR, 'uploads');
+const AI_VIDEO_STORE = path.join(AI_VIDEO_DATA_DIR, 'store.json');
+const AI_VIDEO_OUTPUT_DIR = path.join(AI_VIDEO_DATA_DIR, 'products');
+const execFileAsync = promisify(execFile);
 const INVENTORY_SHIPMENT_DIR = path.join(__dirname, 'inventory-shipment-system');
 const express = require('express');
 process.env.TK_CREATOR_DATA_DIR ||= TK_DATA_DIR;
@@ -36,6 +46,112 @@ const LINGXING_AMAZON_ADS_PATH = process.env.LINGXING_AMAZON_ADS_PATH || '';
 const pool = new Pool({ connectionString: DATABASE_URL });
 
 const members = ['余蓉', '盛峻波', '胡辉', '赵颖霖', '吕文健', '刘嘉莹'];
+
+const emptyAiVideoStore = () => ({
+  folders: { video: [], products: [] },
+  materials: { video: [], music: [] },
+  products: {},
+  jobs: {},
+});
+
+async function readAiVideoStore() {
+  try {
+    const parsed = JSON.parse(await fsp.readFile(AI_VIDEO_STORE, 'utf8'));
+    const defaults = emptyAiVideoStore();
+    return {
+      ...defaults,
+      ...parsed,
+      folders: { ...defaults.folders, ...(parsed.folders || {}) },
+      materials: { ...defaults.materials, ...(parsed.materials || {}) },
+      products: parsed.products || {},
+      jobs: parsed.jobs || {},
+    };
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return emptyAiVideoStore();
+  }
+}
+
+async function writeAiVideoStore(store) {
+  await fsp.mkdir(AI_VIDEO_DATA_DIR, { recursive: true });
+  const temp = `${AI_VIDEO_STORE}.tmp`;
+  await fsp.writeFile(temp, JSON.stringify(store, null, 2), 'utf8');
+  await fsp.rename(temp, AI_VIDEO_STORE);
+}
+
+function safeFileName(name) {
+  return path.basename(String(name || 'upload.bin')).replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function aiVideoBinary(packageName, fallback) {
+  try {
+    const value = require(packageName);
+    return typeof value === 'string' ? value : value.path;
+  } catch {
+    return fallback;
+  }
+}
+
+const FFMPEG = aiVideoBinary('ffmpeg-static', 'ffmpeg');
+const FFPROBE = aiVideoBinary('ffprobe-static', 'ffprobe');
+
+function aiVideoMaterialPath(material) {
+  const encoded = String(material?.url || '').split('/').pop();
+  const storedName = material?.file_name || (encoded ? decodeURIComponent(encoded) : '');
+  const type = material?.type === 'music' ? 'music' : 'video';
+  const target = path.resolve(AI_VIDEO_UPLOAD_DIR, type, path.basename(storedName));
+  const root = path.resolve(path.join(AI_VIDEO_UPLOAD_DIR, type));
+  if (!target.startsWith(`${root}${path.sep}`) || !fs.existsSync(target)) return null;
+  return target;
+}
+
+async function probeDuration(file) {
+  const { stdout } = await execFileAsync(FFPROBE, [
+    '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file,
+  ]);
+  const duration = Number.parseFloat(stdout.trim());
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error(`无法读取媒体时长: ${path.basename(file)}`);
+  return duration;
+}
+
+async function runFfmpeg(args) {
+  await execFileAsync(FFMPEG, ['-hide_banner', '-loglevel', 'error', ...args], { maxBuffer: 1024 * 1024 * 4 });
+}
+
+async function createMixedVideo({ jobId, index, videoFiles, musicFile, duration, outputFile, updateProgress }) {
+  const temp = path.join(AI_VIDEO_DATA_DIR, 'tmp', jobId, String(index));
+  await fsp.mkdir(temp, { recursive: true });
+  try {
+    const clipDuration = Math.max(1, duration / videoFiles.length);
+    const clips = [];
+    for (let i = 0; i < videoFiles.length; i += 1) {
+      const clip = path.join(temp, `clip-${i}.mp4`);
+      await runFfmpeg([
+        '-y', '-stream_loop', '-1', '-i', videoFiles[i], '-t', String(clipDuration),
+        '-vf', 'scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2,format=yuv420p',
+        '-an', '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast', '-movflags', '+faststart', clip,
+      ]);
+      clips.push(clip);
+      await updateProgress(15 + Math.round((i + 1) / videoFiles.length * 45));
+    }
+    const concatList = path.join(temp, 'concat.txt');
+    const concatContent = clips.map((clip) => `file '${clip.replaceAll("'", "'\\''")}'`).join('\n');
+    await fsp.writeFile(concatList, `${concatContent}\n`, 'utf8');
+    const silent = path.join(temp, 'silent.mp4');
+    await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', concatList, '-c', 'copy', silent]);
+    if (musicFile) {
+      await runFfmpeg([
+        '-y', '-i', silent, '-stream_loop', '-1', '-i', musicFile, '-map', '0:v:0', '-map', '1:a:0',
+        '-t', String(duration), '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', outputFile,
+      ]);
+    } else {
+      await fsp.copyFile(silent, outputFile);
+    }
+    await updateProgress(100);
+  } finally {
+    await fsp.rm(temp, { recursive: true, force: true });
+  }
+}
 
 function hashPassword(password, salt) {
   return crypto.pbkdf2Sync(password, salt, 120000, 32, 'sha256').toString('hex');
@@ -460,6 +576,230 @@ app.use('/tk-trend', tkTrendApp);
 app.use('/ai-draw', aiImageApp);
 app.use('/ai-video', express.static(AI_VIDEO_DIR, { index: 'index.html' }));
 app.use('/inventory', inventoryShipmentApp);
+
+// AI video library API. Binary uploads are streamed to disk; metadata stays in a
+// small JSON store so the prototype does not mix media files into Git or PostgreSQL.
+app.get('/api/ai-video/library', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  res.json(await readAiVideoStore());
+});
+
+app.post('/api/ai-video/folders', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const type = req.body.type === 'products' ? 'products' : 'video';
+  const name = String(req.body.name || '').trim();
+  if (!name || name.length > 100) return sendError(res, 400, '文件夹名称不正确');
+  const store = await readAiVideoStore();
+  if (store.folders[type].includes(name)) return sendError(res, 409, '文件夹已存在');
+  store.folders[type].push(name);
+  if (type === 'products') store.products[name] ||= [];
+  await writeAiVideoStore(store);
+  res.json({ ok: true, name });
+});
+
+app.post('/api/ai-video/materials/:type/upload', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const type = req.params.type;
+  if (!['video', 'music'].includes(type)) return sendError(res, 400, '素材类型不正确');
+  const contentLength = Number(req.headers['content-length'] || 0);
+  const maxBytes = type === 'video' ? 200 * 1024 * 1024 : 30 * 1024 * 1024;
+  if (contentLength > maxBytes) return sendError(res, 413, '文件超过大小限制');
+
+  const id = crypto.randomUUID();
+  const fileName = safeFileName(req.headers['x-file-name']);
+  const folder = String(req.headers['x-folder'] || '未分类').trim() || '未分类';
+  const tag = String(req.headers['x-tag'] || '').trim();
+  const dir = path.join(AI_VIDEO_UPLOAD_DIR, type);
+  const target = path.join(dir, `${id}-${fileName}`);
+  await fsp.mkdir(dir, { recursive: true });
+  let bytes = 0;
+  req.on('data', (chunk) => { bytes += chunk.length; });
+  try {
+    await pipeline(req, fs.createWriteStream(target, { flags: 'wx' }));
+    if (bytes > maxBytes) {
+      await fsp.rm(target, { force: true });
+      return sendError(res, 413, '文件超过大小限制');
+    }
+    const store = await readAiVideoStore();
+    const material = {
+      id,
+      name: fileName,
+      file_name: `${id}-${fileName}`,
+      type,
+      folder: type === 'video' ? folder : null,
+      tag,
+      url: `/api/ai-video/files/${type}/${encodeURIComponent(`${id}-${fileName}`)}`,
+      size: bytes,
+      created_at: new Date().toISOString(),
+    };
+    store.materials[type].push(material);
+    if (type === 'video' && folder !== '未分类' && !store.folders.video.includes(folder)) {
+      store.folders.video.push(folder);
+    }
+    await writeAiVideoStore(store);
+    res.status(201).json({ ok: true, material });
+  } catch (error) {
+    await fsp.rm(target, { force: true });
+    throw error;
+  }
+});
+
+app.get('/api/ai-video/files/:type/:file', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return res.sendStatus(401);
+  const type = req.params.type;
+  if (!['video', 'music'].includes(type)) return res.sendStatus(404);
+  const file = path.basename(req.params.file);
+  const target = path.join(AI_VIDEO_UPLOAD_DIR, type, file);
+  if (!fs.existsSync(target)) return res.sendStatus(404);
+  res.sendFile(target);
+});
+
+app.delete('/api/ai-video/materials/:type/:id', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const type = req.params.type;
+  const store = await readAiVideoStore();
+  const index = store.materials[type]?.findIndex((item) => item.id === req.params.id);
+  if (index === undefined || index < 0) return sendError(res, 404, '素材不存在');
+  const [material] = store.materials[type].splice(index, 1);
+  await fsp.rm(path.join(AI_VIDEO_UPLOAD_DIR, type, path.basename(decodeURIComponent(material.url.split('/').pop()))), { force: true });
+  await writeAiVideoStore(store);
+  res.json({ ok: true });
+});
+
+app.post('/api/ai-video/copy-fission', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const sourceCopy = String(req.body.sourceCopy || '').trim();
+  const requirements = String(req.body.requirements || '').trim();
+  const style = String(req.body.style || '短视频口语化带货风格').trim();
+  const count = Math.min(10, Math.max(1, Number.parseInt(req.body.count, 10) || 3));
+  if (!sourceCopy) return sendError(res, 400, '请输入原始文案');
+  const apiKey = process.env.OPENAI_TEXT_API_KEY || process.env.OPENAI_API_KEY;
+  if (!apiKey) return sendError(res, 503, '未配置文案模型 API Key');
+  try {
+    const OpenAI = require('openai');
+    const client = new OpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL || undefined });
+    const model = process.env.OPENAI_TEXT_MODEL || 'gpt-4o-mini';
+    const completion = await client.chat.completions.create({
+      model,
+      temperature: 0.85,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: '你是短视频电商文案专家。只输出 JSON，格式为 {"copies":["文案1"]}。每条文案独立完整，不要编号、不要解释。' },
+        { role: 'user', content: `请根据以下内容生成 ${count} 条差异化短视频文案。\n原始文案：${sourceCopy}\n文案要求：${requirements || '突出卖点，真实合规'}\n表达风格：${style}` },
+      ],
+    });
+    const raw = completion.choices?.[0]?.message?.content || '{}';
+    const parsed = JSON.parse(raw);
+    const copies = Array.isArray(parsed.copies) ? parsed.copies.map((item) => String(item).trim()).filter(Boolean).slice(0, count) : [];
+    if (!copies.length) return sendError(res, 502, '文案模型没有返回有效结果');
+    res.json({ copies, model });
+  } catch (error) {
+    console.error('AI video copy fission failed', error);
+    sendError(res, 502, `文案生成失败：${error.message || '模型服务异常'}`);
+  }
+});
+
+app.post('/api/ai-video/mix-jobs', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const copies = Array.isArray(req.body.copies) ? req.body.copies.map((item) => String(item).trim()).filter(Boolean) : [];
+  const videoIds = Array.isArray(req.body.videoIds) ? req.body.videoIds.map(String) : [];
+  const musicIds = Array.isArray(req.body.musicIds) ? req.body.musicIds.map(String) : [];
+  const duration = Math.min(300, Math.max(3, Number(req.body.duration) || 15));
+  if (!copies.length || !videoIds.length) return sendError(res, 400, '文案和视频素材不能为空');
+  const store = await readAiVideoStore();
+  const videos = store.materials.video.filter((item) => videoIds.includes(String(item.id)));
+  const musics = store.materials.music.filter((item) => musicIds.includes(String(item.id)));
+  const videoFiles = videos.map(aiVideoMaterialPath).filter(Boolean);
+  const musicFile = musics.length ? aiVideoMaterialPath(musics[0]) : null;
+  if (videoFiles.length !== videos.length) return sendError(res, 400, '所选视频必须是已上传到服务器的真实文件');
+  if (musics.length && !musicFile) return sendError(res, 400, '所选音乐必须是已上传到服务器的真实文件');
+
+  const jobId = crypto.randomUUID();
+  const job = { id: jobId, status: 'queued', progress: 0, copies, videoIds, musicIds, duration, results: [], created_at: new Date().toISOString() };
+  store.jobs[jobId] = job;
+  await writeAiVideoStore(store);
+  setImmediate(() => runMixJob(jobId, videoFiles, musicFile).catch((error) => console.error('AI video mix job failed', error)));
+  res.status(202).json({ jobId });
+});
+
+async function runMixJob(jobId, videoFiles, musicFile) {
+  const store = await readAiVideoStore();
+  const job = store.jobs[jobId];
+  if (!job) return;
+  const setJob = async (values) => {
+    const latest = await readAiVideoStore();
+    latest.jobs[jobId] = { ...latest.jobs[jobId], ...values };
+    await writeAiVideoStore(latest);
+  };
+  try {
+    await setJob({ status: 'running', progress: 1 });
+    await fsp.mkdir(AI_VIDEO_OUTPUT_DIR, { recursive: true });
+    const results = [];
+    for (let i = 0; i < job.copies.length; i += 1) {
+      const resultId = crypto.randomUUID();
+      const fileName = `${resultId}.mp4`;
+      const outputFile = path.join(AI_VIDEO_OUTPUT_DIR, fileName);
+      await createMixedVideo({
+        jobId, index: i, videoFiles, musicFile, duration: job.duration, outputFile,
+        updateProgress: async (part) => setJob({ progress: Math.min(99, Math.round((i / job.copies.length) * 100 + part / job.copies.length)) }),
+      });
+      results.push({
+        id: resultId,
+        name: `AI混剪_${i + 1}.mp4`,
+        url: `/api/ai-video/products/file/${fileName}`,
+        duration: job.duration,
+        copy: job.copies[i],
+        videoIds: job.videoIds,
+        music: job.musicIds[0] || '-',
+      });
+    }
+    await setJob({ status: 'completed', progress: 100, results, completed_at: new Date().toISOString() });
+  } catch (error) {
+    await setJob({ status: 'failed', progress: 100, error: error.message || '视频生成失败' });
+  }
+}
+
+app.get('/api/ai-video/mix-jobs/:id', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const store = await readAiVideoStore();
+  const job = store.jobs[req.params.id];
+  if (!job) return sendError(res, 404, '任务不存在');
+  res.json(job);
+});
+
+app.post('/api/ai-video/products/:folder', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const folder = String(req.params.folder || '').trim();
+  const result = req.body.result;
+  if (!folder || !result?.id) return sendError(res, 400, '成品信息不完整');
+  const store = await readAiVideoStore();
+  store.folders.products ||= [];
+  if (!store.folders.products.includes(folder)) store.folders.products.push(folder);
+  store.products[folder] ||= [];
+  if (!store.products[folder].some((item) => item.id === result.id)) {
+    store.products[folder].push({ ...result, saved_at: new Date().toISOString() });
+  }
+  await writeAiVideoStore(store);
+  res.status(201).json({ ok: true, product: result });
+});
+
+app.get('/api/ai-video/products/file/:file', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return res.sendStatus(401);
+  const file = path.basename(req.params.file);
+  const target = path.join(AI_VIDEO_OUTPUT_DIR, file);
+  if (!fs.existsSync(target)) return res.sendStatus(404);
+  res.sendFile(target);
+});
 
 const INVENTORY_DETAIL_ORIGIN = 'http://47.110.59.28:5174';
 const INVENTORY_DETAIL_API_ORIGIN = 'http://47.110.59.28:8081';
