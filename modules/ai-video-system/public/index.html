@@ -495,6 +495,11 @@
     <div id="uploadFileHint" class="field-hint" style="margin-top:8px;"></div>
     <input type="text" id="uploadNameInput" placeholder="素材名称（可选，默认自动命名）">
     <select id="uploadTagInput"></select>
+    <div class="tag-actions">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="addUploadTag()">新增标签</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="renameUploadTag()">修改标签</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="deleteUploadTag()">删除标签</button>
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal('uploadOverlay')">取消</button>
       <button class="btn btn-primary" onclick="confirmUpload()">确认上传</button>
@@ -600,6 +605,7 @@ let state = {
   },
   playingMusic: null,
   uploadTargetType: null,
+  materialTags: {video: [], music: []},
   saveResultIndex: null,
 };
 let nextId = 200;
@@ -617,6 +623,8 @@ async function loadAiVideoLibrary(){
     const library = await aiVideoApi('/api/ai-video/library');
     if(Array.isArray(library.folders?.video)) state.materialFolders = library.folders.video;
     if(Array.isArray(library.folders?.music)) state.musicFolders = library.folders.music;
+    if(Array.isArray(library.tags?.video)) state.materialTags.video = library.tags.video;
+    if(Array.isArray(library.tags?.music)) state.materialTags.music = library.tags.music;
     if(Array.isArray(library.materials?.video)){
       state.materials.video = library.materials.video.map(item=>({...item, dur:item.dur || '-'}));
     }
@@ -857,8 +865,31 @@ function openUploadModal(type){
   sel.innerHTML = type==='video'
     ? ['开箱','展示','场景','人物','测评'].map(t=>`<option>${t}</option>`).join('')
     : ['欢快','舒缓','燃','温馨'].map(t=>`<option>${t}</option>`).join('');
+  renderUploadTags(type);
   document.getElementById('uploadNameInput').value = '';
   document.getElementById('uploadOverlay').classList.add('show');
+}
+function uploadTags(type){
+  const fallback = type==='video' ? ['开箱','展示','场景','人物','测评'] : ['欢快','舒缓','燃','温暖'];
+  return state.materialTags[type]?.length ? state.materialTags[type] : fallback;
+}
+function renderUploadTags(type){
+  document.getElementById('uploadTagInput').innerHTML = uploadTags(type).map(tag=>`<option>${escapeText(tag)}</option>`).join('');
+}
+async function addUploadTag(){
+  const type=state.uploadTargetType, name=prompt('请输入新标签')?.trim();
+  if(!name) return;
+  try { const r=await aiVideoApi('/api/ai-video/tags/'+type,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})}); state.materialTags[type]=r.tags; renderUploadTags(type); document.getElementById('uploadTagInput').value=name; } catch(error){ toast('新增标签失败：'+error.message); }
+}
+async function renameUploadTag(){
+  const type=state.uploadTargetType, oldName=document.getElementById('uploadTagInput').value, name=prompt('请输入新标签名称',oldName)?.trim();
+  if(!oldName || !name || name===oldName) return;
+  try { const r=await aiVideoApi('/api/ai-video/tags/'+type,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldName,name})}); state.materialTags[type]=r.tags; renderUploadTags(type); document.getElementById('uploadTagInput').value=name; } catch(error){ toast('修改标签失败：'+error.message); }
+}
+async function deleteUploadTag(){
+  const type=state.uploadTargetType, name=document.getElementById('uploadTagInput').value;
+  if(!name || !confirm(`确定删除标签“${name}”？已有素材上的该标签也会被清空。`)) return;
+  try { const r=await aiVideoApi('/api/ai-video/tags/'+type+'/'+encodeURIComponent(name),{method:'DELETE'}); state.materialTags[type]=r.tags; renderUploadTags(type); } catch(error){ toast('删除标签失败：'+error.message); }
 }
 function mockPickFiles(){
   toast('已选择本地文件（演示环境已模拟选择）');

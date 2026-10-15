@@ -49,6 +49,7 @@ const members = ['余蓉', '盛峻波', '胡辉', '赵颖霖', '吕文健', '刘
 
 const emptyAiVideoStore = () => ({
   folders: { video: [], music: [], products: [] },
+  tags: { video: ['开箱', '展示', '场景', '人物', '测评'], music: ['欢快', '舒缓', '燃', '温暖'] },
   materials: { video: [], music: [] },
   products: {},
   jobs: {},
@@ -62,6 +63,7 @@ async function readAiVideoStore() {
       ...defaults,
       ...parsed,
       folders: { ...defaults.folders, ...(parsed.folders || {}) },
+      tags: { ...defaults.tags, ...(parsed.tags || {}) },
       materials: { ...defaults.materials, ...(parsed.materials || {}) },
       products: parsed.products || {},
       jobs: parsed.jobs || {},
@@ -618,6 +620,42 @@ app.delete('/api/ai-video/folders/:type/:name', async (req, res) => {
   store.folders[type].splice(folderIndex, 1);
   await writeAiVideoStore(store);
   res.json({ ok: true, name });
+});
+
+app.post('/api/ai-video/tags/:type', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const type = ['video', 'music'].includes(req.params.type) ? req.params.type : null;
+  const name = String(req.body.name || '').trim();
+  const oldName = String(req.body.oldName || '').trim();
+  if (!type || !name || name.length > 30) return sendError(res, 400, '标签名称不正确');
+  const store = await readAiVideoStore();
+  if (store.tags[type].includes(name) && name !== oldName) return sendError(res, 409, '标签已存在');
+  if (oldName) {
+    const index = store.tags[type].indexOf(oldName);
+    if (index < 0) return sendError(res, 404, '原标签不存在');
+    store.tags[type][index] = name;
+    store.materials[type].forEach((item) => { if (item.tag === oldName) item.tag = name; });
+  } else {
+    store.tags[type].push(name);
+  }
+  await writeAiVideoStore(store);
+  res.json({ ok: true, tags: store.tags[type] });
+});
+
+app.delete('/api/ai-video/tags/:type/:name', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const type = ['video', 'music'].includes(req.params.type) ? req.params.type : null;
+  const name = String(req.params.name || '').trim();
+  if (!type || !name) return sendError(res, 400, '标签不正确');
+  const store = await readAiVideoStore();
+  const index = store.tags[type].indexOf(name);
+  if (index < 0) return sendError(res, 404, '标签不存在');
+  store.tags[type].splice(index, 1);
+  store.materials[type].forEach((item) => { if (item.tag === name) item.tag = ''; });
+  await writeAiVideoStore(store);
+  res.json({ ok: true, tags: store.tags[type] });
 });
 
 app.post('/api/ai-video/materials/:type/upload', async (req, res) => {
