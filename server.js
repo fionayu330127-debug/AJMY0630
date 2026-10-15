@@ -599,6 +599,23 @@ app.post('/api/ai-video/folders', async (req, res) => {
   res.json({ ok: true, name });
 });
 
+app.delete('/api/ai-video/folders/:type/:name', async (req, res) => {
+  const user = await getSessionUser(req);
+  if (!user) return sendError(res, 401, '未登录');
+  const type = ['video', 'music'].includes(req.params.type) ? req.params.type : null;
+  const name = String(req.params.name || '').trim();
+  if (!type || !name || name === '未分类') return sendError(res, 400, '文件夹不允许删除');
+  const store = await readAiVideoStore();
+  const folderIndex = store.folders[type].indexOf(name);
+  if (folderIndex < 0) return sendError(res, 404, '文件夹不存在');
+  if (store.materials[type].some((item) => item.folder === name)) {
+    return sendError(res, 409, '文件夹不为空，请先移动或删除其中素材');
+  }
+  store.folders[type].splice(folderIndex, 1);
+  await writeAiVideoStore(store);
+  res.json({ ok: true, name });
+});
+
 app.post('/api/ai-video/materials/:type/upload', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');

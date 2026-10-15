@@ -176,6 +176,8 @@
   .material-folder.active{border-color:var(--teal-600);box-shadow:inset 0 0 0 1px var(--teal-600);}
   .material-folder strong{display:block;font-size:12.5px;margin-bottom:3px;white-space:nowrap;}
   .material-folder span{font-size:11px;color:var(--ink-400);}
+  .folder-delete{float:right;border:0;background:transparent;color:var(--ink-400);cursor:pointer;font-size:16px;line-height:14px;padding:0 0 0 6px;}
+  .folder-delete:hover{color:var(--danger);}
   .material-folder-new{min-width:130px;border-style:dashed;color:var(--teal-600);display:flex;align-items:center;justify-content:center;gap:6px;font-weight:600;}
   .video-material-card[draggable="true"]{cursor:grab;}
   .video-material-card[draggable="true"]:active{cursor:grabbing;}
@@ -733,9 +735,25 @@ function renderMusicFolderBar(){
   const bar = document.getElementById('musicFolderBar');
   if(!bar) return;
   const names = ['全部音乐', ...(state.musicFolders || [])];
-  bar.innerHTML = names.map(name=>`<button class="material-folder ${state.activeMusicFolder===name?'active':''}" type="button" onclick="selectMusicFolder(decodeURIComponent('${encodeURIComponent(name)}'))"><strong>${escapeText(name)}</strong><span>${name==='全部音乐'?state.materials.music.length:state.materials.music.filter(m=>m.folder===name).length} 首音乐</span></button>`).join('') + `<button class="material-folder material-folder-new" type="button" onclick="createMusicFolder()">${PLUS_ICON} 新建文件夹</button>`;
+  bar.innerHTML = names.map(name=>`<button class="material-folder ${state.activeMusicFolder===name?'active':''}" type="button" onclick="selectMusicFolder(decodeURIComponent('${encodeURIComponent(name)}'))"><strong>${name!=='全部音乐'?`<span class="folder-delete" title="删除文件夹" onclick="deleteMaterialFolder(event,'music',decodeURIComponent('${encodeURIComponent(name)}'))">×</span>`:''}${escapeText(name)}</strong><span>${name==='全部音乐'?state.materials.music.length:state.materials.music.filter(m=>m.folder===name).length} 首音乐</span></button>`).join('') + `<button class="material-folder material-folder-new" type="button" onclick="createMusicFolder()">${PLUS_ICON} 新建文件夹</button>`;
 }
 function selectMusicFolder(name){ state.activeMusicFolder=name; renderMaterials(); }
+async function deleteMaterialFolder(event, type, name){
+  event.stopPropagation();
+  if(!confirm(`确定删除素材文件夹“${name}”？文件夹必须为空。`)) return;
+  try {
+    await aiVideoApi('/api/ai-video/folders/'+type+'/'+encodeURIComponent(name), {method:'DELETE'});
+    if(type === 'music'){
+      state.musicFolders = (state.musicFolders || []).filter(folder=>folder!==name);
+      if(state.activeMusicFolder === name) state.activeMusicFolder = '全部音乐';
+    } else {
+      state.materialFolders = state.materialFolders.filter(folder=>folder!==name);
+      if(state.activeMaterialFolder === name) state.activeMaterialFolder = '全部素材';
+    }
+    renderMaterials();
+    toast('文件夹已删除');
+  } catch(error) { toast('删除失败：'+error.message); }
+}
 function createMusicFolder(){
   const name = prompt('请输入音乐素材文件夹名称')?.trim();
   if(!name || (state.musicFolders || []).includes(name) || name === '全部音乐') return;
@@ -756,7 +774,7 @@ function renderMaterialFolderBar(){
       onclick="selectMaterialFolder(decodeURIComponent('${encodeURIComponent(name)}'))"
       ondragover="allowFolderDrop(event)" ondragleave="leaveFolderDrop(event)"
       ondrop="dropVideoToFolder(event,decodeURIComponent('${encodeURIComponent(name)}'))">
-      <strong>${escapeText(name)}</strong><span>${name==='全部素材'?state.materials.video.length:folderCount(name)} 个视频</span>
+      <strong>${name!=='全部素材'?`<span class="folder-delete" title="删除文件夹" onclick="deleteMaterialFolder(event,'video',decodeURIComponent('${encodeURIComponent(name)}'))">×</span>`:''}${escapeText(name)}</strong><span>${name==='全部素材'?state.materials.video.length:folderCount(name)} 个视频</span>
     </button>`).join('') + `
     <button class="material-folder material-folder-new" type="button" onclick="createMaterialFolder()">${PLUS_ICON} 新建文件夹</button>`;
 }
