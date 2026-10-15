@@ -48,7 +48,7 @@ const pool = new Pool({ connectionString: DATABASE_URL });
 const members = ['余蓉', '盛峻波', '胡辉', '赵颖霖', '吕文健', '刘嘉莹'];
 
 const emptyAiVideoStore = () => ({
-  folders: { video: [], products: [] },
+  folders: { video: [], music: [], products: [] },
   materials: { video: [], music: [] },
   products: {},
   jobs: {},
@@ -588,7 +588,7 @@ app.get('/api/ai-video/library', async (req, res) => {
 app.post('/api/ai-video/folders', async (req, res) => {
   const user = await getSessionUser(req);
   if (!user) return sendError(res, 401, '未登录');
-  const type = req.body.type === 'products' ? 'products' : 'video';
+  const type = ['video', 'music', 'products'].includes(req.body.type) ? req.body.type : 'video';
   const name = String(req.body.name || '').trim();
   if (!name || name.length > 100) return sendError(res, 400, '文件夹名称不正确');
   const store = await readAiVideoStore();
@@ -629,16 +629,14 @@ app.post('/api/ai-video/materials/:type/upload', async (req, res) => {
       name: fileName,
       file_name: `${id}-${fileName}`,
       type,
-      folder: type === 'video' ? folder : null,
+      folder: folder !== '未分类' ? folder : null,
       tag,
       url: `/api/ai-video/files/${type}/${encodeURIComponent(`${id}-${fileName}`)}`,
       size: bytes,
       created_at: new Date().toISOString(),
     };
     store.materials[type].push(material);
-    if (type === 'video' && folder !== '未分类' && !store.folders.video.includes(folder)) {
-      store.folders.video.push(folder);
-    }
+    if (folder !== '未分类' && !store.folders[type].includes(folder)) store.folders[type].push(folder);
     await writeAiVideoStore(store);
     res.status(201).json({ ok: true, material });
   } catch (error) {
@@ -710,19 +708,31 @@ app.post('/api/ai-video/mix-jobs', async (req, res) => {
   if (!user) return sendError(res, 401, '未登录');
   const copies = Array.isArray(req.body.copies) ? req.body.copies.map((item) => String(item).trim()).filter(Boolean) : [];
   const videoIds = Array.isArray(req.body.videoIds) ? req.body.videoIds.map(String) : [];
+  const musicMode = req.body.musicMode === 'auto' ? 'auto' : 'manual';
   const musicIds = Array.isArray(req.body.musicIds) ? req.body.musicIds.map(String) : [];
   const duration = Math.min(300, Math.max(3, Number(req.body.duration) || 15));
   if (!copies.length || !videoIds.length) return sendError(res, 400, '文案和视频素材不能为空');
   const store = await readAiVideoStore();
   const videos = store.materials.video.filter((item) => videoIds.includes(String(item.id)));
-  const musics = store.materials.music.filter((item) => musicIds.includes(String(item.id)));
+  let musics = store.materials.music.filter((item) => musicIds.includes(String(item.id)));
+  if (musicMode === 'auto' && !musics.length) {
+    const text = copies.join(' ').toLowerCase();
+    const ranked = store.materials.music.map((item) => {
+      const haystack = `${item.name || ''} ${item.tag || ''} ${item.mood || ''}`.toLowerCase();
+      const score = haystack.split(/[,，、\s-]+/).filter(Boolean).reduce((sum, word) => sum + (text.includes(word) ? 1 : 0), 0);
+      return { item, score };
+    }).sort((a, b) => b.score - a.score);
+    musics = ranked.length ? [ranked[0].item] : [];
+  }
+  if (musicMode === 'auto' && !musics.length) return sendError(res, 400, '音乐素材库没有可匹配的音乐');
   const videoFiles = videos.map(aiVideoMaterialPath).filter(Boolean);
   const musicFile = musics.length ? aiVideoMaterialPath(musics[0]) : null;
   if (videoFiles.length !== videos.length) return sendError(res, 400, '所选视频必须是已上传到服务器的真实文件');
   if (musics.length && !musicFile) return sendError(res, 400, '所选音乐必须是已上传到服务器的真实文件');
 
   const jobId = crypto.randomUUID();
-  const job = { id: jobId, status: 'queued', progress: 0, copies, videoIds, musicIds, duration, results: [], created_at: new Date().toISOString() };
+  const selectedMusicIds = musics.map((item) => String(item.id));
+  const job = { id: jobId, status: 'queued', progress: 0, copies, videoIds, musicIds: selectedMusicIds, musicMode, duration, results: [], created_at: new Date().toISOString() };
   store.jobs[jobId] = job;
   await writeAiVideoStore(store);
   setImmediate(() => runMixJob(jobId, videoFiles, musicFile).catch((error) => console.error('AI video mix job failed', error)));

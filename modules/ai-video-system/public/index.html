@@ -439,6 +439,7 @@
       </div>
 
       <div id="mtab-music" style="display:none;">
+        <div class="material-folders" id="musicFolderBar"></div>
         <div class="toolbar">
           <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input placeholder="搜索背景音乐"></div>
           <button class="btn btn-primary" onclick="openUploadModal('music')">
@@ -553,6 +554,7 @@ const SPARK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 let state = {
   page: 'mix',
   activeMaterialFolder: '全部素材',
+  activeMusicFolder: '全部音乐',
   wizardMaterialFolder: '全部素材',
   materialFolders: ['未分类','开箱素材','展示素材','场景素材'],
   materials: {
@@ -590,6 +592,7 @@ let state = {
     ],
     selectedVideos: [1,3,5,7],
     selectedMusic: [101],
+    musicMode: 'manual',
     duration: 15,
     results: []
   },
@@ -611,10 +614,11 @@ async function loadAiVideoLibrary(){
   try {
     const library = await aiVideoApi('/api/ai-video/library');
     if(Array.isArray(library.folders?.video)) state.materialFolders = library.folders.video;
-    if(Array.isArray(library.materials?.video) && library.materials.video.length){
+    if(Array.isArray(library.folders?.music)) state.musicFolders = library.folders.music;
+    if(Array.isArray(library.materials?.video)){
       state.materials.video = library.materials.video.map(item=>({...item, dur:item.dur || '-'}));
     }
-    if(Array.isArray(library.materials?.music) && library.materials.music.length){
+    if(Array.isArray(library.materials?.music)){
       state.materials.music = library.materials.music.map(item=>({...item, dur:item.dur || '-', mood:item.mood || item.tag || ''}));
     }
     if(library.products && typeof library.products === 'object') state.products = library.products;
@@ -686,6 +690,7 @@ function toast(msg){
 ===================================================================== */
 function renderMaterials(){
   renderMaterialFolderBar();
+  renderMusicFolderBar();
   const vGrid = document.getElementById('videoGrid');
   const videos = state.activeMaterialFolder === '全部素材'
     ? state.materials.video
@@ -708,7 +713,10 @@ function renderMaterials(){
   `).join('') || emptyHtml('video');
 
   const mList = document.getElementById('musicList');
-  mList.innerHTML = state.materials.music.map(m=>`
+  const visibleMusic = state.activeMusicFolder === '全部音乐'
+    ? state.materials.music
+    : state.materials.music.filter(m=>m.folder === state.activeMusicFolder);
+  mList.innerHTML = visibleMusic.map(m=>`
     <div class="music-row" id="mrow-${m.id}">
       <button class="play-btn" onclick="toggleMusic(${m.id})" id="mplay-${m.id}">${PLAY_ICON}</button>
       <div class="music-info">
@@ -720,6 +728,23 @@ function renderMaterials(){
       <button class="btn btn-danger btn-sm" onclick="removeMaterial('music',${m.id})">${TRASH_ICON}</button>
     </div>
   `).join('') || emptyHtml('music');
+}
+function renderMusicFolderBar(){
+  const bar = document.getElementById('musicFolderBar');
+  if(!bar) return;
+  const names = ['全部音乐', ...(state.musicFolders || [])];
+  bar.innerHTML = names.map(name=>`<button class="material-folder ${state.activeMusicFolder===name?'active':''}" type="button" onclick="selectMusicFolder(decodeURIComponent('${encodeURIComponent(name)}'))"><strong>${escapeText(name)}</strong><span>${name==='全部音乐'?state.materials.music.length:state.materials.music.filter(m=>m.folder===name).length} 首音乐</span></button>`).join('') + `<button class="material-folder material-folder-new" type="button" onclick="createMusicFolder()">${PLUS_ICON} 新建文件夹</button>`;
+}
+function selectMusicFolder(name){ state.activeMusicFolder=name; renderMaterials(); }
+function createMusicFolder(){
+  const name = prompt('请输入音乐素材文件夹名称')?.trim();
+  if(!name || (state.musicFolders || []).includes(name) || name === '全部音乐') return;
+  state.musicFolders ||= [];
+  state.musicFolders.push(name);
+  state.activeMusicFolder = name;
+  aiVideoApi('/api/ai-video/folders', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'music', name})})
+    .catch(error=>toast('文件夹创建失败：'+error.message));
+  renderMaterials();
 }
 function folderCount(name){ return state.materials.video.filter(v=>v.folder===name).length; }
 function renderMaterialFolderBar(){
@@ -874,12 +899,12 @@ async function confirmUpload(){
     for(const file of files){
       const result = await aiVideoApi('/api/ai-video/materials/'+type+'/upload', {
         method:'POST',
-        headers:{'Content-Type':file.type || 'application/octet-stream', 'X-File-Name':name || file.name, 'X-Folder':folder, 'X-Tag':tag},
+        headers:{'Content-Type':file.type || 'application/octet-stream', 'X-File-Name':name || file.name, 'X-Folder':type==='music' && state.activeMusicFolder !== '全部音乐' ? state.activeMusicFolder : folder, 'X-Tag':tag},
         body:file
       });
       const material = result.material;
       if(type==='video') state.materials.video.push({...material, dur:'-', tag:material.tag || tag, folder:material.folder || folder});
-      else state.materials.music.push({...material, dur:'-', mood:material.tag || tag});
+      else state.materials.music.push({...material, dur:'-', mood:material.tag || tag, folder:material.folder || state.activeMusicFolder});
     }
     if(type==='video') saveVideoLibrary();
     closeModal('uploadOverlay');
@@ -1110,6 +1135,10 @@ function stepMusicHtml(){
     <div class="wizard-sub">可多选背景音乐，AI 会为不同文案生成的视频分配不同曲目，让每支视频风格更有区分度。</div>
 
     <div class="field-label">背景音乐 <span class="field-hint">（已选 ${w.selectedMusic.length} 首）</span></div>
+    <div class="row" style="margin:8px 0 12px;">
+      <label><input type="radio" name="musicMode" ${w.musicMode!=='auto'?'checked':''} onchange="setMusicMode('manual')"> 手动选择</label>
+      <label style="margin-left:18px;"><input type="radio" name="musicMode" ${w.musicMode==='auto'?'checked':''} onchange="setMusicMode('auto')"> AI 根据文案和风格自动匹配</label>
+    </div>
     <div id="pickMusicList">
       ${state.materials.music.map(m=>`
         <div class="music-row pick-card ${w.selectedMusic.includes(m.id)?'selected':''}" data-id="${m.id}">
@@ -1133,7 +1162,7 @@ function stepMusicHtml(){
 
     <div class="wizard-footer">
       <button class="btn btn-secondary" onclick="prevStep()">上一步</button>
-      <button class="btn btn-primary" onclick="nextStep()" ${w.selectedMusic.length===0?'disabled':''}>下一步：生成混剪</button>
+      <button class="btn btn-primary" onclick="nextStep()" ${w.musicMode!=='auto' && w.selectedMusic.length===0?'disabled':''}>下一步：生成混剪</button>
     </div>
   `;
 }
@@ -1147,6 +1176,11 @@ function bindMusicPicker(){
       renderWizard();
     });
   });
+}
+function setMusicMode(mode){
+  state.wizard.musicMode = mode;
+  if(mode === 'auto') state.wizard.selectedMusic = [];
+  renderWizard();
 }
 function setDuration(d){
   state.wizard.duration = d==='custom' ? 20 : d;
@@ -1277,7 +1311,7 @@ function finishGenerate(){
 }
 function resetGenerate(){ state.wizard.results = []; renderWizard(); }
 function startNewMix(){
-  state.wizard = {step:1, sourceCopy:'', copies:[], selectedVideos:[], selectedMusic:[], duration:15, results:[]};
+  state.wizard = {step:1, sourceCopy:'', copyRequirements:'', copies:[], selectedVideos:[], selectedMusic:[], musicMode:'manual', duration:15, results:[]};
   renderWizard();
 }
 
@@ -1340,7 +1374,7 @@ async function startGenerate(){
   try {
     const created = await aiVideoApi('/api/ai-video/mix-jobs', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({copies:w.copies, videoIds:w.selectedVideos, musicIds:w.selectedMusic, duration:w.duration})
+      body:JSON.stringify({copies:w.copies, videoIds:w.selectedVideos, musicIds:w.selectedMusic, musicMode:w.musicMode, duration:w.duration})
     });
     const poll = async()=>{
       const job = await aiVideoApi('/api/ai-video/mix-jobs/'+encodeURIComponent(created.jobId));
