@@ -800,16 +800,33 @@ app.post('/api/ai-video/copy-fission', async (req, res) => {
   try {
     const OpenAI = require('openai');
     const client = new OpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL || undefined });
-    const model = process.env.OPENAI_TEXT_MODEL || 'gpt-4o-mini';
-    const completion = await client.chat.completions.create({
-      model,
-      temperature: 0.85,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: '你是短视频电商文案专家。只输出 JSON，格式为 {"copies":["文案1"]}。每条文案独立完整，不要编号、不要解释。' },
-        { role: 'user', content: `请根据以下内容生成 ${count} 条差异化短视频文案。\n原始文案：${sourceCopy}\n文案要求：${requirements || '突出卖点，真实合规'}\n表达风格：${style}` },
-      ],
-    });
+    const configuredModel = process.env.OPENAI_TEXT_MODEL || 'gpt-4o-mini';
+    const fallbackModels = String(process.env.OPENAI_TEXT_FALLBACK_MODELS || 'gpt-4o-mini,gpt-4o')
+      .split(',').map((item) => item.trim()).filter(Boolean);
+    const models = [...new Set([configuredModel, ...fallbackModels])];
+    let completion;
+    let model = configuredModel;
+    let lastError;
+    for (const candidate of models) {
+      try {
+        completion = await client.chat.completions.create({
+          model: candidate,
+          temperature: 0.85,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: '你是短视频电商文案专家。只输出 JSON，格式为 {"copies":["文案1"]}。每条文案独立完整，不要编号、不要解释。' },
+            { role: 'user', content: `请根据以下内容生成 ${count} 条差异化短视频文案。\n原始文案：${sourceCopy}\n文案要求：${requirements || '突出卖点，真实合规'}\n表达风格：${style}` },
+          ],
+        });
+        model = candidate;
+        break;
+      } catch (error) {
+        lastError = error;
+        const status = Number(error.status || error.statusCode || 0);
+        if (![400, 404, 429, 500, 502, 503].includes(status)) throw error;
+      }
+    }
+    if (!completion) throw lastError || new Error('没有可用的文案模型');
     const raw = completion.choices?.[0]?.message?.content || '{}';
     const parsed = JSON.parse(raw);
     const copies = Array.isArray(parsed.copies) ? parsed.copies.map((item) => String(item).trim()).filter(Boolean).slice(0, count) : [];
@@ -817,7 +834,15 @@ app.post('/api/ai-video/copy-fission', async (req, res) => {
     res.json({ copies, model });
   } catch (error) {
     console.error('AI video copy fission failed', error);
-    sendError(res, 502, `文案生成失败：${error.message || '模型服务异常'}`);
+    const status = Number(error.status || error.statusCode || 0);
+    const message = status === 401 || status === 403
+      ? '文案模型鉴权失败，请检查 API Key'
+      : status === 429
+        ? '文案模型额度或频率受限，请稍后重试'
+        : status === 503
+          ? '当前文案模型没有可用通道，请检查 OPENAI_TEXT_MODEL 或备用模型配置'
+          : `文案生成失败：${error.message || '模型服务异常'}`;
+    sendError(res, status === 401 || status === 403 ? 502 : status === 429 ? 429 : 502, message);
   }
 });
 
