@@ -801,7 +801,7 @@ app.post('/api/ai-video/copy-fission', async (req, res) => {
     const OpenAI = require('openai');
     const client = new OpenAI({ apiKey, baseURL: process.env.OPENAI_BASE_URL || undefined });
     const configuredModel = process.env.OPENAI_TEXT_MODEL || 'gpt-4o-mini';
-    const fallbackModels = String(process.env.OPENAI_TEXT_FALLBACK_MODELS || 'gpt-4o-mini,gpt-4o')
+    const fallbackModels = String(process.env.OPENAI_TEXT_FALLBACK_MODELS || 'gpt-5.6-luna,gpt-5.6-sol,gpt-5.6-terra')
       .split(',').map((item) => item.trim()).filter(Boolean);
     const models = [...new Set([configuredModel, ...fallbackModels])];
     let completion;
