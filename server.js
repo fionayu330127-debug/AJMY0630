@@ -98,8 +98,22 @@ function aiVideoBinary(packageName, fallback) {
   }
 }
 
-const FFMPEG = aiVideoBinary('ffmpeg-static', 'ffmpeg');
-const FFPROBE = aiVideoBinary('ffprobe-static', 'ffprobe');
+const FFMPEG = process.env.AI_VIDEO_FFMPEG || (
+  process.platform === 'linux' && fs.existsSync('/usr/bin/ffmpeg')
+    ? '/usr/bin/ffmpeg'
+    : aiVideoBinary('ffmpeg-static', 'ffmpeg')
+);
+const FFPROBE = process.env.AI_VIDEO_FFPROBE || (
+  process.platform === 'linux' && fs.existsSync('/usr/bin/ffprobe')
+    ? '/usr/bin/ffprobe'
+    : aiVideoBinary('ffprobe-static', 'ffprobe')
+);
+const AI_VIDEO_FONT = [
+  '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+  '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+  'C:/Windows/Fonts/simhei.ttf',
+  'C:/Windows/Fonts/msyh.ttc',
+].find((file) => fs.existsSync(file)) || '';
 
 function aiVideoMaterialPath(material) {
   const encoded = String(material?.url || '').split('/').pop();
@@ -134,7 +148,7 @@ async function extractAiVideoFrame(file) {
 }
 
 async function analyzeSubtitleRegion(file) {
-  const fallback = { found: true, lineCount: 2, x: 0.08, y: 0.78, w: 0.84, h: 0.14, method: 'fallback', confidence: 0.2 };
+  const fallback = { found: true, lineCount: 2, x: 0.06, y: 0.08, w: 0.88, h: 0.2, method: 'fallback', confidence: 0.2 };
   const apiKey = process.env.OPENAI_VISION_API_KEY || process.env.OPENAI_API_KEY;
   if (!apiKey) return fallback;
   try {
@@ -176,10 +190,30 @@ function subtitleFilter(analysis, mode) {
   const w = Math.min(720 - x, Math.round(720 * analysis.w));
   const h = Math.min(1280 - y, Math.round(1280 * analysis.h));
   if (w < 20 || h < 20) return null;
-  return `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0`;
+  const main = `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0`;
+  if (analysis.method !== 'fallback') return main;
+  // When vision/OCR is unavailable, cover both common burned-in subtitle bands.
+  return `${main},delogo=x=43:y=922:w=634:h=230:show=0`;
 }
 
-async function createMixedVideo({ jobId, index, videoFiles, musicFile, duration, outputFile, subtitleAnalyses, subtitleRepair, updateProgress }) {
+function wrapAiVideoCopy(value, maxChars = 16) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const lines = [];
+  for (let i = 0; i < text.length; i += maxChars) lines.push(text.slice(i, i + maxChars));
+  return lines.join('\n');
+}
+
+function ffmpegDrawText(value) {
+  return wrapAiVideoCopy(value)
+    .replaceAll('\\', '\\\\')
+    .replaceAll(':', '\\:')
+    .replaceAll("'", "\\'")
+    .replaceAll('%', '\\%')
+    .replaceAll('\n', '\\n');
+}
+
+async function createMixedVideo({ jobId, index, videoFiles, musicFile, duration, copyText, outputFile, subtitleAnalyses, subtitleRepair, updateProgress }) {
   const temp = path.join(AI_VIDEO_DATA_DIR, 'tmp', jobId, String(index));
   await fsp.mkdir(temp, { recursive: true });
   try {
@@ -190,6 +224,15 @@ async function createMixedVideo({ jobId, index, videoFiles, musicFile, duration,
       const filters = ['scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2'];
       const repair = subtitleFilter(subtitleAnalyses?.[i], subtitleRepair);
       if (repair) filters.push(repair);
+      if (copyText) {
+        const textFilter = [
+          AI_VIDEO_FONT ? `fontfile='${AI_VIDEO_FONT.replaceAll('\\', '/')}'` : '',
+          `text='${ffmpegDrawText(copyText)}'`,
+          'fontcolor=white', 'fontsize=38', 'line_spacing=8',
+          'x=(w-text_w)/2', 'y=h-text_h-90', 'box=1', 'boxcolor=black@0.58', 'boxborderw=14',
+        ].filter(Boolean).join(':');
+        filters.push(`drawtext=${textFilter}`);
+      }
       filters.push('format=yuv420p');
       await runFfmpeg([
         '-y', '-stream_loop', '-1', '-i', videoFiles[i], '-t', String(clipDuration),
@@ -905,7 +948,7 @@ async function runMixJob(jobId, videoFiles, musicFile) {
       const fileName = `${resultId}.mp4`;
       const outputFile = path.join(AI_VIDEO_OUTPUT_DIR, fileName);
       await createMixedVideo({
-        jobId, index: i, videoFiles, musicFile, duration: job.duration, subtitleAnalyses, subtitleRepair: job.subtitleRepair, outputFile,
+        jobId, index: i, videoFiles, musicFile, duration: job.duration, copyText: job.copies[i], subtitleAnalyses, subtitleRepair: job.subtitleRepair, outputFile,
         updateProgress: async (part) => setJob({ progress: Math.min(99, Math.round((i / job.copies.length) * 100 + part / job.copies.length)) }),
       });
       results.push({
