@@ -302,7 +302,7 @@
   .progress-status{font-size:12px;color:var(--ink-400);margin-top:8px;}
 
   .result-card{position:relative;}
-  .result-card .thumb{cursor:default;}
+  .result-card .thumb{cursor:pointer;}
   .result-badge{
     position:absolute;top:7px;right:7px;background:rgba(0,0,0,.5);color:#fff;font-size:10px;padding:2px 6px;border-radius:5px;
   }
@@ -535,6 +535,17 @@
 
 <div class="toast-stack" id="toastStack"></div>
 
+<div class="overlay" id="previewOverlay">
+  <div class="modal" style="max-width:860px;">
+    <h3 id="previewTitle">视频预览</h3>
+    <video id="previewVideo" controls playsinline style="display:block;width:100%;max-height:70vh;background:#0f172a;border-radius:10px;"></video>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closePreview()">关闭</button>
+      <button class="btn btn-primary" id="previewDownload">下载视频</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* =====================================================================
    MOCK DATA / STATE
@@ -633,6 +644,7 @@ async function loadAiVideoLibrary(){
     }
     if(library.products && typeof library.products === 'object') state.products = library.products;
     renderMaterials();
+    renderProducts();
   } catch(error) {
     // The shell can still be previewed with its local demo data when logged out.
     console.debug('AI video library is unavailable:', error.message);
@@ -707,7 +719,7 @@ function renderMaterials(){
     : state.materials.video.filter(v=>v.folder === state.activeMaterialFolder);
   vGrid.innerHTML = videos.map(v=>`
     <div class="card video-material-card" draggable="true" data-video-id="${v.id}" ondragstart="startVideoDrag(event,${v.id})">
-      <div class="thumb" style="background:${colorFor(v.id)}">
+      <div class="thumb" style="background:${colorFor(v.id)};cursor:pointer" onclick="previewVideo('${escapeAttr(v.url || '')}','${escapeAttr(v.name || '混剪成品')}')">
         ${VIDEO_ICON}
         <div class="dur-badge">${v.dur}</div>
       </div>
@@ -1025,7 +1037,7 @@ function openFolder(name){
   const items = state.products[name] || [];
   grid.innerHTML = items.map(v=>`
     <div class="card">
-      <div class="thumb" style="background:${colorFor(v.id)}">
+      <div class="thumb" style="background:${colorFor(v.id)};cursor:pointer" onclick="previewVideo('${escapeAttr(v.url || '')}','${escapeAttr(v.name || '混剪成品')}')">
         ${VIDEO_ICON}
         <div class="dur-badge">${v.dur}</div>
       </div>
@@ -1033,13 +1045,39 @@ function openFolder(name){
         <div class="card-name">${v.name}</div>
         <div class="card-meta"><span>${v.date}</span></div>
         <div class="card-actions">
-          <button class="btn btn-secondary btn-sm" style="flex:1">${DL_ICON} 下载</button>
+          <button class="btn btn-secondary btn-sm" style="flex:1" onclick="downloadVideo('${escapeAttr(v.url || '')}','${escapeAttr(v.name || '混剪成品.mp4')}')">${DL_ICON} 下载</button>
         </div>
       </div>
     </div>
   `).join('') || emptyHtml('video').replace('视频素材','混剪成品');
 }
 function backToFolders(){ renderProducts(); }
+
+function downloadVideo(url, name){
+  if(!url){ toast('视频地址不存在'); return; }
+  const link = document.createElement('a');
+  link.href = url + (url.includes('?') ? '&' : '?') + 'download=1';
+  link.download = name || '混剪成品.mp4';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+function previewVideo(url, name){
+  if(!url){ toast('视频地址不存在'); return; }
+  const video = document.getElementById('previewVideo');
+  document.getElementById('previewTitle').textContent = name || '视频预览';
+  video.src = url;
+  document.getElementById('previewDownload').onclick = () => downloadVideo(url, name);
+  openModal('previewOverlay');
+  video.play().catch(() => {});
+}
+function closePreview(){
+  const video = document.getElementById('previewVideo');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  closeModal('previewOverlay');
+}
 
 /* =====================================================================
    PAGE: AI 混剪 (WIZARD)
@@ -1281,7 +1319,7 @@ function stepGenerateHtml(){
       <div class="grid">
         ${w.results.map((r,i)=>`
           <div class="card result-card">
-            <div class="thumb" style="background:${colorFor(r.videoIds[0])}">
+            <div class="thumb" style="background:${colorFor(r.videoIds[0])};cursor:pointer" onclick="previewVideo('${escapeAttr(r.url || '')}','${escapeAttr(r.name || 'AI混剪视频')}')">
               ${VIDEO_ICON}
               <div class="result-badge">${r.duration}s</div>
             </div>
@@ -1290,7 +1328,7 @@ function stepGenerateHtml(){
               <div class="card-meta"><span>${r.music}</span></div>
               <div class="card-actions">
                 <button class="btn btn-secondary btn-sm" style="flex:1" onclick="openSaveModal(${i})">存入成品库</button>
-                <button class="btn btn-secondary btn-sm">${DL_ICON}</button>
+                <button class="btn btn-secondary btn-sm" onclick="downloadVideo('${escapeAttr(r.url || '')}','${escapeAttr(r.name || 'AI混剪视频.mp4')}')">${DL_ICON}</button>
               </div>
             </div>
           </div>
@@ -1470,6 +1508,8 @@ async function confirmSaveResult(){
     });
     state.products[folder] ||= [];
     if(!state.products[folder].some(item=>item.id===result.id)) state.products[folder].push(result);
+    await loadAiVideoLibrary();
+    renderProducts();
     closeModal('saveOverlay');
     toast('已保存到 '+folder);
   } catch(error) { toast('保存失败：'+error.message); }

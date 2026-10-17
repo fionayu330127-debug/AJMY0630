@@ -956,6 +956,9 @@ app.get('/api/ai-video/products/file/:file', async (req, res) => {
   const file = path.basename(req.params.file);
   const target = path.join(AI_VIDEO_OUTPUT_DIR, file);
   if (!fs.existsSync(target)) return res.sendStatus(404);
+  if (req.query.download === '1') {
+    res.setHeader('Content-Disposition', `attachment; filename="${file}"`);
+  }
   res.sendFile(target);
 });
 
