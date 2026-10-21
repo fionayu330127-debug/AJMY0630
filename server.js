@@ -33,6 +33,7 @@ const productTestApp = require(path.join(PRODUCT_TEST_DIR, 'server.js'));
 const aiImageApp = require(path.join(AI_IMAGE_DIR, 'server.js'));
 const inventoryShipmentApp = require(path.join(INVENTORY_SHIPMENT_DIR, 'server.js'));
 const { createOperationCenter } = require(path.join(OPERATION_CENTER_DIR, 'server.js'));
+const { createVideoV2 } = require(path.join(__dirname, 'modules', 'ai-video-system', 'v2', 'server.js'));
 
 const app = express();
 const PORT = Number(process.env.PORT || 3001);
@@ -44,6 +45,13 @@ const LINGXING_OPENAPI_BASE = process.env.LINGXING_OPENAPI_BASE || 'https://open
 const LINGXING_AMAZON_ADS_PATH = process.env.LINGXING_AMAZON_ADS_PATH || '';
 
 const pool = new Pool({ connectionString: DATABASE_URL });
+
+const videoV2 = createVideoV2({
+  query,
+  pool,
+  getSessionUser,
+  isAdmin: canManageTeam,
+});
 
 const members = ['余蓉', '盛峻波', '胡辉', '赵颖霖', '吕文健', '刘嘉莹'];
 
@@ -1798,6 +1806,7 @@ app.patch('/api/team/members/:id/password', async (req, res) => {
 });
 
 app.use('/api', createOperationCenter({ query, getSessionUser, sendError }));
+app.use('/api', videoV2);
 
 const sampleSubmissionColumns = [
   'sample_status',
@@ -1994,6 +2003,8 @@ async function start() {
   await query('SELECT 1');
   await ensureSeedData();
   await ensureTeamSchema();
+  await videoV2.ensureVideoSchema();
+  await videoV2.startLeaseReaper();
   tkApp.startShopSyncScheduler?.();
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`濂ュ悏绫充簹 ERP running at http://0.0.0.0:${PORT}`);
