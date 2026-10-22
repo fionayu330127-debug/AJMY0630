@@ -6,6 +6,7 @@ const db = require('./db');
 const https = require('https');
 const querystring = require('querystring');
 const fs = require('fs');
+const crypto = require('crypto');
 const { Pool } = require('pg');
 const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncSampleApplications, syncTikTokShop } = require('./syncTikTok');
 const { tiktokRequest } = require('./tiktokApi');
@@ -662,6 +663,69 @@ CREATE TABLE IF NOT EXISTS agent_workflow_tasks (
   executed_at TEXT,
   UNIQUE(workflow_id, task_type, uid, sample_id)
 );
+
+CREATE TABLE IF NOT EXISTS agent_learning_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_id INTEGER,
+  event_type TEXT NOT NULL,
+  uid TEXT,
+  sample_id TEXT,
+  input_json TEXT,
+  outcome TEXT,
+  lesson TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_optimization_suggestions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workflow_id INTEGER,
+  suggestion_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  proposal_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  applied_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_experiments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',
+  min_samples INTEGER NOT NULL DEFAULT 30,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_experiment_variants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  experiment_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  template_id INTEGER,
+  weight INTEGER NOT NULL DEFAULT 50,
+  UNIQUE(experiment_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS agent_inbox_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  external_message_id TEXT NOT NULL UNIQUE,
+  shop_id TEXT NOT NULL,
+  conversation_id TEXT,
+  creator_open_id TEXT,
+  uid TEXT,
+  creator_name TEXT,
+  direction TEXT NOT NULL DEFAULT 'inbound',
+  message_type TEXT,
+  message_text TEXT,
+  raw_json TEXT,
+  classification TEXT,
+  reply_status TEXT NOT NULL DEFAULT 'not_sent',
+  reply_text TEXT,
+  reply_record_id INTEGER,
+  received_at TEXT,
+  processed_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 try { db.exec('ALTER TABLE shops ADD COLUMN last_sync_at TEXT'); } catch (_) {}
@@ -677,6 +741,9 @@ try { db.exec('ALTER TABLE invitation_records ADD COLUMN target_collaboration_id
 try { db.exec("ALTER TABLE invitation_records ADD COLUMN send_mode TEXT NOT NULL DEFAULT 'auto'"); } catch (_) {}
 try { db.exec("ALTER TABLE invitation_records ADD COLUMN sample_approval_mode TEXT NOT NULL DEFAULT 'manual'"); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN sample_apply_link TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE invitation_records ADD COLUMN experiment_id INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE invitation_records ADD COLUMN experiment_variant_id INTEGER'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_agent_inbox_shop_received ON agent_inbox_messages(shop_id, received_at)'); } catch (_) {}
 try { db.exec('ALTER TABLE products ADD COLUMN product_url TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN commission_rate REAL'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN sample_received_at TEXT'); } catch (_) {}
@@ -738,10 +805,6 @@ ensureInvitationTemplates();
 db.prepare(`
   UPDATE invitation_templates
   SET type = 'collab',
-      content = CASE
-        WHEN content LIKE '%{{sample_apply_link}}%' THEN content
-        ELSE '您好 {{creator_name}}，我们是 {{shop_name}} 店铺BD。想邀请您体验 {{product_name}}。您可以直接点击链接申请样品：{{sample_apply_link}}'
-      END,
       updated_at = ?
   WHERE active = 1 AND name LIKE '%样品合作邀约%'
 `).run(nowText());
@@ -1025,6 +1088,7 @@ function defaultWorkflowConfig() {
     auto_approve_score: 90,
     bd_ids: bdRows.map((row) => row.id),
     assign_mode: 'round_robin',
+    experiment_id: null,
     auto_reply_template: '您好，样品申请已收到，我们会尽快审核并安排后续沟通。',
   };
 }
@@ -1063,6 +1127,7 @@ function saveWorkflow(input = {}, createNew = false) {
   config.invite_daily_limit = Math.max(1, Number(config.invite_daily_limit || 50));
   config.audit_min_score = Number(config.audit_min_score || 70);
   config.auto_approve_score = Number(config.auto_approve_score || 90);
+  config.experiment_id = config.experiment_id ? Number(config.experiment_id) : null;
   config.send_mode = config.send_mode === 'auto' ? 'auto' : 'manual';
   config.sample_approval_mode = config.sample_approval_mode === 'auto' ? 'auto' : 'manual';
   config.assign_mode = config.assign_mode === 'least_load' ? 'least_load' : 'round_robin';
@@ -1127,6 +1192,7 @@ function auditByWorkflowConditions(item, config) {
     score: failed.length ? 0 : 100,
     recommendation: failed.length ? 'manual_review' : 'auto_pass',
     reason: (failed.length ? failed.map((item) => item.fail) : passed.map((item) => item.ok)).join('，') || '未设置硬性审核条件，自动通过',
+    checks: active.map((item) => ({ name: item.ok, pass: item.pass, detail: item.pass ? item.ok : item.fail })),
   };
 }
 
@@ -1140,6 +1206,130 @@ function agentScoreSample(sample, config) {
     avg_view: rowMetricNumber(sample.avg_view),
     total_orders: sample.total_orders ?? sample.sales_count ?? 0,
   }, config);
+}
+
+function recordLearningEvent({ workflowId, eventType, uid, sampleId, input, outcome, lesson }) {
+  db.prepare(`
+    INSERT INTO agent_learning_events (workflow_id, event_type, uid, sample_id, input_json, outcome, lesson)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(workflowId || null, eventType, uid || null, sampleId || null, JSON.stringify(input || {}), outcome || '', lesson || '');
+}
+
+function buildOptimizationReport(workflowId = null) {
+  const workflow = getWorkflow(workflowId);
+  const sent = Number(db.prepare("SELECT COUNT(*) AS c FROM invitation_records WHERE status = 'sent'").get().c || 0);
+  const invitationTotal = Number(db.prepare('SELECT COUNT(*) AS c FROM invitation_records').get().c || 0);
+  const applied = Number(db.prepare(`
+    SELECT COUNT(DISTINCT uid) AS c FROM samples
+    WHERE uid IN (SELECT uid FROM invitation_records)
+  `).get().c || 0);
+  const fulfilled = Number(db.prepare(`
+    SELECT COUNT(DISTINCT uid) AS c FROM samples
+    WHERE uid IN (SELECT uid FROM invitation_records)
+      AND status IN ('approved','assigned','shipped','published')
+  `).get().c || 0);
+  const published = Number(db.prepare(`
+    SELECT COUNT(DISTINCT uid) AS c FROM samples
+    WHERE uid IN (SELECT uid FROM invitation_records) AND status = 'published'
+  `).get().c || 0);
+  const learning = db.prepare(`
+    SELECT event_type, outcome, COUNT(*) AS count
+    FROM agent_learning_events
+    WHERE workflow_id = ? OR workflow_id IS NULL
+    GROUP BY event_type, outcome ORDER BY count DESC
+  `).all(workflow.id);
+  const templates = db.prepare(`
+    SELECT t.id, t.name, COUNT(r.id) AS sends,
+      SUM(CASE WHEN r.status = 'sent' THEN 1 ELSE 0 END) AS sent,
+      COUNT(DISTINCT CASE WHEN s.status IN ('approved','assigned','shipped','published') THEN s.uid END) AS cooperated
+    FROM invitation_templates t
+    LEFT JOIN invitation_records r ON r.template_id = t.id
+    LEFT JOIN samples s ON s.uid = r.uid
+    WHERE t.active = 1 GROUP BY t.id ORDER BY cooperated DESC, sent DESC
+  `).all();
+  const suggestions = [];
+  if (invitationTotal && sent / invitationTotal < 0.7) {
+    suggestions.push({
+      suggestion_type: 'delivery', title: '检查邀约发送失败率',
+      reason: `当前邀约记录 ${invitationTotal} 条，成功发送 ${sent} 条，成功率 ${Math.round(sent / invitationTotal * 100)}%。建议先检查店铺授权、达人 open_id 和 API 限流。`,
+      proposal: { action: 'keep_manual_send', send_success_rate: sent / invitationTotal },
+    });
+  }
+  if (applied && fulfilled / applied < 0.5) {
+    suggestions.push({
+      suggestion_type: 'audit', title: '提高样品审核中的履约风险提示',
+      reason: `邀约关联达人 ${applied} 位，进入有效合作 ${fulfilled} 位，履约转化 ${Math.round(fulfilled / applied * 100)}%。建议提高履约率/历史内容质量门槛，并保留人工复核。`,
+      proposal: { action: 'review_thresholds', min_fulfillment: Math.max(Number(workflow.config.min_fulfillment || 0), 80) },
+    });
+  }
+  if (fulfilled && published / fulfilled < 0.5) {
+    suggestions.push({
+      suggestion_type: 'followup', title: '优化寄样后的跟进节奏',
+      reason: `有效合作 ${fulfilled} 位，已发布 ${published} 位，发布转化 ${Math.round(published / fulfilled * 100)}%。建议启用寄样后 3 天确认、7 天提醒两段式话术。`,
+      proposal: { action: 'add_followup_sequence', intervals_days: [3, 7] },
+    });
+  }
+  const replySignals = learning.filter((row) => row.event_type === 'creator_reply');
+  if (replySignals.length) {
+    suggestions.push({
+      suggestion_type: 'copy', title: '根据达人回复持续优化话术',
+      reason: `已累计 ${replySignals.reduce((n, row) => n + Number(row.count || 0), 0)} 条达人回复学习记录。建议将高频正向回复对应话术做 A/B 测试，暂不直接覆盖现有模板。`,
+      proposal: { action: 'ab_test_invitation_copy', source: 'creator_reply_events' },
+    });
+  }
+  return { workflow, metrics: { invitation_total: invitationTotal, sent, applied, fulfilled, published }, learning, templates, suggestions };
+}
+
+function saveOptimizationSuggestions(workflowId, suggestions) {
+  const insert = db.prepare(`
+    INSERT INTO agent_optimization_suggestions (workflow_id, suggestion_type, title, reason, proposal_json)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  const ids = [];
+  for (const item of suggestions) ids.push(Number(insert.run(workflowId, item.suggestion_type, item.title, item.reason, JSON.stringify(item.proposal || {})).lastInsertRowid));
+  return ids;
+}
+
+function experimentVariant(experimentId, uid) {
+  const experiment = db.prepare('SELECT * FROM agent_experiments WHERE id = ? AND status = \'running\'').get(Number(experimentId));
+  if (!experiment) return null;
+  const variants = db.prepare('SELECT * FROM agent_experiment_variants WHERE experiment_id = ? ORDER BY id').all(experiment.id);
+  if (!variants.length) return null;
+  const total = variants.reduce((sum, item) => sum + Math.max(1, Number(item.weight || 0)), 0);
+  let hash = 0;
+  for (const char of String(uid || '')) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  let cursor = hash % total;
+  for (const variant of variants) {
+    cursor -= Math.max(1, Number(variant.weight || 0));
+    if (cursor < 0) return { experiment, variant };
+  }
+  return { experiment, variant: variants[variants.length - 1] };
+}
+
+function experimentReport(experimentId) {
+  const experiment = db.prepare('SELECT * FROM agent_experiments WHERE id = ?').get(Number(experimentId));
+  if (!experiment) return null;
+  const variants = db.prepare(`
+    SELECT v.id, v.name, v.template_id, v.weight,
+      COUNT(r.id) AS records,
+      SUM(CASE WHEN r.status = 'sent' THEN 1 ELSE 0 END) AS sent,
+      COUNT(DISTINCT CASE WHEN s.id IS NOT NULL THEN s.uid END) AS applied,
+      COUNT(DISTINCT CASE WHEN s.status IN ('approved','assigned','shipped','published') THEN s.uid END) AS cooperated,
+      COUNT(DISTINCT CASE WHEN s.status = 'published' THEN s.uid END) AS published
+    FROM agent_experiment_variants v
+    LEFT JOIN invitation_records r ON r.experiment_variant_id = v.id
+    LEFT JOIN samples s ON s.uid = r.uid
+    WHERE v.experiment_id = ?
+    GROUP BY v.id ORDER BY v.id
+  `).all(experiment.id).map((row) => ({
+    ...row,
+    send_rate: row.records ? Number(row.sent || 0) / Number(row.records) : 0,
+    cooperation_rate: row.sent ? Number(row.cooperated || 0) / Number(row.sent) : 0,
+    publish_rate: row.cooperated ? Number(row.published || 0) / Number(row.cooperated) : 0,
+  }));
+  const enough = variants.every((row) => Number(row.sent || 0) >= Number(experiment.min_samples || 30));
+  const winner = enough ? [...variants].sort((a, b) => b.cooperation_rate - a.cooperation_rate || b.publish_rate - a.publish_rate)[0] : null;
+  return { experiment, variants, enough_data: enough, winner: winner ? { id: winner.id, name: winner.name, reason: '以有效合作率优先，视频发布率作为并列判断' } : null };
 }
 
 function leastLoadBdId(config) {
@@ -1269,10 +1459,25 @@ function generateWorkflowQueue(workflowId = null) {
   for (const sample of sampleRows) {
     const item = { ...sample, sample_id: sample.id };
     const conditionAudit = agentScoreSample(item, config);
-    if (conditionAudit.recommendation !== 'auto_pass') continue;
-    const audit = { score: 100, recommendation: 'pending_reply', reason: '条件匹配，待发送确认拍摄与发布消息' };
-    insertWorkflowTask(workflow.id, 'sample_message', 'admin_approved', item, audit, { sample: item, config_snapshot: config, condition_audit: conditionAudit });
-    sampleCount += 1;
+    const auditStatus = conditionAudit.recommendation === 'auto_pass' && config.sample_approval_mode === 'auto'
+      ? 'admin_approved'
+      : 'agent_review';
+    insertWorkflowTask(workflow.id, 'sample_audit', auditStatus, item, conditionAudit, {
+      sample: item,
+      config_snapshot: config,
+      condition_audit: conditionAudit,
+      report: {
+        basic_data: { uid: item.uid, name: item.creator_name, handle: item.creator_handle, fans: item.fans, category: item.category, avg_view: item.avg_view, orders_30d: item.total_orders, star: item.star },
+        decision: conditionAudit.recommendation === 'auto_pass' ? '建议通过' : '建议不通过/人工复核',
+        reason: conditionAudit.reason,
+        checks: conditionAudit.checks || [],
+      },
+    });
+    if (conditionAudit.recommendation === 'auto_pass') {
+      const messageAudit = { score: conditionAudit.score, recommendation: 'pending_reply', reason: '条件匹配，待发送确认拍摄与发布消息' };
+      insertWorkflowTask(workflow.id, 'sample_message', config.sample_approval_mode === 'auto' ? 'admin_approved' : 'agent_review', item, messageAudit, { sample: item, config_snapshot: config, condition_audit: conditionAudit });
+      sampleCount += 1;
+    }
   }
   return { workflow, invite_count: inviteCount, sample_count: sampleCount, diagnostics };
 }
@@ -1305,27 +1510,32 @@ async function sendWorkflowInvitations(tasks, workflow) {
     INSERT INTO invitation_records (
       shop_id, source, uid, creator_name, creator_handle, creator_open_id,
       template_id, template_type, product_id, product_ids, commission_rate, target_collaboration_id, send_mode, sample_approval_mode,
-      sample_apply_link, channel, message, status, provider_message, created_at, sent_at
+      sample_apply_link, channel, message, status, provider_message, created_at, sent_at, experiment_id, experiment_variant_id
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const results = [];
   for (const task of tasks) {
     const creator = task.payload?.candidate || task.payload || {};
+    const assignment = experimentVariant(config.experiment_id, creator.uid || task.uid);
+    const selectedTemplate = assignment?.variant?.template_id
+      ? db.prepare('SELECT * FROM invitation_templates WHERE id = ? AND active = 1').get(assignment.variant.template_id)
+      : template;
+    if (!selectedTemplate) throw new Error('A/B 测试版本未配置有效邀约模板');
     const shop = db.prepare('SELECT * FROM shops WHERE id = ?').get(creator.shop_id || task.shop_id || config.shop) ||
       db.prepare('SELECT * FROM shops ORDER BY id LIMIT 1').get();
     const nextId = nextInvitationRecordId();
-    const applyLink = template.type === 'collab' ? sampleApplyLink(nextId) : null;
-    const message = renderInvitationMessage(template, creator, shop, products, nextId, {
+    const applyLink = selectedTemplate.type === 'collab' ? sampleApplyLink(nextId) : null;
+    const message = renderInvitationMessage(selectedTemplate, creator, shop, products, nextId, {
       commission_rate: config.commission_rate,
-      omit_sample_apply_link: template.type === 'collab' && config.send_mode === 'auto',
+      omit_sample_apply_link: selectedTemplate.type === 'collab' && config.send_mode === 'auto',
     });
     let sendResult = { status: 'pending', provider_message: '工作流手动邀约模式：已生成记录，未自动发送 TikTok 私信' };
     let targetCollaborationId = null;
     if (config.send_mode === 'auto') {
       try {
         let cards = [];
-        if (template.type === 'collab') {
+        if (selectedTemplate.type === 'collab') {
           const target = await createTargetCollaboration({
             shop,
             creator,
@@ -1356,8 +1566,8 @@ async function sendWorkflowInvitations(tasks, workflow) {
       task.creator_name,
       task.creator_handle,
       creator.creator_open_id || creator.uid || task.uid,
-      template.id,
-      template.type || 'dm',
+      selectedTemplate.id,
+      selectedTemplate.type || 'dm',
       products[0]?.id || null,
       products.length ? JSON.stringify(products.map((item) => item.id)) : null,
       Number(config.commission_rate || 0),
@@ -1370,7 +1580,9 @@ async function sendWorkflowInvitations(tasks, workflow) {
       sendResult.status,
       sendResult.provider_message,
       now,
-      sendResult.status === 'sent' ? now : null
+      sendResult.status === 'sent' ? now : null,
+      assignment?.experiment?.id || null,
+      assignment?.variant?.id || null
     );
     const recordId = Number(record.lastInsertRowid);
     db.prepare(`
@@ -1469,6 +1681,8 @@ async function executeWorkflow(workflowId = null) {
   const workflow = getWorkflow(workflowId);
   const inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
   const inviteResults = await sendWorkflowInvitations(inviteTasks, workflow);
+  const inboxTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
+  const inbox_reply_results = await sendWorkflowInboxReplies(inboxTasks, workflow);
   const messageTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_message' && task.status === 'admin_approved');
   const sample_message_results = await sendWorkflowSampleMessages(messageTasks, workflow);
   const sampleTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_audit' && task.status === 'admin_approved');
@@ -1490,7 +1704,7 @@ async function executeWorkflow(workflowId = null) {
       .run('executed', bdId || null, nowText(), nowText(), task.id);
     assigned += 1;
   }
-  return { invite_results: inviteResults, sample_message_results, assigned_samples: assigned };
+  return { invite_results: inviteResults, inbox_reply_results, sample_message_results, assigned_samples: assigned };
 }
 
 function workflowList() {
@@ -1722,6 +1936,179 @@ async function sendTikTokInvitation({ shop, creator, message, cards = [] }) {
     provider_message: JSON.stringify({ conversation_id: conversationId, text: textData, cards: cardResults }).slice(0, 500),
   };
 }
+
+function inboxHash(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex').slice(0, 48);
+}
+
+function apiList(data, keys = []) {
+  for (const key of keys) {
+    if (Array.isArray(data?.[key])) return data[key];
+  }
+  return Array.isArray(data) ? data : [];
+}
+
+function messageText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return messageText(parsed);
+    } catch (_) {
+      return value;
+    }
+  }
+  if (typeof value === 'object') return firstText(value.text, value.content, value.body, value.message, value.title, value.description);
+  return String(value);
+}
+
+function normalizeInboxMessage(raw, conversation, shopId) {
+  const sender = raw.sender || raw.from || raw.user || {};
+  const direction = String(raw.direction || raw.sender_type || '').toLowerCase();
+  const creatorOpenId = firstText(raw.creator_open_id, raw.creator_user_id, sender.creator_open_id, sender.open_id, conversation.creator_open_id, conversation.creator_user_id);
+  const messageId = firstText(raw.message_id, raw.id, raw.msg_id);
+  const receivedAt = firstText(raw.created_at, raw.create_time, raw.timestamp, raw.sent_at, nowText());
+  const text = messageText(raw.text || raw.content || raw.body || raw.message || raw.payload);
+  const isInbound = direction ? !/(seller|merchant|shop|outbound|sent)/i.test(direction) : !Boolean(raw.is_self || raw.from_seller);
+  return {
+    external_message_id: messageId || inboxHash(`${shopId}|${conversation.conversation_id || conversation.id}|${receivedAt}|${text}`),
+    shop_id: shopId,
+    conversation_id: firstText(raw.conversation_id, conversation.conversation_id, conversation.id),
+    creator_open_id: creatorOpenId,
+    uid: firstText(raw.uid, raw.creator_uid, creatorOpenId),
+    creator_name: firstText(raw.creator_name, sender.creator_name, conversation.creator_name, conversation.name),
+    direction: isInbound ? 'inbound' : 'outbound',
+    message_type: firstText(raw.msg_type, raw.message_type, raw.type, 'text'),
+    message_text: text,
+    raw_json: JSON.stringify(raw),
+    received_at: receivedAt,
+  };
+}
+
+function classifyInboxMessage(text, sample = null) {
+  const value = String(text || '').trim().toLowerCase();
+  if (!value) return { classification: 'empty', recommendation: 'manual_review', score: 0, reason: '消息没有可识别文本' };
+  if (/(不能|不可以|无法|拒绝|取消|不拍|不发|no|can't|cannot|not interested|できません|無理)/i.test(value)) {
+    return { classification: 'negative', recommendation: 'manual_review', score: 0, reason: '达人表达拒绝或无法合作，需要人工处理' };
+  }
+  if (/(多少钱|怎么申请|如何申请|地址|佣金|合作|样品|sample|price|apply|commission|where|when|可以|愿意|确认|ok|yes|sure|can|available|できます)/i.test(value)) {
+    const audit = sample ? agentScoreSample(sample, getWorkflow().config) : { recommendation: 'auto_pass', score: 80, reason: '消息包含合作意向或业务问题' };
+    return {
+      classification: /(多少钱|佣金|price|commission)/i.test(value) ? 'commercial_question' : 'positive_intent',
+      recommendation: audit.recommendation === 'auto_pass' ? 'auto_reply_candidate' : 'manual_review',
+      score: audit.score,
+      reason: audit.reason,
+    };
+  }
+  return { classification: 'other', recommendation: 'manual_review', score: 30, reason: '消息意图不明确，建议人工查看' };
+}
+
+function inboxReplyText(workflow, message) {
+  const template = String(workflow?.config?.auto_reply_template || getAgentSettings().followup_template || '').trim();
+  return template
+    .replace(/\{\{creator_name\}\}/g, message.creator_name || message.uid || '您好')
+    .replace(/\{\{reply_text\}\}/g, message.message_text || '');
+}
+
+async function processInboxMessage(row, workflow) {
+  const sample = row.uid
+    ? db.prepare(`SELECT s.*, COALESCE(l.star, 0) AS star, COALESCE(s.sales_count, 0) AS total_orders FROM samples s LEFT JOIN creator_library l ON l.uid = s.uid WHERE s.uid = ? ORDER BY s.applied_at DESC LIMIT 1`).get(row.uid)
+    : null;
+  const audit = classifyInboxMessage(row.message_text, sample);
+  db.prepare('UPDATE agent_inbox_messages SET uid = COALESCE(NULLIF(?, \'\'), uid), classification = ?, processed_at = ? WHERE id = ?')
+    .run(row.uid || '', audit.classification, nowText(), row.id);
+  if (audit.recommendation === 'auto_reply_candidate') {
+    insertWorkflowTask(workflow.id, 'inbox_message', String(process.env.TK_AGENT_AUTO_REPLY || '').toLowerCase() === 'true' ? 'admin_approved' : 'agent_review', { ...row, sample_id: row.external_message_id }, audit, { inbox_message: row, audit, sample, config_snapshot: workflow.config });
+  } else {
+    insertWorkflowTask(workflow.id, 'inbox_message', 'agent_review', { ...row, sample_id: row.external_message_id }, audit, { inbox_message: row, audit, sample, config_snapshot: workflow.config });
+  }
+  return audit;
+}
+
+async function syncInboxForShop(shop, workflow = getWorkflow()) {
+  if (!shop?.access_token || !shop.shop_cipher) return { shop_id: shop?.id, status: 'skipped', message: '店铺未授权或缺少 shop_cipher', received: 0 };
+  const conversationPath = process.env.TK_IM_CONVERSATION_PATH || '/affiliate_seller/202508/conversations';
+  const messagePath = process.env.TK_IM_MESSAGES_PATH || '/affiliate_seller/202412/conversations/{conversation_id}/messages';
+  const conversationsResponse = await tiktokRequest({ path: conversationPath, method: 'GET', accessToken: shop.access_token, shopId: shop.id, query: { shop_cipher: shop.shop_cipher, page_size: 100 }, body: {} });
+  const conversations = apiList(conversationsResponse, ['conversations', 'conversation_list', 'items', 'data']);
+  let received = 0;
+  let processed = 0;
+  for (const conversation of conversations) {
+    const conversationId = firstText(conversation.conversation_id, conversation.id);
+    if (!conversationId) continue;
+    const response = await tiktokRequest({ path: conversationMessagePath(messagePath, conversationId), method: 'GET', accessToken: shop.access_token, shopId: shop.id, query: { shop_cipher: shop.shop_cipher, page_size: 100 }, body: {} });
+    for (const raw of apiList(response, ['messages', 'message_list', 'items', 'data'])) {
+      const item = normalizeInboxMessage(raw, { ...conversation, conversation_id: conversationId }, shop.id);
+      if (item.direction !== 'inbound') continue;
+      const result = db.prepare(`INSERT OR IGNORE INTO agent_inbox_messages (external_message_id, shop_id, conversation_id, creator_open_id, uid, creator_name, direction, message_type, message_text, raw_json, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(item.external_message_id, item.shop_id, item.conversation_id, item.creator_open_id, item.uid, item.creator_name, item.direction, item.message_type, item.message_text, item.raw_json, item.received_at);
+      if (!Number(result.changes || 0)) continue;
+      const inserted = db.prepare('SELECT * FROM agent_inbox_messages WHERE id = ?').get(Number(result.lastInsertRowid));
+      received += 1;
+      await processInboxMessage(inserted, workflow);
+      processed += 1;
+    }
+  }
+  return { shop_id: shop.id, status: 'success', conversations: conversations.length, received, processed };
+}
+
+async function ingestInboxEvent(payload, workflowId = null) {
+  const event = payload?.data || payload?.event || payload || {};
+  const shopId = firstText(event.shop_id, event.shop?.id, event.data?.shop_id);
+  const shop = db.prepare('SELECT * FROM shops WHERE id = ?').get(shopId) || db.prepare('SELECT * FROM shops ORDER BY id LIMIT 1').get();
+  const workflow = getWorkflow(workflowId || null);
+  const conversation = event.conversation || event;
+  const rawMessages = apiList(event, ['messages', 'message_list', 'items'])
+    .concat(event.message ? [event.message] : []);
+  const results = [];
+  for (const raw of rawMessages) {
+    const item = normalizeInboxMessage(raw, conversation, shop.id);
+    if (item.direction !== 'inbound') continue;
+    const inserted = db.prepare(`
+      INSERT OR IGNORE INTO agent_inbox_messages
+        (external_message_id, shop_id, conversation_id, creator_open_id, uid, creator_name, direction, message_type, message_text, raw_json, received_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(item.external_message_id, item.shop_id, item.conversation_id, item.creator_open_id, item.uid, item.creator_name, item.direction, item.message_type, item.message_text, item.raw_json, item.received_at);
+    if (!Number(inserted.changes || 0)) continue;
+    const row = db.prepare('SELECT * FROM agent_inbox_messages WHERE id = ?').get(Number(inserted.lastInsertRowid));
+    const audit = await processInboxMessage(row, workflow);
+    results.push({ id: row.id, external_message_id: row.external_message_id, classification: audit.classification, recommendation: audit.recommendation });
+  }
+  if (String(process.env.TK_AGENT_AUTO_REPLY || '').toLowerCase() === 'true' && results.length) {
+    const tasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
+    const replies = await sendWorkflowInboxReplies(tasks, workflow);
+    results.forEach((item) => { item.reply = replies.find((reply) => reply.message_id === item.id) || null; });
+  }
+  return { success: true, shop_id: shop.id, received: results.length, results };
+}
+
+async function sendWorkflowInboxReplies(tasks, workflow) {
+  const results = [];
+  for (const task of tasks) {
+    const row = task.payload?.inbox_message || {};
+    const shop = db.prepare('SELECT * FROM shops WHERE id = ?').get(row.shop_id || task.shop_id);
+    const text = inboxReplyText(workflow, row);
+    let sendResult;
+    try {
+      if (!row.conversation_id) throw new Error('消息缺少 conversation_id，无法回复');
+      const response = await sendTikTokImMessage({
+        shop,
+        conversationId: row.conversation_id,
+        body: { msg_type: 'TEXT', content: JSON.stringify({ content: text }) },
+      });
+      sendResult = { status: 'sent', provider_message: JSON.stringify(response).slice(0, 500) };
+    } catch (error) {
+      sendResult = { status: 'failed', provider_message: error.message || '自动回复发送失败' };
+    }
+    db.prepare('UPDATE agent_inbox_messages SET reply_status = ?, reply_text = ?, processed_at = ? WHERE id = ?')
+      .run(sendResult.status, text, nowText(), row.id);
+    db.prepare('UPDATE agent_workflow_tasks SET status = ?, reason = ?, updated_at = ?, executed_at = ? WHERE id = ?')
+      .run(sendResult.status === 'sent' ? 'executed' : 'failed', sendResult.provider_message, nowText(), nowText(), task.id);
+    recordLearningEvent({ workflowId: workflow.id, eventType: 'inbox_auto_reply', uid: row.uid, input: { message: row.message_text, reply: text }, outcome: sendResult.status, lesson: sendResult.provider_message });
+    results.push({ task_id: task.id, message_id: row.id, status: sendResult.status, provider_message: sendResult.provider_message });
+  }
+  return results;
+}
 function importEnvAuthorizationToShop(shopId = 'oku') {
   const existing = db.prepare('SELECT access_token, shop_cipher FROM shops WHERE id = ?').get(shopId);
   if (existing?.access_token && existing?.shop_cipher) return false;
@@ -1848,6 +2235,7 @@ function scheduleShopSync() {
 }
 
 let syncTimer = null;
+let agentTimer = null;
 const wecomNotificationDedupe = new Map();
 
 function shouldSkipWecomNotification(key, windowMs = 60000) {
@@ -1864,6 +2252,48 @@ function shouldSkipWecomNotification(key, windowMs = 60000) {
 function startShopSyncScheduler() {
   if (syncTimer) return;
   scheduleShopSync();
+}
+
+function agentScheduleDelay() {
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(Number(process.env.TK_AGENT_DAILY_HOUR || 8), Number(process.env.TK_AGENT_DAILY_MINUTE || 30), 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  return { next, ms: next.getTime() - now.getTime() };
+}
+
+async function runScheduledAgent() {
+  const workflow = getWorkflow();
+  const config = workflow.config;
+  // Auto-run is opt-in because it can send external TikTok messages.
+  if (String(process.env.TK_AGENT_AUTORUN || '').toLowerCase() !== 'true') return;
+  try {
+    await syncSamplesForShops('schedule-agent-samples', config.shop || 'all', 0);
+    const inboxShops = db.prepare(`SELECT * FROM shops ${config.shop && config.shop !== 'all' ? 'WHERE id = ?' : ''} ORDER BY id`)
+      .all(...(config.shop && config.shop !== 'all' ? [config.shop] : []));
+    for (const shop of inboxShops) {
+      try { await syncInboxForShop(shop, workflow); }
+      catch (error) { writeSyncLog(shop.id, 'schedule-agent-inbox', 'failed', error.message || '收件箱同步失败'); }
+    }
+    const queued = generateWorkflowQueue(workflow.id);
+    const executed = await executeWorkflow(workflow.id);
+    writeSyncLog(null, 'schedule-agent', 'success', `Agent巡检完成：邀约队列 ${queued.invite_count}，审核报告 ${queued.sample_count}，执行邀约 ${executed.invite_results.length}`);
+  } catch (error) {
+    writeSyncLog(null, 'schedule-agent', 'failed', error.message || 'Agent定时任务失败');
+    console.error('[agent] scheduled run failed:', error);
+  }
+}
+
+function startAgentScheduler() {
+  if (agentTimer) return;
+  const schedule = () => {
+    const { next, ms } = agentScheduleDelay();
+    console.log(`[agent] next workflow run at ${next.toLocaleString()}`);
+    agentTimer = setTimeout(async () => {
+      try { await runScheduledAgent(); } finally { agentTimer = null; schedule(); }
+    }, ms);
+  };
+  schedule();
 }
 
 // ════════════════════════════════════════
@@ -1939,6 +2369,52 @@ app.get('/api/agent/workflows', (req, res) => {
   res.json({ workflows: workflowList() });
 });
 
+app.get('/api/agent/workflows/:id/preview', (req, res) => {
+  try {
+    const workflow = getWorkflow(Number(req.params.id || 0));
+    const config = workflow.config;
+    const template = db.prepare('SELECT id, name, type, content FROM invitation_templates WHERE id = ? AND active = 1').get(Number(config.template_id || 0));
+    const candidateQuery = {
+      source: config.source, shop: config.shop, min_star: config.min_star, min_fans: config.min_fans,
+      min_fulfillment: config.min_fulfillment, min_avg_view: config.min_avg_view,
+      min_orders: config.min_orders, category: config.category,
+    };
+    const candidates = listInviteCandidates(candidateQuery);
+    const sampleArgs = config.shop && config.shop !== 'all' ? [config.shop] : [];
+    const sampleRows = db.prepare(`
+      SELECT COUNT(*) AS total,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved
+      FROM samples
+      WHERE library_added_at IS NULL AND status IN ('pending','approved')
+        AND (bd_id IS NULL OR status = 'pending')
+        ${config.shop && config.shop !== 'all' ? 'AND shop_id = ?' : ''}
+    `).get(...sampleArgs);
+    const missing = [];
+    if (!template) missing.push('未配置有效邀约模板');
+    if (!config.shop || config.shop === 'all') missing.push('建议将工作流绑定到具体店铺');
+    if (!config.bd_ids?.length) missing.push('未配置参与分配的 BD');
+    if (config.source === 'shop_pool' && inviteCandidateDiagnostics(candidateQuery).pool.requires_sync) missing.push('联盟中心达人池或近30天销量尚未同步');
+    res.json({
+      workflow: { id: workflow.id, name: workflow.name, config },
+      safe_mode: config.send_mode !== 'auto' && config.sample_approval_mode !== 'auto',
+      template,
+      stages: [
+        { key: 'sync', name: '数据同步', action: '先执行店铺/联盟达人同步', ready: true },
+        { key: 'invite_candidates', name: '筛选邀约达人', count: candidates.length, ready: candidates.length > 0 },
+        { key: 'invite_review', name: '邀约任务确认', action: '生成队列后确认任务', ready: true },
+        { key: 'invite_execute', name: '执行邀约', action: config.send_mode === 'auto' ? '将调用 TikTok API' : '仅生成待发送记录，不外发消息', ready: true },
+        { key: 'sample_audit', name: '样品申请审核', count: Number(sampleRows?.total || 0), ready: true },
+        { key: 'bd_assign', name: 'BD 分配', action: '审核通过后自动分配', ready: Boolean(config.bd_ids?.length) },
+      ],
+      blockers: missing,
+      next: missing.length ? '补齐阻塞项后再生成队列' : '可以生成队列；当前配置可安全试跑',
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '读取工作流预检失败' });
+  }
+});
+
 app.post('/api/agent/workflows', (req, res) => {
   try {
     const workflow = saveWorkflow(req.body || {}, true);
@@ -2000,8 +2476,15 @@ app.post('/api/agent/workflow/tasks/:id/confirm', (req, res) => {
     const status = decision === 'reject' ? 'admin_rejected' : 'admin_approved';
     const task = db.prepare('SELECT id FROM agent_workflow_tasks WHERE id = ?').get(id);
     if (!task) return res.status(404).json({ error: '工作流任务不存在' });
+    const taskRow = db.prepare('SELECT workflow_id, sample_id FROM agent_workflow_tasks WHERE id = ?').get(id);
     db.prepare('UPDATE agent_workflow_tasks SET status = ?, updated_at = ? WHERE id = ?').run(status, nowText(), id);
-    const taskRow = db.prepare('SELECT workflow_id FROM agent_workflow_tasks WHERE id = ?').get(id);
+    recordLearningEvent({
+      workflowId: taskRow?.workflow_id,
+      eventType: 'admin_decision',
+      sampleId: taskRow?.sample_id,
+      outcome: decision,
+      lesson: decision === 'approve' ? '人工确认通过，可作为后续相似达人审核的正向样本' : '人工拒绝，后续相似条件应提高风险提示',
+    });
     const workflow = getWorkflow(taskRow?.workflow_id || null);
     res.json({ success: true, tasks: workflowTasks(workflow.id) });
   } catch (error) {
@@ -2040,6 +2523,15 @@ app.post('/api/agent/workflow/tasks/:id/reply', (req, res) => {
         config_snapshot: workflow.config,
       });
     }
+    recordLearningEvent({
+      workflowId: task.workflow_id,
+      eventType: 'creator_reply',
+      uid: task.uid,
+      sampleId: task.sample_id,
+      input: { reply_text: replyText, audit },
+      outcome: audit.recommendation,
+      lesson: audit.reason,
+    });
     res.json({ success: true, tasks: workflowTasks(workflow.id), audit });
   } catch (error) {
     res.status(400).json({ error: error.message || '录入达人回复失败' });
@@ -2065,6 +2557,165 @@ app.post('/api/agent/workflows/:id/execute', async (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message || '执行工作流失败' });
   }
+});
+
+app.get('/api/agent/learning', (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+  const rows = db.prepare(`
+    SELECT * FROM agent_learning_events
+    ORDER BY id DESC LIMIT ?
+  `).all(limit);
+  res.json(rows.map((row) => ({ ...row, input: parseJsonObject(row.input_json, {}) })));
+});
+
+app.get('/api/agent/reports', (req, res) => {
+  const workflowId = Number(req.query.workflow_id || getWorkflow().id);
+  const rows = db.prepare(`
+    SELECT id, workflow_id, task_type, status, uid, creator_name, creator_handle, sample_id,
+      score, recommendation, reason, payload_json, created_at, updated_at
+    FROM agent_workflow_tasks
+    WHERE workflow_id = ? AND task_type = 'sample_audit'
+    ORDER BY updated_at DESC, id DESC LIMIT 200
+  `).all(workflowId);
+  res.json(rows.map((row) => ({ ...row, payload: parseJsonObject(row.payload_json, {}) })));
+});
+
+app.get('/api/agent/inbox', (req, res) => {
+  const shop = String(req.query.shop || 'all');
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 80)));
+  const rows = db.prepare(`
+    SELECT * FROM agent_inbox_messages
+    ${shop !== 'all' ? 'WHERE shop_id = ?' : ''}
+    ORDER BY COALESCE(received_at, created_at) DESC, id DESC LIMIT ?
+  `).all(...(shop !== 'all' ? [shop, limit] : [limit]));
+  res.json(rows);
+});
+
+app.post('/api/agent/inbox/sync', async (req, res) => {
+  try {
+    const shopId = String(req.body?.shop || req.query.shop || 'all');
+    const workflow = getWorkflow(Number(req.body?.workflow_id || req.query.workflow_id || 0));
+    const shops = db.prepare(`SELECT * FROM shops ${shopId !== 'all' ? 'WHERE id = ?' : ''} ORDER BY id`)
+      .all(...(shopId !== 'all' ? [shopId] : []));
+    const results = [];
+    for (const shop of shops) {
+      try {
+        results.push(await syncInboxForShop(shop, workflow));
+      } catch (error) {
+        results.push({ shop_id: shop.id, status: 'failed', message: error.message || '收件箱同步失败' });
+      }
+    }
+    res.json({ success: results.every((item) => item.status !== 'failed'), workflow_id: workflow.id, results });
+  } catch (error) {
+    res.status(500).json({ error: error.message || '收件箱同步失败' });
+  }
+});
+
+app.post('/api/agent/inbox/:id/reply', async (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM agent_inbox_messages WHERE id = ?').get(Number(req.params.id || 0));
+    if (!row) return res.status(404).json({ error: '收件消息不存在' });
+    const shop = db.prepare('SELECT * FROM shops WHERE id = ?').get(row.shop_id);
+    const text = String(req.body?.reply_text || '').trim();
+    if (!text) return res.status(400).json({ error: '请填写回复内容' });
+    const response = await sendTikTokImMessage({ shop, conversationId: row.conversation_id, body: { msg_type: 'TEXT', content: JSON.stringify({ content: text }) } });
+    db.prepare('UPDATE agent_inbox_messages SET reply_status = \'sent\', reply_text = ?, processed_at = ? WHERE id = ?').run(text, nowText(), row.id);
+    recordLearningEvent({ workflowId: getWorkflow().id, eventType: 'inbox_manual_reply', uid: row.uid, input: { message: row.message_text, reply: text }, outcome: 'sent', lesson: '人工回复已发送，可作为后续话术学习样本' });
+    res.json({ success: true, response });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '回复达人消息失败' });
+  }
+});
+
+app.post('/api/webhooks/tiktok/messages', async (req, res) => {
+  try {
+    const expected = String(process.env.TK_IM_WEBHOOK_SECRET || '').trim();
+    const provided = String(req.headers['x-tiktok-webhook-secret'] || req.headers['x-webhook-secret'] || '').trim();
+    if (expected && expected !== provided) return res.status(401).json({ error: 'Webhook 签名校验失败' });
+    const result = await ingestInboxEvent(req.body || {}, Number(req.query.workflow_id || 0) || null);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message || 'TikTok 消息 Webhook 处理失败' });
+  }
+});
+
+app.get('/api/agent/optimization', (req, res) => {
+  const workflowId = Number(req.query.workflow_id || getWorkflow().id);
+  const report = buildOptimizationReport(workflowId);
+  const suggestions = db.prepare(`
+    SELECT * FROM agent_optimization_suggestions
+    WHERE workflow_id = ? ORDER BY id DESC LIMIT 100
+  `).all(workflowId).map((row) => ({ ...row, proposal: parseJsonObject(row.proposal_json, {}) }));
+  res.json({ ...report, suggestions });
+});
+
+app.post('/api/agent/optimization/generate', (req, res) => {
+  try {
+    const workflowId = Number(req.body?.workflow_id || getWorkflow().id);
+    const report = buildOptimizationReport(workflowId);
+    const ids = saveOptimizationSuggestions(workflowId, report.suggestions);
+    res.json({ success: true, ...report, created_ids: ids });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '生成优化建议失败' });
+  }
+});
+
+app.post('/api/agent/optimization/:id/decision', (req, res) => {
+  const id = Number(req.params.id || 0);
+  const decision = String(req.body?.decision || 'dismiss') === 'approve' ? 'approved' : 'dismissed';
+  const suggestion = db.prepare('SELECT * FROM agent_optimization_suggestions WHERE id = ?').get(id);
+  if (!suggestion) return res.status(404).json({ error: '优化建议不存在' });
+  db.prepare('UPDATE agent_optimization_suggestions SET status = ?, applied_at = CASE WHEN ? = \'approved\' THEN ? ELSE applied_at END WHERE id = ?')
+    .run(decision, decision, nowText(), id);
+  recordLearningEvent({
+    workflowId: suggestion.workflow_id,
+    eventType: 'optimization_decision',
+    input: { suggestion_id: id, title: suggestion.title },
+    outcome: decision,
+    lesson: decision === 'approved' ? '优化建议已人工确认，进入后续实施队列' : '优化建议被忽略，保留现有工作流',
+  });
+  res.json({ success: true, id, status: decision });
+});
+
+app.get('/api/agent/experiments', (req, res) => {
+  const rows = db.prepare('SELECT * FROM agent_experiments ORDER BY id DESC').all();
+  res.json(rows.map((row) => ({ ...row, report: experimentReport(row.id) })));
+});
+
+app.post('/api/agent/experiments', (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    const variants = Array.isArray(req.body?.variants) ? req.body.variants : [];
+    if (!name || variants.length < 2) return res.status(400).json({ error: '实验需要名称和至少两个话术版本' });
+    const minSamples = Math.max(5, Number(req.body?.min_samples || 30));
+    const experiment = db.prepare('INSERT INTO agent_experiments (name, status, min_samples, updated_at) VALUES (?, \'draft\', ?, ?)')
+      .run(name, minSamples, nowText());
+    const experimentId = Number(experiment.lastInsertRowid);
+    const insert = db.prepare('INSERT INTO agent_experiment_variants (experiment_id, name, template_id, weight) VALUES (?, ?, ?, ?)');
+    variants.forEach((variant, index) => {
+      const templateId = Number(variant.template_id || 0);
+      if (!templateId) throw new Error(`第 ${index + 1} 个版本缺少模板`);
+      insert.run(experimentId, String(variant.name || `版本 ${String.fromCharCode(65 + index)}`), templateId, Math.max(1, Number(variant.weight || 50)));
+    });
+    res.json({ success: true, ...experimentReport(experimentId) });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '创建话术实验失败' });
+  }
+});
+
+app.post('/api/agent/experiments/:id/status', (req, res) => {
+  const id = Number(req.params.id || 0);
+  const status = ['draft', 'running', 'paused', 'completed'].includes(String(req.body?.status)) ? String(req.body.status) : 'draft';
+  const experiment = db.prepare('SELECT id FROM agent_experiments WHERE id = ?').get(id);
+  if (!experiment) return res.status(404).json({ error: '话术实验不存在' });
+  db.prepare('UPDATE agent_experiments SET status = ?, updated_at = ? WHERE id = ?').run(status, nowText(), id);
+  res.json({ success: true, ...experimentReport(id) });
+});
+
+app.get('/api/agent/experiments/:id/report', (req, res) => {
+  const report = experimentReport(Number(req.params.id || 0));
+  if (!report) return res.status(404).json({ error: '话术实验不存在' });
+  res.json(report);
 });
 
 app.get('/api/invitations/templates', (req, res) => {
@@ -3534,6 +4185,7 @@ async function handleTikTokOAuthCallback(req, res) {
 app.get('/api/tiktok/oauth/callback', handleTikTokOAuthCallback);
 app.get('/tk/api/tiktok/oauth/callback', handleTikTokOAuthCallback);
 app.startShopSyncScheduler = startShopSyncScheduler;
+app.startAgentScheduler = startAgentScheduler;
 
 module.exports = app;
 

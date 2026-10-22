@@ -1455,6 +1455,7 @@ function workflowPayloadFromForm() {
       min_orders: Number(document.getElementById('workflow-min-orders')?.value || 0),
       category: document.getElementById('workflow-category')?.value.trim() || '',
       template_id: Number(document.getElementById('workflow-template')?.value || 0),
+      experiment_id: Number(document.getElementById('workflow-experiment')?.value || 0) || null,
       product_ids: selectedWorkflowProductIds(),
       commission_rate: Number(document.getElementById('workflow-commission')?.value || 0),
       send_mode: document.getElementById('workflow-send-mode')?.value || 'manual',
@@ -1507,6 +1508,7 @@ function workflowConditionLabel(task) {
 function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 'create') {
   const shopOptions = SHOPS.map(s => `<option value="${s.id}" ${String(config.shop || curStore) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
   const templateOptions = INVITE_TEMPLATES.map(t => `<option value="${t.id}" ${Number(config.template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)} · ${t.type === 'collab' ? '合作邀约' : '私信'}</option>`).join('');
+  const experimentOptions = (window.AGENT_EXPERIMENTS || []).map(e => `<option value="${e.id}" ${Number(config.experiment_id) === Number(e.id) ? 'selected' : ''}>${esc(e.name)} · ${e.status === 'running' ? '运行中' : e.status}</option>`).join('');
   const selectedProducts = new Set((config.product_ids || []).map(Number));
   const selectedBds = new Set((config.bd_ids || []).map(Number));
   const bdOptions = BD_LIST.map(b => `
@@ -1524,6 +1526,7 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
       <div class="form-row"><label class="form-label">邀约模板</label><select class="form-input" id="workflow-template">${templateOptions}</select></div>
       <div class="form-row"><label class="form-label">发送方式</label><select class="form-input" id="workflow-send-mode"><option value="manual" ${config.send_mode !== 'auto' ? 'selected' : ''}>手动邀约</option><option value="auto" ${config.send_mode === 'auto' ? 'selected' : ''}>自动发送</option></select></div>
     </div>
+    <div class="form-row"><label class="form-label">邀约话术 A/B 实验</label><select class="form-input" id="workflow-experiment"><option value="0">不启用</option>${experimentOptions}</select><div class="module-meta">仅选择“运行中”的实验才会分流；同一 UID 始终使用同一版本。</div></div>
     <div class="form-row-2">
       <div class="form-row"><label class="form-label">每位达人最多邀约次数</label><input class="form-input" id="workflow-invite-max-per-creator" type="number" min="1" value="${esc(config.invite_max_per_creator ?? 1)}"></div>
       <div class="form-row"><label class="form-label">每日邀约次数上限</label><input class="form-input" id="workflow-invite-daily-limit" type="number" min="1" value="${esc(config.invite_daily_limit ?? 50)}"></div>
@@ -1624,6 +1627,7 @@ async function openWorkflowModal() {
       api('/api/bd').catch(() => []),
     ]);
   }
+  window.AGENT_EXPERIMENTS = await api('/api/agent/experiments').catch(() => []);
   const config = workflowConfig();
   WORKFLOW_PRODUCT_SHOP = config.shop || (curStore === 'all' ? (SHOPS[0]?.id || '') : curStore);
   INVITE_PRODUCTS = WORKFLOW_PRODUCT_SHOP ? await api(`/api/products?shop=${WORKFLOW_PRODUCT_SHOP}`).catch(() => []) : [];
@@ -1645,6 +1649,7 @@ async function openEditWorkflowModal(id) {
     productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
     api('/api/bd').catch(() => []),
   ]);
+  window.AGENT_EXPERIMENTS = await api('/api/agent/experiments').catch(() => []);
   WORKFLOW_PRODUCT_SHOP = productShop;
   WORKFLOW_PRODUCT_SELECTED = new Set((workflow.config?.product_ids || []).map(String));
   WORKFLOW_BD_SELECTED = new Set((workflow.config?.bd_ids || []).map(String));
@@ -1667,6 +1672,7 @@ async function saveWorkflowFromModal() {
 }
 
 function automationWorkflowBlocks(workflow, tasks = []) {
+  window.__WORKFLOW_TASKS = tasks;
   const inviteCount = tasks.filter(t => t.task_type === 'invite').length;
   const awaitingReply = tasks.filter(t => t.task_type === 'sample_message' && t.status === 'awaiting_reply').length;
   const review = tasks.filter(t => t.task_type === 'sample_audit' && t.status === 'agent_review').length;
@@ -1695,6 +1701,7 @@ function workflowEmptyHint(workflow, config = {}, diagnostics = null) {
 }
 
 function workflowTaskRows(tasks) {
+  window.__WORKFLOW_TASKS = tasks;
   return tasks.map(t => `
     <tr>
       <td>${workflowTaskTypeLabel(t.task_type)}</td>
@@ -1706,10 +1713,26 @@ function workflowTaskRows(tasks) {
       <td>
         ${['agent_review','admin_approved'].includes(t.status) ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${t.id}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${t.id}, 'reject')">拒绝</button></div>` : ''}
         ${t.task_type === 'sample_message' && t.status === 'awaiting_reply' ? `<button class="btn btn-outline" onclick="recordWorkflowReply(${t.id})">录入回复</button>` : ''}
+        ${t.task_type === 'sample_audit' ? `<button class="btn btn-outline" onclick="viewWorkflowReport(${t.id})">查看分析</button>` : ''}
         ${t.invitation_record_id ? `<div class="agent-load">邀约#${t.invitation_record_id}</div>` : ''}
         ${t.assigned_bd_name ? `<div class="agent-load">BD：${esc(t.assigned_bd_name)}</div>` : ''}
       </td>
     </tr>`).join('');
+}
+
+function viewWorkflowReport(id) {
+  const task = (AGENT_WORKFLOW?.tasks || []).find(item => Number(item.id) === Number(id)) ||
+    (window.__WORKFLOW_TASKS || []).find(item => Number(item.id) === Number(id));
+  const report = task?.payload?.report;
+  if (!report) return toast('暂无分析报告，请重新生成工作流队列');
+  const data = report.basic_data || {};
+  alert([
+    `达人：${data.name || '-'}（${data.handle || data.uid || '-'}）`,
+    `粉丝：${data.fans || 0}｜类目：${data.category || '-'}`,
+    `均播放：${data.avg_view || 0}｜近30天销量：${data.orders_30d || 0}｜星级：${data.star || 0}`,
+    `建议：${report.decision || '-'}`,
+    `理由：${report.reason || task.reason || '-'}`,
+  ].join('\n'));
 }
 
 async function renderAutomationCenter() {
@@ -1735,6 +1758,12 @@ async function renderAutomationCenter() {
   const selectedDetail = selectedWorkflow
     ? await api(`/api/agent/workflow?id=${selectedWorkflow.id}`).catch(() => null)
     : null;
+  const optimization = selectedWorkflow
+    ? await api(`/api/agent/optimization?workflow_id=${selectedWorkflow.id}`).catch(() => null)
+    : null;
+  const inboxMessages = selectedWorkflow
+    ? await api(`/api/agent/inbox?shop=${selectedWorkflow.config?.shop || 'all'}&limit=20`).catch(() => [])
+    : [];
   const selectedConfig = selectedWorkflow?.config || {};
   const selectedDiagnostics = selectedDetail?.diagnostics || null;
   const selectedTasks = selectedWorkflow ? (selectedDetail?.tasks || []).map(t => ({ ...t, workflow_name: selectedWorkflow?.name || '' })) : [];
@@ -1769,12 +1798,62 @@ async function renderAutomationCenter() {
   box.innerHTML = `
     <div style="margin-bottom:12px"><button class="btn btn-outline" onclick="backToWorkflowList()">返回工作流清单</button></div>
     ${automationWorkflowBlocks(selectedWorkflow, selectedTasks)}
+    ${inboxPanel(inboxMessages, selectedWorkflow.id)}
+    ${optimizationPanel(optimization, selectedWorkflow.id)}
     <div class="module-panel">
       <h3>${esc(selectedWorkflow.name)} 自动化工作状态</h3>
       <div class="module-meta" style="margin-bottom:12px">邀约达人 ${inviteTasks.length} 位 · 确认消息 ${messageTasks.length} 条 · 待回复 ${messageTasks.filter(t => t.status === 'awaiting_reply').length} 条 · 审核待确认 ${sampleTasks.filter(t => t.status === 'agent_review').length} 条 · 已确认 ${selectedTasks.filter(t => t.status === 'admin_approved').length} 条 · 已执行 ${selectedTasks.filter(t => t.status === 'executed').length} 条</div>
       ${emptyInviteHint || sendHint}
       <div class="table-wrap"><table><thead><tr><th>类型</th><th>达人</th><th>店铺</th><th>条件审核</th><th>Agent结果</th><th>状态</th><th>操作</th></tr></thead><tbody>${workflowTaskRows(pageMeta.items) || '<tr><td colspan="7"><div class="empty-state">暂无工作流任务</div></td></tr>'}</tbody></table><div class="pager">${pagerHtml('automation', pageMeta)}</div></div>
     </div>`;
+}
+
+function inboxPanel(messages, workflowId) {
+  const rows = (messages || []).slice(0, 8);
+  return `<div class="module-panel" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px"><div><h3>达人消息收件箱</h3><div class="module-meta">同步消息后，Agent 会识别意向并生成回复任务；默认需要人工确认。</div></div><button class="btn btn-outline" onclick="syncAgentInbox(${workflowId})">同步消息</button></div>
+    <div class="table-wrap" style="margin-top:10px"><table><thead><tr><th>时间</th><th>达人</th><th>消息</th><th>判断</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(row => `<tr><td>${esc(row.received_at || row.created_at || '-')}</td><td>${esc(row.creator_name || row.uid || row.creator_open_id || '-')}</td><td>${esc(row.message_text || '-')}</td><td>${esc(row.classification || '待识别')}</td><td>${esc(row.reply_status || 'not_sent')}</td><td>${row.reply_status !== 'sent' ? `<button class="btn btn-outline" onclick="replyAgentInbox(${row.id})">人工回复</button>` : '-'}</td></tr>`).join('') || '<tr><td colspan="6">暂无新消息</td></tr>'}</tbody></table></div>
+  </div>`;
+}
+
+async function syncAgentInbox(workflowId) {
+  const result = await api('/api/agent/inbox/sync', { method: 'POST', body: JSON.stringify({ workflow_id: workflowId }) });
+  const received = (result.results || []).reduce((sum, row) => sum + Number(row.received || 0), 0);
+  toast(`消息同步完成：新增 ${received} 条`);
+  renderAutomationCenter();
+}
+
+async function replyAgentInbox(id) {
+  const text = prompt('请输入回复内容');
+  if (!text) return;
+  await api(`/api/agent/inbox/${id}/reply`, { method: 'POST', body: JSON.stringify({ reply_text: text }) });
+  toast('回复已发送并记录');
+  renderAutomationCenter();
+}
+
+function optimizationPanel(data, workflowId) {
+  if (!data) return '';
+  const m = data.metrics || {};
+  const items = (data.suggestions || []).slice(0, 5);
+  return `<div class="module-panel" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <div><h3>经验优化建议</h3><div class="module-meta">邀约 ${m.invitation_total || 0} · 已发送 ${m.sent || 0} · 有效合作 ${m.fulfilled || 0} · 已发布 ${m.published || 0}</div></div>
+      <button class="btn btn-outline" onclick="generateOptimization(${workflowId})">重新分析</button>
+    </div>
+    <div style="margin-top:10px">${items.map(item => `<div class="empty-hint" style="margin:6px 0"><b>${esc(item.title)}</b>：${esc(item.reason)}<div style="margin-top:6px"><button class="abtn ok" onclick="decideOptimization(${item.id}, 'approve')">采纳</button><button class="abtn ng" onclick="decideOptimization(${item.id}, 'dismiss')">忽略</button></div></div>`).join('') || '<div class="module-meta" style="margin-top:10px">暂无建议，先运行一段时间积累数据。</div>'}</div>
+  </div>`;
+}
+
+async function generateOptimization(workflowId) {
+  await api('/api/agent/optimization/generate', { method: 'POST', body: JSON.stringify({ workflow_id: workflowId }) });
+  toast('经验分析已更新');
+  renderAutomationCenter();
+}
+
+async function decideOptimization(id, decision) {
+  await api(`/api/agent/optimization/${id}/decision`, { method: 'POST', body: JSON.stringify({ decision }) });
+  toast(decision === 'approve' ? '建议已采纳并进入实施记录' : '建议已忽略');
+  renderAutomationCenter();
 }
 
 function selectWorkflow(id) {
@@ -1858,6 +1937,7 @@ function workflowPanelHtml() {
       <td>
         ${['agent_review','admin_approved'].includes(t.status) ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${t.id}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${t.id}, 'reject')">拒绝</button></div>` : ''}
         ${t.task_type === 'sample_message' && t.status === 'awaiting_reply' ? `<button class="btn btn-outline" onclick="recordWorkflowReply(${t.id})">录入回复</button>` : ''}
+        ${t.task_type === 'sample_audit' ? `<button class="btn btn-outline" onclick="viewWorkflowReport(${t.id})">查看分析</button>` : ''}
         ${t.invitation_record_id ? `<div class="agent-load">邀约#${t.invitation_record_id}</div>` : ''}
         ${t.assigned_bd_name ? `<div class="agent-load">BD：${esc(t.assigned_bd_name)}</div>` : ''}
       </td>
