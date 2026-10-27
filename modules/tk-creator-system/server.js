@@ -1145,6 +1145,26 @@ function saveWorkflow(input = {}, createNew = false) {
   return getWorkflow(current.id);
 }
 
+function applyOptimizationProposal(suggestion) {
+  const workflowId = Number(suggestion?.workflow_id || 0);
+  const proposal = parseJsonObject(suggestion?.proposal_json, {});
+  if (!workflowId || !proposal.action) return { applied: false, reason: '优化建议缺少工作流或动作' };
+
+  // Only apply reversible threshold changes automatically. Copy and send-policy
+  // suggestions stay human-controlled because they can affect external messages.
+  if (proposal.action !== 'review_thresholds') {
+    return { applied: false, reason: '该建议需要人工在工作流设置中实施' };
+  }
+  const workflow = getWorkflow(workflowId);
+  const current = Number(workflow.config.min_fulfillment || 0);
+  const next = Math.max(current, Math.min(100, Number(proposal.min_fulfillment || 0)));
+  if (!next || next <= current) {
+    return { applied: false, reason: '建议阈值未高于当前阈值' };
+  }
+  const updated = saveWorkflow({ id: workflowId, config: { min_fulfillment: next } });
+  return { applied: true, changes: { min_fulfillment: { from: current, to: next } }, workflow: updated };
+}
+
 function auditByWorkflowConditions(item, config) {
   const checks = [];
   const category = String(config.category || '').trim().toLowerCase();
@@ -2665,16 +2685,19 @@ app.post('/api/agent/optimization/:id/decision', (req, res) => {
   const decision = String(req.body?.decision || 'dismiss') === 'approve' ? 'approved' : 'dismissed';
   const suggestion = db.prepare('SELECT * FROM agent_optimization_suggestions WHERE id = ?').get(id);
   if (!suggestion) return res.status(404).json({ error: '优化建议不存在' });
+  if (suggestion.status !== 'pending') return res.status(400).json({ error: '该优化建议已经处理过' });
+  let application = { applied: false, reason: '建议已记录，等待人工实施' };
+  if (decision === 'approved') application = applyOptimizationProposal(suggestion);
   db.prepare('UPDATE agent_optimization_suggestions SET status = ?, applied_at = CASE WHEN ? = \'approved\' THEN ? ELSE applied_at END WHERE id = ?')
     .run(decision, decision, nowText(), id);
   recordLearningEvent({
     workflowId: suggestion.workflow_id,
     eventType: 'optimization_decision',
     input: { suggestion_id: id, title: suggestion.title },
-    outcome: decision,
-    lesson: decision === 'approved' ? '优化建议已人工确认，进入后续实施队列' : '优化建议被忽略，保留现有工作流',
+    outcome: application.applied ? 'applied' : decision,
+    lesson: application.applied ? `优化建议已应用：${JSON.stringify(application.changes)}` : (decision === 'approved' ? application.reason : '优化建议被忽略，保留现有工作流'),
   });
-  res.json({ success: true, id, status: decision });
+  res.json({ success: true, id, status: decision, application });
 });
 
 app.get('/api/agent/experiments', (req, res) => {

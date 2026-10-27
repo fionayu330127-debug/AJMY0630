@@ -1851,8 +1851,11 @@ async function generateOptimization(workflowId) {
 }
 
 async function decideOptimization(id, decision) {
-  await api(`/api/agent/optimization/${id}/decision`, { method: 'POST', body: JSON.stringify({ decision }) });
-  toast(decision === 'approve' ? '建议已采纳并进入实施记录' : '建议已忽略');
+  const result = await api(`/api/agent/optimization/${id}/decision`, { method: 'POST', body: JSON.stringify({ decision }) });
+  const applied = result.application?.applied;
+  toast(decision === 'approve'
+    ? (applied ? '建议已采纳，审核阈值已更新' : `建议已采纳：${result.application?.reason || '请在工作流设置中实施'}`)
+    : '建议已忽略');
   renderAutomationCenter();
 }
 
