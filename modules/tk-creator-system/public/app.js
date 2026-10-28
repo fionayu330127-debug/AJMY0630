@@ -1365,6 +1365,7 @@ function agentTemplateManagerHtml() {
         <div class="form-row"><label class="form-label">模板名称</label><input class="form-input" id="agent-template-name" placeholder="例如 初次私信 / 样品合作邀约"></div>
         <div class="form-row"><label class="form-label">模板类型</label><select class="form-input" id="agent-template-type" onchange="onAgentTemplateTypeChange()"><option value="dm">私信消息</option><option value="collab">合作邀约</option></select></div>
       </div>
+      <div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="agent-template-commission" type="number" min="0" max="100" step="0.01" placeholder="合作邀约填写，任务创建时自动读取"></div>
       <div class="form-row" id="agent-template-product-row" style="display:none"><label class="form-label">默认合作产品</label><select class="form-input" id="agent-template-product">${productOptions}</select></div>
       <div class="form-row"><label class="form-label">内容变量：{{creator_name}} {{creator_handle}} {{shop_name}} {{product_name}} {{product_link}} {{sample_apply_link}}</label><textarea class="bd-note-ta" id="agent-template-content" style="min-height:100px" placeholder="输入模板内容"></textarea></div>
       <input type="hidden" id="agent-template-id">
@@ -1382,7 +1383,7 @@ function onAgentTemplateTypeChange() {
 }
 
 function clearInvitationTemplateForm() {
-  ['agent-template-id','agent-template-name','agent-template-content'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  ['agent-template-id','agent-template-name','agent-template-content','agent-template-commission'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   const type = document.getElementById('agent-template-type');
   if (type) type.value = 'dm';
   const product = document.getElementById('agent-template-product');
@@ -1397,6 +1398,7 @@ function editInvitationTemplate(id) {
   document.getElementById('agent-template-name').value = tpl.name || '';
   document.getElementById('agent-template-type').value = tpl.type || 'dm';
   document.getElementById('agent-template-content').value = tpl.content || '';
+  document.getElementById('agent-template-commission').value = tpl.commission_rate ?? '';
   const product = document.getElementById('agent-template-product');
   if (product) product.value = tpl.product_id || '';
   onAgentTemplateTypeChange();
@@ -1408,6 +1410,7 @@ async function saveInvitationTemplate() {
     name: document.getElementById('agent-template-name')?.value.trim() || '',
     type: document.getElementById('agent-template-type')?.value || 'dm',
     product_id: document.getElementById('agent-template-product')?.value || null,
+    commission_rate: document.getElementById('agent-template-commission')?.value || '',
     channel: 'im',
     content: document.getElementById('agent-template-content')?.value.trim() || '',
   };
@@ -1444,38 +1447,14 @@ function selectedWorkflowBdIds() {
 function workflowPayloadFromForm() {
   const bdIds = selectedWorkflowBdIds();
   const selectedProductIds = selectedWorkflowProductIds();
-  const rulesText = document.getElementById('workflow-product-rules')?.value.trim() || '';
-  let productRules = {};
-  if (rulesText) {
-    let rules;
-    try { rules = JSON.parse(rulesText); } catch (_) { throw new Error('商品审核指标模板不是有效 JSON'); }
-    selectedProductIds.forEach(id => { productRules[String(id)] = rules; });
-  }
   return {
-    name: document.getElementById('workflow-name')?.value.trim() || '默认自动化工作流',
+    name: AGENT_WORKFLOW?.workflow?.name || `自动邀约任务 ${new Date().toLocaleString()}`,
     config: {
-      source: document.getElementById('workflow-source')?.value || 'shop_pool',
       shop: document.getElementById('workflow-shop')?.value || curStore,
-      min_star: Number(document.getElementById('workflow-min-star')?.value || 0),
-      min_fans: Number(document.getElementById('workflow-min-fans')?.value || 0),
-      min_fulfillment: Number(document.getElementById('workflow-min-fulfillment')?.value || 0),
-      min_avg_view: Number(document.getElementById('workflow-min-avg-view')?.value || 0),
-      min_orders: Number(document.getElementById('workflow-min-orders')?.value || 0),
-      category: document.getElementById('workflow-category')?.value.trim() || '',
       template_id: Number(document.getElementById('workflow-template')?.value || 0),
-      experiment_id: Number(document.getElementById('workflow-experiment')?.value || 0) || null,
       product_ids: selectedProductIds,
-      product_audit_rules: productRules,
-      commission_rate: Number(document.getElementById('workflow-commission')?.value || 0),
-      send_mode: document.getElementById('workflow-send-mode')?.value || 'manual',
-      invite_max_per_creator: Number(document.getElementById('workflow-invite-max-per-creator')?.value || 1),
-      invite_daily_limit: Number(document.getElementById('workflow-invite-daily-limit')?.value || 50),
-      sample_approval_mode: document.getElementById('workflow-sample-approval')?.value || 'manual',
-      audit_min_score: Number(document.getElementById('workflow-audit-score')?.value || 70),
-      auto_approve_score: Number(document.getElementById('workflow-auto-score')?.value || 90),
-      bd_ids: bdIds,
-      assign_mode: bdIds.length > 1 ? 'round_robin' : 'least_load',
-      auto_reply_template: document.getElementById('workflow-reply-template')?.value.trim() || '',
+      score_model: 'creator_table_v1',
+      audit_min_score: Number(document.getElementById('workflow-score-threshold')?.value || 70),
     },
   };
 }
@@ -1569,6 +1548,20 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
     <div class="form-row"><label class="form-label">商品审核指标模板（JSON）</label><textarea class="bd-note-ta" id="workflow-product-rules" style="min-height:130px;font-family:monospace">${esc(JSON.stringify(productRules, null, 2))}</textarea><div class="module-meta">保存后会记住到每个已选商品。支持 monthly_orders（月成交件数）、monthly_videos（月发布视频数）、followers、fulfillment_rate、avg_view、star；运算符 gte/gt/lte/lt/eq。weight 是权重，required=true 表示必需条件。</div></div>
     <div class="form-row"><label class="form-label">参与分配 BD</label><div class="workflow-bd-select"><button class="form-input workflow-bd-trigger" type="button" onclick="toggleWorkflowBdDropdown()"><span id="workflow-bd-summary">请选择负责 BD</span><span>▾</span></button><div class="workflow-bd-menu" id="workflow-bd-menu">${bdOptions || '<div class="empty-state">暂无 BD 成员</div>'}</div></div><div class="module-meta" id="workflow-bd-mode">选择多位 BD 后将按顺序轮流分配</div></div>
     <div class="form-row"><label class="form-label">自动回复模板</label><textarea class="bd-note-ta" id="workflow-reply-template" style="min-height:70px">${esc(config.auto_reply_template || '')}</textarea></div>
+    <button class="btn btn-primary" style="width:100%" onclick="saveWorkflowFromModal()">${mode === 'edit' ? '保存并重新运行工作流' : '保存并创建工作流'}</button>`;
+}
+
+// The creation dialog intentionally exposes only business inputs. Operational
+// limits remain server defaults and can be changed later without changing task setup.
+function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 'create') {
+  const shopOptions = SHOPS.map(s => `<option value="${s.id}" ${String(config.shop || curStore) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
+  const templateOptions = INVITE_TEMPLATES.filter(t => t.type === 'collab').map(t => `<option value="${t.id}" ${Number(config.template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+  const threshold = [60, 70, 80, 90].map(value => `<option value="${value}" ${Number(config.audit_min_score || 70) === value ? 'selected' : ''}>${value}分以上</option>`).join('');
+  return `
+    <div class="form-row"><label class="form-label">选择店铺</label><select class="form-input" id="workflow-shop" onchange="onWorkflowShopChange(this.value)">${shopOptions}</select></div>
+    <div class="form-row"><label class="form-label">选择产品</label><div class="workflow-product-pick"><button class="btn btn-outline" type="button" id="workflow-product-button" onclick="openWorkflowProductModal()">选择产品</button><span class="invite-product-summary" id="workflow-product-summary"></span></div></div>
+    <div class="form-row"><label class="form-label">达人分数值（审核要求）</label><select class="form-input" id="workflow-score-threshold">${threshold}</select><div class="module-meta">评分公式：30天成交件数/1000×40 + 30天视频平均播放量/5000×30 +（30天成交件数/30天发布视频个数）/10×30，单项最高不超过对应权重。</div></div>
+    <div class="form-row"><label class="form-label">选择邀约模板</label><select class="form-input" id="workflow-template">${templateOptions || '<option value="">暂无合作邀约模板</option>'}</select><div class="module-meta">佣金比例和邀约话术由模板决定，任务创建时不再单独设置。</div></div>
     <button class="btn btn-primary" style="width:100%" onclick="saveWorkflowFromModal()">${mode === 'edit' ? '保存并重新运行工作流' : '保存并创建工作流'}</button>`;
 }
 
@@ -1750,7 +1743,7 @@ function viewWorkflowReport(id) {
   alert([checks ? '指标明细：\n' + checks : '',
     `达人：${data.name || '-'}（${data.handle || data.uid || '-'}）`,
     `粉丝：${data.fans || 0}｜类目：${data.category || '-'}`,
-    `均播放：${data.avg_view || 0}｜近30天销量：${data.orders_30d || 0}｜星级：${data.star || 0}`,
+    `均播放：${data.avg_view || 0}｜月发布视频：${data.monthly_videos ?? '-'}｜近30天销量：${data.orders_30d || 0}｜星级：${data.star || 0}`,
     `建议：${report.decision || '-'}`,
     `理由：${report.reason || task.reason || '-'}`,
   ].join('\n'));

@@ -737,6 +737,12 @@ CREATE TABLE IF NOT EXISTS agent_product_audit_profiles (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS agent_template_terms (
+  template_id INTEGER PRIMARY KEY,
+  commission_rate REAL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 try { db.exec('ALTER TABLE shops ADD COLUMN last_sync_at TEXT'); } catch (_) {}
@@ -886,6 +892,7 @@ function rowMetricNumber(value) {
 
 function buildCreatorCandidate(row, source, shopMap = {}) {
   const shop = shopMap[row.shop_id] || {};
+  const profile = parseJsonObject(row.profile_json, {});
   return {
     source,
     uid: row.uid,
@@ -898,6 +905,8 @@ function buildCreatorCandidate(row, source, shopMap = {}) {
     category: row.category || '',
     fulfillment_rate: rowMetricNumber(row.fulfillment_rate),
     avg_view: rowMetricNumber(row.avg_view),
+    monthly_avg_view: rowMetricNumber(row.avg_view || profile.monthly_avg_view || profile.avg_view),
+    monthly_videos: profile.monthly_videos ?? profile.videos ?? profile.published_videos,
     star: Number(row.star || 0),
     total_orders: Number(row.total_orders || 0),
     sales_count_30d: row.sales_count_30d === undefined || row.sales_count_30d === null ? null : Number(row.sales_count_30d || 0),
@@ -1046,6 +1055,7 @@ function listInviteCandidates(query = {}) {
         ac.category,
         ac.fulfillment_rate,
         ac.avg_view,
+        ac.profile_json,
         ac.sales_count_30d,
         COALESCE(ac.sales_count_30d, 0) AS total_orders,
         ac.sales_amount_30d AS sales_amount,
@@ -1083,7 +1093,7 @@ function defaultWorkflowConfig() {
     source: 'shop_pool',
     shop: firstProduct?.shop_id || 'all',
     min_star: 0,
-    min_fans: 1000,
+    min_fans: 0,
     min_fulfillment: 0,
     min_avg_view: 0,
     min_orders: 0,
@@ -1096,6 +1106,7 @@ function defaultWorkflowConfig() {
     invite_daily_limit: 50,
     sample_approval_mode: 'manual',
     audit_min_score: 70,
+    score_model: 'creator_table_v1',
     auto_approve_score: 90,
     bd_ids: bdRows.map((row) => row.id),
     assign_mode: 'round_robin',
@@ -1137,6 +1148,15 @@ function saveWorkflow(input = {}, createNew = false) {
   config.invite_max_per_creator = Math.max(1, Number(config.invite_max_per_creator || 1));
   config.invite_daily_limit = Math.max(1, Number(config.invite_daily_limit || 50));
   config.audit_min_score = Number(config.audit_min_score || 70);
+  config.score_model = config.score_model === 'creator_table_v1' ? 'creator_table_v1' : 'creator_table_v1';
+  if (config.score_model === 'creator_table_v1') {
+    config.min_star = 0;
+    config.min_fans = 0;
+    config.min_fulfillment = 0;
+    config.min_avg_view = 0;
+    config.min_orders = 0;
+    config.category = '';
+  }
   config.auto_approve_score = Number(config.auto_approve_score || 90);
   config.experiment_id = config.experiment_id ? Number(config.experiment_id) : null;
   config.send_mode = config.send_mode === 'auto' ? 'auto' : 'manual';
@@ -1357,16 +1377,53 @@ function auditByWorkflowConditions(item, config, customRules = null) {
 }
 
 function agentScoreCandidate(item, config) {
-  return auditByWorkflowConditions(item, config, productAuditRules(item.product_id || config.product_ids?.[0], config));
+  return config.score_model === 'creator_table_v1'
+    ? scoreCreatorByTable(item, config)
+    : auditByWorkflowConditions(item, config, productAuditRules(item.product_id || config.product_ids?.[0], config));
 }
 
 function agentScoreSample(sample, config) {
+  if (config.score_model === 'creator_table_v1') return scoreCreatorByTable({
+    ...sample,
+    total_orders: sample.total_orders ?? sample.sales_count ?? 0,
+    monthly_videos: sample.monthly_videos ?? sample.videos,
+  }, config);
   return auditByWorkflowConditions({
     ...sample,
     avg_view: rowMetricNumber(sample.avg_view),
     total_orders: sample.total_orders ?? sample.sales_count ?? 0,
     monthly_videos: sample.monthly_videos ?? sample.videos ?? 0,
   }, config, productAuditRules(sample.product_id, config));
+}
+
+function scoreCreatorByTable(item, config) {
+  const orders = Number(item.monthly_orders ?? item.total_orders ?? item.sales_count_30d ?? item.sales_count ?? 0);
+  const avgView = rowMetricNumber(item.monthly_avg_view ?? item.avg_view);
+  const videosValue = item.monthly_videos ?? item.videos ?? item.published_videos;
+  const videosAvailable = videosValue !== undefined && videosValue !== null && videosValue !== '';
+  const videos = Number(videosValue || 0);
+  const ratio = videosAvailable && videos > 0 ? orders / videos : null;
+  const checks = [
+    { name: '30天成交件数', metric: 'monthly_orders', actual: orders, base: 1000, weight: 40, score: Math.min(40, orders / 1000 * 40), pass: orders > 0 },
+    { name: '30天视频平均播放量', metric: 'monthly_avg_view', actual: avgView, base: 5000, weight: 30, score: Math.min(30, avgView / 5000 * 30), pass: avgView > 0 },
+    { name: '30天成交件数/30天发布视频个数', metric: 'orders_per_video', actual: ratio, base: 10, weight: 30, score: ratio === null ? 0 : Math.min(30, ratio / 10 * 30), pass: ratio !== null },
+  ].map((check) => ({
+    ...check,
+    available: check.metric === 'orders_per_video' ? videosAvailable : true,
+    detail: check.metric === 'orders_per_video' && !videosAvailable
+      ? `${check.name} 数据缺失`
+      : `${check.name}：${check.actual === null ? '-' : Number(check.actual.toFixed ? check.actual.toFixed(2) : check.actual)}，得分 ${Math.round(check.score * 100) / 100}/${check.weight}`,
+  }));
+  const score = Math.round(checks.reduce((sum, check) => sum + check.score, 0) * 100) / 100;
+  const threshold = Number(config.audit_min_score || 70);
+  return {
+    score,
+    recommendation: score >= threshold && checks.every((check) => check.available) ? 'auto_pass' : 'manual_review',
+    reason: !videosAvailable ? '缺少30天发布视频个数，需人工补充数据' : `按达人评分表计算 ${score} 分，审核门槛 ${threshold} 分`,
+    checks: checks.map((check) => ({ ...check, pass: check.score > 0 })),
+    rule_source: 'creator_score_table_v1',
+    score_formula: '成交件数/1000*40 + 平均播放量/5000*30 + (成交件数/发布视频数)/10*30，单项最高不超过权重',
+  };
 }
 
 function recordLearningEvent({ workflowId, eventType, uid, sampleId, input, outcome, lesson }) {
@@ -1630,7 +1687,7 @@ function generateWorkflowQueue(workflowId = null) {
       condition_audit: conditionAudit,
       audit_profile: getProductAuditProfile(item.product_id),
       report: {
-        basic_data: { uid: item.uid, name: item.creator_name, handle: item.creator_handle, fans: item.fans, category: item.category, avg_view: item.avg_view, orders_30d: item.total_orders, star: item.star },
+        basic_data: { uid: item.uid, name: item.creator_name, handle: item.creator_handle, fans: item.fans, category: item.category, avg_view: item.avg_view, monthly_videos: item.monthly_videos, orders_30d: item.total_orders, star: item.star },
         decision: conditionAudit.recommendation === 'auto_pass' ? '建议通过' : '建议不通过/人工复核',
         reason: conditionAudit.reason,
         checks: conditionAudit.checks || [],
@@ -1691,8 +1748,9 @@ async function sendWorkflowInvitations(tasks, workflow) {
       db.prepare('SELECT * FROM shops ORDER BY id LIMIT 1').get();
     const nextId = nextInvitationRecordId();
     const applyLink = selectedTemplate.type === 'collab' ? sampleApplyLink(nextId) : null;
+    const templateCommission = templateCommissionRate(selectedTemplate.id);
     const message = renderInvitationMessage(selectedTemplate, creator, shop, products, nextId, {
-      commission_rate: config.commission_rate,
+      commission_rate: templateCommission,
       omit_sample_apply_link: selectedTemplate.type === 'collab' && config.send_mode === 'auto',
     });
     let sendResult = { status: 'pending', provider_message: '工作流手动邀约模式：已生成记录，未自动发送 TikTok 私信' };
@@ -1706,7 +1764,7 @@ async function sendWorkflowInvitations(tasks, workflow) {
             creator,
             products,
             message,
-            commissionRate: config.commission_rate,
+            commissionRate: templateCommission,
             sampleApprovalMode: config.sample_approval_mode,
           });
           if (target.pending) {
@@ -1735,7 +1793,7 @@ async function sendWorkflowInvitations(tasks, workflow) {
       selectedTemplate.type || 'dm',
       products[0]?.id || null,
       products.length ? JSON.stringify(products.map((item) => item.id)) : null,
-      Number(config.commission_rate || 0),
+      templateCommission,
       targetCollaborationId,
       config.send_mode,
       config.sample_approval_mode,
@@ -1891,6 +1949,11 @@ function workflowList() {
 
 function sampleApplyLink(recordId) {
   return `${publicBaseUrl()}/tk/sample-apply?invite=${recordId}`;
+}
+
+function templateCommissionRate(templateId) {
+  const row = db.prepare('SELECT commission_rate FROM agent_template_terms WHERE template_id = ?').get(Number(templateId || 0));
+  return row && row.commission_rate !== null && row.commission_rate !== undefined ? Number(row.commission_rate) : 0;
 }
 
 function nextInvitationRecordId() {
@@ -2907,8 +2970,9 @@ app.get('/api/agent/experiments/:id/report', (req, res) => {
 app.get('/api/invitations/templates', (req, res) => {
   ensureInvitationTemplates();
   const rows = db.prepare(`
-    SELECT id, name, channel, type, product_id, content
+    SELECT t.id, t.name, t.channel, t.type, t.product_id, t.content, COALESCE(a.commission_rate, 0) AS commission_rate
     FROM invitation_templates
+    t LEFT JOIN agent_template_terms a ON a.template_id = t.id
     WHERE active = 1
     ORDER BY type, id
   `).all();
@@ -2921,13 +2985,18 @@ app.post('/api/invitations/templates', (req, res) => {
   const channel = String(req.body?.channel || 'im').trim() || 'im';
   const type = ['dm', 'collab'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
   const productId = req.body?.product_id ? Number(req.body.product_id) : null;
+  const commissionRate = req.body?.commission_rate === '' || req.body?.commission_rate === undefined ? null : Number(req.body.commission_rate);
   if (!name || !content) return res.status(400).json({ error: '缺少模板名称或内容' });
   const now = nowText();
   const result = db.prepare(`
     INSERT INTO invitation_templates (name, channel, type, product_id, content, active, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, 1, ?, ?)
   `).run(name, channel, type, productId, content, now, now);
-  res.json({ id: Number(result.lastInsertRowid), name, channel, type, product_id: productId, content });
+  const templateId = Number(result.lastInsertRowid);
+  if (commissionRate !== null && Number.isFinite(commissionRate) && commissionRate >= 0 && commissionRate <= 100) {
+    db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(templateId, commissionRate, nowText());
+  }
+  res.json({ id: templateId, name, channel, type, product_id: productId, content, commission_rate: commissionRate });
 });
 
 app.put('/api/invitations/templates/:id', (req, res) => {
@@ -2937,6 +3006,7 @@ app.put('/api/invitations/templates/:id', (req, res) => {
   const channel = String(req.body?.channel || 'im').trim() || 'im';
   const type = ['dm', 'collab'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
   const productId = req.body?.product_id ? Number(req.body.product_id) : null;
+  const commissionRate = req.body?.commission_rate === '' || req.body?.commission_rate === undefined ? null : Number(req.body.commission_rate);
   if (!id) return res.status(400).json({ error: '模板 ID 不正确' });
   if (!name || !content) return res.status(400).json({ error: '缺少模板名称或内容' });
   db.prepare(`
@@ -2944,6 +3014,9 @@ app.put('/api/invitations/templates/:id', (req, res) => {
     SET name = ?, channel = ?, type = ?, product_id = ?, content = ?, updated_at = ?
     WHERE id = ?
   `).run(name, channel, type, productId, content, nowText(), id);
+  if (commissionRate !== null && Number.isFinite(commissionRate) && commissionRate >= 0 && commissionRate <= 100) {
+    db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(id, commissionRate, nowText());
+  }
   res.json({ success: true });
 });
 
