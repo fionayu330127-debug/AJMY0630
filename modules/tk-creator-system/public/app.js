@@ -1443,6 +1443,14 @@ function selectedWorkflowBdIds() {
 
 function workflowPayloadFromForm() {
   const bdIds = selectedWorkflowBdIds();
+  const selectedProductIds = selectedWorkflowProductIds();
+  const rulesText = document.getElementById('workflow-product-rules')?.value.trim() || '';
+  let productRules = {};
+  if (rulesText) {
+    let rules;
+    try { rules = JSON.parse(rulesText); } catch (_) { throw new Error('商品审核指标模板不是有效 JSON'); }
+    selectedProductIds.forEach(id => { productRules[String(id)] = rules; });
+  }
   return {
     name: document.getElementById('workflow-name')?.value.trim() || '默认自动化工作流',
     config: {
@@ -1456,7 +1464,8 @@ function workflowPayloadFromForm() {
       category: document.getElementById('workflow-category')?.value.trim() || '',
       template_id: Number(document.getElementById('workflow-template')?.value || 0),
       experiment_id: Number(document.getElementById('workflow-experiment')?.value || 0) || null,
-      product_ids: selectedWorkflowProductIds(),
+      product_ids: selectedProductIds,
+      product_audit_rules: productRules,
       commission_rate: Number(document.getElementById('workflow-commission')?.value || 0),
       send_mode: document.getElementById('workflow-send-mode')?.value || 'manual',
       invite_max_per_creator: Number(document.getElementById('workflow-invite-max-per-creator')?.value || 1),
@@ -1510,6 +1519,14 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
   const templateOptions = INVITE_TEMPLATES.map(t => `<option value="${t.id}" ${Number(config.template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)} · ${t.type === 'collab' ? '合作邀约' : '私信'}</option>`).join('');
   const experimentOptions = (window.AGENT_EXPERIMENTS || []).map(e => `<option value="${e.id}" ${Number(config.experiment_id) === Number(e.id) ? 'selected' : ''}>${esc(e.name)} · ${e.status === 'running' ? '运行中' : e.status}</option>`).join('');
   const selectedProducts = new Set((config.product_ids || []).map(Number));
+  const firstProductId = [...selectedProducts][0];
+  const savedProfile = (window.AGENT_PRODUCT_AUDIT_PROFILES || []).find(p => Number(p.product_id) === Number(firstProductId));
+  const productRules = config.product_audit_rules?.[String(firstProductId)] || savedProfile?.rules || [
+    { metric: 'monthly_orders', operator: 'gte', value: 1, weight: 30, required: false },
+    { metric: 'monthly_videos', operator: 'lt', value: 200, weight: 20, required: false },
+    { metric: 'fulfillment_rate', operator: 'gte', value: 80, weight: 30, required: true },
+    { metric: 'followers', operator: 'gte', value: 1000, weight: 20, required: false },
+  ];
   const selectedBds = new Set((config.bd_ids || []).map(Number));
   const bdOptions = BD_LIST.map(b => `
     <label class="workflow-bd-option">
@@ -1549,6 +1566,7 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
     </div>
     <div class="form-row"><div class="module-meta">Agent自动审核规则：达人必须同时满足最低星级、最低粉丝、最低履约率、最低均播放、最低近30天销量和类目关键词条件，才会自动通过；选择“联盟中心达人池”时，近30天销量只使用 TK 联盟中心达人画像字段 sales_count_30d，包含其他商家商品，不读取合作达人库或本店联盟订单。</div></div>
     <div class="form-row"><label class="form-label">合作商品</label><div class="workflow-product-pick"><button class="btn btn-outline" type="button" id="workflow-product-button" onclick="openWorkflowProductModal()">选择商品</button><span class="invite-product-summary" id="workflow-product-summary"></span></div></div>
+    <div class="form-row"><label class="form-label">商品审核指标模板（JSON）</label><textarea class="bd-note-ta" id="workflow-product-rules" style="min-height:130px;font-family:monospace">${esc(JSON.stringify(productRules, null, 2))}</textarea><div class="module-meta">保存后会记住到每个已选商品。支持 monthly_orders（月成交件数）、monthly_videos（月发布视频数）、followers、fulfillment_rate、avg_view、star；运算符 gte/gt/lte/lt/eq。weight 是权重，required=true 表示必需条件。</div></div>
     <div class="form-row"><label class="form-label">参与分配 BD</label><div class="workflow-bd-select"><button class="form-input workflow-bd-trigger" type="button" onclick="toggleWorkflowBdDropdown()"><span id="workflow-bd-summary">请选择负责 BD</span><span>▾</span></button><div class="workflow-bd-menu" id="workflow-bd-menu">${bdOptions || '<div class="empty-state">暂无 BD 成员</div>'}</div></div><div class="module-meta" id="workflow-bd-mode">选择多位 BD 后将按顺序轮流分配</div></div>
     <div class="form-row"><label class="form-label">自动回复模板</label><textarea class="bd-note-ta" id="workflow-reply-template" style="min-height:70px">${esc(config.auto_reply_template || '')}</textarea></div>
     <button class="btn btn-primary" style="width:100%" onclick="saveWorkflowFromModal()">${mode === 'edit' ? '保存并重新运行工作流' : '保存并创建工作流'}</button>`;
@@ -1629,6 +1647,7 @@ async function openWorkflowModal() {
   }
   window.AGENT_EXPERIMENTS = await api('/api/agent/experiments').catch(() => []);
   const config = workflowConfig();
+  window.AGENT_PRODUCT_AUDIT_PROFILES = await api('/api/agent/product-audit-profiles').catch(() => []);
   WORKFLOW_PRODUCT_SHOP = config.shop || (curStore === 'all' ? (SHOPS[0]?.id || '') : curStore);
   INVITE_PRODUCTS = WORKFLOW_PRODUCT_SHOP ? await api(`/api/products?shop=${WORKFLOW_PRODUCT_SHOP}`).catch(() => []) : [];
   WORKFLOW_PRODUCT_SELECTED = new Set((config.product_ids || []).map(String));
@@ -1643,6 +1662,7 @@ async function openEditWorkflowModal(id) {
   editingWorkflowId = Number(id);
   const data = await api(`/api/agent/workflow?id=${id}`);
   const workflow = data.workflow || {};
+  window.AGENT_PRODUCT_AUDIT_PROFILES = await api('/api/agent/product-audit-profiles').catch(() => []);
   const productShop = workflow.config?.shop || (curStore === 'all' ? (SHOPS[0]?.id || '') : curStore);
   [INVITE_TEMPLATES, INVITE_PRODUCTS, BD_LIST] = await Promise.all([
     api('/api/invitations/templates').catch(() => []),
@@ -1726,7 +1746,8 @@ function viewWorkflowReport(id) {
   const report = task?.payload?.report;
   if (!report) return toast('暂无分析报告，请重新生成工作流队列');
   const data = report.basic_data || {};
-  alert([
+  const checks = '指标得分：' + (report.score ?? task.score ?? 0) + '｜规则来源：' + (report.rule_source === 'product_profile' ? '商品审核模板' : '工作流默认规则') + '\n' + (report.checks || []).map(check => [check.pass ? '✓' : '✗', check.detail].join(' ')).join('\n');
+  alert([checks ? '指标明细：\n' + checks : '',
     `达人：${data.name || '-'}（${data.handle || data.uid || '-'}）`,
     `粉丝：${data.fans || 0}｜类目：${data.category || '-'}`,
     `均播放：${data.avg_view || 0}｜近30天销量：${data.orders_30d || 0}｜星级：${data.star || 0}`,

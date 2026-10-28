@@ -726,6 +726,17 @@ CREATE TABLE IF NOT EXISTS agent_inbox_messages (
   processed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS agent_product_audit_profiles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  rules_json TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  learning_enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
 
 try { db.exec('ALTER TABLE shops ADD COLUMN last_sync_at TEXT'); } catch (_) {}
@@ -1131,6 +1142,9 @@ function saveWorkflow(input = {}, createNew = false) {
   config.send_mode = config.send_mode === 'auto' ? 'auto' : 'manual';
   config.sample_approval_mode = config.sample_approval_mode === 'auto' ? 'auto' : 'manual';
   config.assign_mode = config.assign_mode === 'least_load' ? 'least_load' : 'round_robin';
+  config.product_audit_rules = config.product_audit_rules && typeof config.product_audit_rules === 'object'
+    ? config.product_audit_rules
+    : {};
   const name = String(input.name || current?.name || '自动化工作流').trim();
   if (createNew || !current) {
     const now = nowText();
@@ -1138,11 +1152,82 @@ function saveWorkflow(input = {}, createNew = false) {
       INSERT INTO agent_workflows (name, active, config_json, created_at, updated_at)
       VALUES (?, 1, ?, ?, ?)
     `).run(name, JSON.stringify(config), now, now);
-    return getWorkflow(result.lastInsertRowid);
+    const saved = getWorkflow(result.lastInsertRowid);
+    for (const productId of saved.config.product_ids) {
+      const rules = normalizeAuditRules(config.product_audit_rules[String(productId)]);
+      if (rules.length) saveProductAuditProfile(productId, { rules });
+    }
+    return saved;
   }
   db.prepare('UPDATE agent_workflows SET name = ?, config_json = ?, updated_at = ? WHERE id = ?')
     .run(name, JSON.stringify(config), nowText(), current.id);
-  return getWorkflow(current.id);
+  const saved = getWorkflow(current.id);
+  for (const productId of saved.config.product_ids) {
+    const rules = normalizeAuditRules(config.product_audit_rules[String(productId)]);
+    if (rules.length) saveProductAuditProfile(productId, { rules });
+  }
+  return saved;
+}
+
+const AUDIT_METRIC_LABELS = {
+  monthly_orders: '月成交件数',
+  monthly_videos: '月发布视频数',
+  followers: '粉丝数',
+  fulfillment_rate: '履约率 %',
+  avg_view: '平均播放量',
+  star: '达人星级',
+};
+
+function defaultProductAuditRules() {
+  return [
+    { metric: 'monthly_orders', operator: 'gte', value: 1, weight: 30, required: false },
+    { metric: 'monthly_videos', operator: 'lt', value: 200, weight: 20, required: false },
+    { metric: 'fulfillment_rate', operator: 'gte', value: 80, weight: 30, required: true },
+    { metric: 'followers', operator: 'gte', value: 1000, weight: 20, required: false },
+  ];
+}
+
+function normalizeAuditRules(value) {
+  const source = Array.isArray(value) ? value : [];
+  const operators = new Set(['gte', 'gt', 'lte', 'lt', 'eq']);
+  return source.map((rule) => ({
+    metric: Object.prototype.hasOwnProperty.call(AUDIT_METRIC_LABELS, rule?.metric) ? rule.metric : '',
+    operator: operators.has(String(rule?.operator)) ? String(rule.operator) : 'gte',
+    value: Number.isFinite(Number(rule?.value)) ? Number(rule.value) : 0,
+    weight: Math.max(1, Math.min(100, Number(rule?.weight || 1))),
+    required: Boolean(rule?.required),
+  })).filter((rule) => rule.metric);
+}
+
+function getProductAuditProfile(productId) {
+  const row = db.prepare('SELECT * FROM agent_product_audit_profiles WHERE product_id = ?').get(Number(productId || 0));
+  if (!row) return null;
+  return { ...row, rules: normalizeAuditRules(parseJsonObject(row.rules_json, [])) };
+}
+
+function saveProductAuditProfile(productId, input = {}) {
+  const id = Number(productId || 0);
+  if (!id) throw new Error('商品 ID 不正确');
+  const rules = normalizeAuditRules(input.rules);
+  if (!rules.length) throw new Error('至少配置一条有效审核指标');
+  const existing = getProductAuditProfile(id);
+  const version = Number(existing?.version || 0) + 1;
+  const now = nowText();
+  db.prepare(`
+    INSERT INTO agent_product_audit_profiles (product_id, name, rules_json, version, learning_enabled, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(product_id) DO UPDATE SET
+      name = excluded.name, rules_json = excluded.rules_json, version = excluded.version,
+      learning_enabled = excluded.learning_enabled, updated_at = excluded.updated_at
+  `).run(id, String(input.name || `商品 ${id} 审核模板`), JSON.stringify(rules), version, input.learning_enabled === false ? 0 : 1, now, now);
+  return getProductAuditProfile(id);
+}
+
+function productAuditRules(productId, config = {}) {
+  const profile = getProductAuditProfile(productId);
+  if (profile?.rules?.length) return profile.rules;
+  const inline = config.product_audit_rules?.[String(productId)] || config.product_audit_rules?.[Number(productId)];
+  return normalizeAuditRules(inline?.rules || inline) || [];
 }
 
 function applyOptimizationProposal(suggestion) {
@@ -1165,7 +1250,62 @@ function applyOptimizationProposal(suggestion) {
   return { applied: true, changes: { min_fulfillment: { from: current, to: next } }, workflow: updated };
 }
 
-function auditByWorkflowConditions(item, config) {
+function auditByWorkflowConditions(item, config, customRules = null) {
+  const rules = normalizeAuditRules(customRules);
+  if (rules.length) {
+    const metricSource = {
+      monthly_orders: ['monthly_orders', 'total_orders', 'sales_count_30d', 'sales_count'],
+      monthly_videos: ['monthly_videos', 'videos', 'published_videos'],
+      followers: ['fans'],
+      fulfillment_rate: ['fulfillment_rate'],
+      avg_view: ['avg_view'],
+      star: ['star'],
+    };
+    const values = {};
+    const available = {};
+    for (const [metric, keys] of Object.entries(metricSource)) {
+      const key = keys.find((name) => item[name] !== undefined && item[name] !== null && item[name] !== '');
+      available[metric] = Boolean(key);
+      values[metric] = metric === 'avg_view' ? rowMetricNumber(item[key]) : Number(item[key] || 0);
+    }
+    const compare = {
+      gte: (actual, expected) => actual >= expected,
+      gt: (actual, expected) => actual > expected,
+      lte: (actual, expected) => actual <= expected,
+      lt: (actual, expected) => actual < expected,
+      eq: (actual, expected) => actual === expected,
+    };
+    const checks = rules.map((rule) => {
+      const actual = values[rule.metric];
+      const pass = available[rule.metric] && compare[rule.operator](actual, rule.value);
+      return {
+        name: AUDIT_METRIC_LABELS[rule.metric],
+        metric: rule.metric,
+        operator: rule.operator,
+        expected: rule.value,
+        actual,
+        weight: rule.weight,
+        required: rule.required,
+        pass,
+        detail: !available[rule.metric]
+          ? `${AUDIT_METRIC_LABELS[rule.metric]} 数据缺失`
+          : `${AUDIT_METRIC_LABELS[rule.metric]} ${pass ? '达标' : '未达标'}（${actual} ${rule.operator} ${rule.value}）`,
+      };
+    });
+    const totalWeight = checks.reduce((sum, check) => sum + check.weight, 0) || 1;
+    const score = Math.round(checks.filter((check) => check.pass).reduce((sum, check) => sum + check.weight, 0) / totalWeight * 100);
+    const requiredFailed = checks.filter((check) => check.required && !check.pass);
+    return {
+      score,
+      recommendation: requiredFailed.length || score < Number(config.audit_min_score || 70) ? 'manual_review' : 'auto_pass',
+      reason: requiredFailed.length
+        ? `必需指标未达标：${requiredFailed.map((check) => check.detail).join('，')}`
+        : `指标得分 ${score}，${score >= Number(config.audit_min_score || 70) ? '达到审核线' : '未达到审核线'}`,
+      checks,
+      rules,
+      rule_source: 'product_profile',
+    };
+  }
   const checks = [];
   const category = String(config.category || '').trim().toLowerCase();
   const itemCategory = String(item.category || '').toLowerCase();
@@ -1217,7 +1357,7 @@ function auditByWorkflowConditions(item, config) {
 }
 
 function agentScoreCandidate(item, config) {
-  return auditByWorkflowConditions(item, config);
+  return auditByWorkflowConditions(item, config, productAuditRules(item.product_id || config.product_ids?.[0], config));
 }
 
 function agentScoreSample(sample, config) {
@@ -1225,7 +1365,8 @@ function agentScoreSample(sample, config) {
     ...sample,
     avg_view: rowMetricNumber(sample.avg_view),
     total_orders: sample.total_orders ?? sample.sales_count ?? 0,
-  }, config);
+    monthly_videos: sample.monthly_videos ?? sample.videos ?? 0,
+  }, config, productAuditRules(sample.product_id, config));
 }
 
 function recordLearningEvent({ workflowId, eventType, uid, sampleId, input, outcome, lesson }) {
@@ -1453,7 +1594,8 @@ function generateWorkflowQueue(workflowId = null) {
     if (remainingInviteSlots <= 0) break;
     if (Number(candidate.invited_count || 0) >= maxPerCreator) continue;
     const audit = agentScoreCandidate(candidate, config);
-    insertWorkflowTask(workflow.id, 'invite', 'admin_approved', candidate, audit, { candidate, config_snapshot: config });
+    const profile = getProductAuditProfile(candidate.product_id || config.product_ids?.[0]);
+    insertWorkflowTask(workflow.id, 'invite', 'admin_approved', candidate, audit, { candidate, config_snapshot: config, audit_profile: profile });
     inviteCount += 1;
     remainingInviteSlots -= 1;
   }
@@ -1486,11 +1628,14 @@ function generateWorkflowQueue(workflowId = null) {
       sample: item,
       config_snapshot: config,
       condition_audit: conditionAudit,
+      audit_profile: getProductAuditProfile(item.product_id),
       report: {
         basic_data: { uid: item.uid, name: item.creator_name, handle: item.creator_handle, fans: item.fans, category: item.category, avg_view: item.avg_view, orders_30d: item.total_orders, star: item.star },
         decision: conditionAudit.recommendation === 'auto_pass' ? '建议通过' : '建议不通过/人工复核',
         reason: conditionAudit.reason,
         checks: conditionAudit.checks || [],
+        score: conditionAudit.score,
+        rule_source: conditionAudit.rule_source || 'workflow_defaults',
       },
     });
     if (conditionAudit.recommendation === 'auto_pass') {
@@ -2355,6 +2500,24 @@ app.get('/api/sync/status', (req, res) => {
 
 app.get('/api/agent/settings', (req, res) => {
   res.json(getAgentSettings());
+});
+
+app.get('/api/agent/product-audit-profiles', (req, res) => {
+  const productIds = String(req.query.product_ids || '')
+    .split(',').map(Number).filter(Boolean);
+  const rows = productIds.length
+    ? productIds.map((id) => getProductAuditProfile(id)).filter(Boolean)
+    : db.prepare('SELECT * FROM agent_product_audit_profiles ORDER BY product_id').all()
+      .map((row) => ({ ...row, rules: normalizeAuditRules(parseJsonObject(row.rules_json, [])) }));
+  res.json(rows);
+});
+
+app.put('/api/agent/product-audit-profiles/:productId', (req, res) => {
+  try {
+    res.json({ success: true, profile: saveProductAuditProfile(req.params.productId, req.body || {}) });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '保存商品审核模板失败' });
+  }
 });
 
 app.put('/api/agent/settings', (req, res) => {
