@@ -1720,6 +1720,8 @@ function workflowTaskRows(tasks) {
       <td>${workflowTaskTypeLabel(t.task_type)}</td>
       <td><div class="cn">${esc(t.creator_name || t.uid)}</div><div class="cm">${esc(t.creator_handle || t.uid || '')}</div></td>
       <td>${t.shop_id ? shopTagHtml(t.shop_id) : '-'}</td>
+      <td>${Number(t.score || 0)} 分</td>
+      <td>${t.has_sample_application ? `是（${esc(t.sample_application_status || '已提交')}）` : '否'}</td>
       <td>${workflowConditionLabel(t)}</td>
       <td>${workflowRecommendationLabel(t.recommendation)}<div class="agent-load">${esc(t.reason || '')}</div></td>
       <td>${workflowTaskStatusLabel(t.status)}</td>
@@ -1818,7 +1820,7 @@ async function renderAutomationCenter() {
       <h3>${esc(selectedWorkflow.name)} 自动化工作状态</h3>
       <div class="module-meta" style="margin-bottom:12px">邀约达人 ${inviteTasks.length} 位 · 确认消息 ${messageTasks.length} 条 · 待回复 ${messageTasks.filter(t => t.status === 'awaiting_reply').length} 条 · 审核待确认 ${sampleTasks.filter(t => t.status === 'agent_review').length} 条 · 已确认 ${selectedTasks.filter(t => t.status === 'admin_approved').length} 条 · 已执行 ${selectedTasks.filter(t => t.status === 'executed').length} 条</div>
       ${emptyInviteHint || sendHint}
-      <div class="table-wrap"><table><thead><tr><th>类型</th><th>达人</th><th>店铺</th><th>条件审核</th><th>Agent结果</th><th>状态</th><th>操作</th></tr></thead><tbody>${workflowTaskRows(pageMeta.items) || '<tr><td colspan="7"><div class="empty-state">暂无工作流任务</div></td></tr>'}</tbody></table><div class="pager">${pagerHtml('automation', pageMeta)}</div></div>
+      <div class="table-wrap"><table><thead><tr><th>类型</th><th>达人</th><th>店铺</th><th>达人评分</th><th>已申请样品</th><th>条件审核</th><th>Agent结果</th><th>状态</th><th>操作</th></tr></thead><tbody>${workflowTaskRows(pageMeta.items) || '<tr><td colspan="9"><div class="empty-state">暂无工作流任务</div></td></tr>'}</tbody></table><div class="pager">${pagerHtml('automation', pageMeta)}</div></div>
     </div>`;
 }
 
@@ -1948,6 +1950,8 @@ function workflowPanelHtml() {
       <td>${workflowTaskTypeLabel(t.task_type)}</td>
       <td><div class="cn">${esc(t.creator_name || t.uid)}</div><div class="cm">${esc(t.creator_handle || t.uid || '')}</div></td>
       <td>${t.shop_id ? shopTagHtml(t.shop_id) : '-'}</td>
+      <td>${Number(t.score || 0)} 分</td>
+      <td>${t.has_sample_application ? `是（${esc(t.sample_application_status || '已提交')}）` : '否'}</td>
       <td>${workflowConditionLabel(t)}</td>
       <td>${workflowRecommendationLabel(t.recommendation)}<div class="agent-load">${esc(t.reason || '')}</div></td>
       <td>${workflowTaskStatusLabel(t.status)}</td>
@@ -2005,7 +2009,7 @@ function workflowPanelHtml() {
       <div class="form-row"><label class="form-label">合作商品</label><div class="agent-check-grid">${productList}</div></div>
       <div class="form-row"><label class="form-label">参与分配 BD</label><div class="agent-check-grid">${bdList}</div></div>
       <div class="form-row"><label class="form-label">自动回复模板</label><textarea class="bd-note-ta" id="workflow-reply-template" style="min-height:70px">${esc(config.auto_reply_template || '')}</textarea></div>
-      <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>类型</th><th>达人</th><th>店铺</th><th>条件审核</th><th>Agent结果</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="7"><div class="empty-state">暂无工作流任务，请先生成队列</div></td></tr>'}</tbody></table></div>
+      <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>类型</th><th>达人</th><th>店铺</th><th>达人评分</th><th>已申请样品</th><th>条件审核</th><th>Agent结果</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="9"><div class="empty-state">暂无工作流任务，请先生成队列</div></td></tr>'}</tbody></table></div>
     </div>`;
 }
 

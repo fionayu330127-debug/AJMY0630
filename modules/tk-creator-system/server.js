@@ -1706,9 +1706,12 @@ function generateWorkflowQueue(workflowId = null) {
 
 function workflowTasks(workflowId, limit = 120) {
   return db.prepare(`
-    SELECT t.*, b.name AS assigned_bd_name
+    SELECT t.*, b.name AS assigned_bd_name,
+      s.status AS sample_application_status,
+      CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END AS has_sample_application
     FROM agent_workflow_tasks t
     LEFT JOIN bd_members b ON b.id = t.assigned_bd_id
+    LEFT JOIN samples s ON CAST(s.id AS TEXT) = CAST(t.sample_id AS TEXT)
     WHERE t.workflow_id = ?
     ORDER BY
       CASE t.status WHEN 'agent_review' THEN 1 WHEN 'admin_approved' THEN 2 WHEN 'failed' THEN 3 WHEN 'executed' THEN 4 ELSE 5 END,
