@@ -36,6 +36,11 @@ let AGENT_WORKFLOW = null;
 let AGENT_WORKFLOWS = [];
 let automationPage = 1;
 let automationPageSize = 10;
+let workflowListPage = 1;
+let workflowListPageSize = 10;
+let agentSamplePage = 1;
+let agentSamplePageSize = 20;
+let agentAutomationRefreshTimer = null;
 let selectedWorkflowId = null;
 let editingWorkflowId = null;
 let PRODUCT_PICKER_CONTEXT = 'invite';
@@ -142,12 +147,24 @@ function setPage(kind, page) {
   if (kind === 'sample') { samplePage = Number(page) || 1; renderSampleTable(); }
   if (kind === 'lib') { libPage = Number(page) || 1; renderLibPage(); }
   if (kind === 'automation') { automationPage = Number(page) || 1; renderAutomationCenter(); }
+  if (kind === 'workflow-list') { workflowListPage = Number(page) || 1; renderAutomationCenter(); }
+  if (kind === 'agent-sample') { agentSamplePage = Number(page) || 1; renderAutomationCenter(); }
 }
 function setPageSize(kind, pageSize) {
   const size = Number(pageSize) || 20;
   if (kind === 'sample') { samplePageSize = size; samplePage = 1; renderSampleTable(); }
   if (kind === 'lib') { libPageSize = size; libPage = 1; renderLibPage(); }
   if (kind === 'automation') { automationPageSize = size; automationPage = 1; renderAutomationCenter(); }
+  if (kind === 'workflow-list') { workflowListPageSize = size; workflowListPage = 1; renderAutomationCenter(); }
+  if (kind === 'agent-sample') { agentSamplePageSize = size; agentSamplePage = 1; renderAutomationCenter(); }
+}
+
+function scheduleAgentAutomationRefresh() {
+  if (agentAutomationRefreshTimer || curPage !== 'automation') return;
+  agentAutomationRefreshTimer = setTimeout(() => {
+    agentAutomationRefreshTimer = null;
+    if (curPage === 'automation') renderAutomationCenter();
+  }, 30000);
 }
 function remainingDaysText(value) {
   if (!value) return '-';
@@ -1662,7 +1679,7 @@ async function openEditWorkflowModal(id) {
   const productShop = workflow.config?.shop || (curStore === 'all' ? (SHOPS[0]?.id || '') : curStore);
   [INVITE_TEMPLATES, INVITE_PRODUCTS, BD_LIST] = await Promise.all([
     api('/api/invitations/templates').catch(() => []),
-    productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
+    api('/api/products').catch(() => []),
     api('/api/bd').catch(() => []),
   ]);
   window.AGENT_EXPERIMENTS = await api('/api/agent/experiments').catch(() => []);
@@ -1757,12 +1774,14 @@ function viewWorkflowReport(id) {
 async function renderAutomationCenter() {
   const box = document.getElementById('automation-center');
   if (!box) return;
+  scheduleAgentAutomationRefresh();
   const productShop = curStore === 'all' ? (SHOPS[0]?.id || '') : curStore;
-  const [workflowList, templates, products, bdList] = await Promise.all([
+  const [workflowList, templates, products, bdList, agentSamples] = await Promise.all([
     api('/api/agent/workflows').catch(() => ({ workflows: [] })),
     api('/api/invitations/templates').catch(() => []),
-    productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
+    api('/api/products').catch(() => []),
     api('/api/bd').catch(() => BD_LIST),
+    api(`/api/agent/sample-applications?shop=${curStore || 'all'}&limit=1000`).catch(() => []),
   ]);
   AGENT_WORKFLOWS = workflowList.workflows || [];
   if (selectedWorkflowId && !AGENT_WORKFLOWS.some(w => Number(w.id) === Number(selectedWorkflowId))) {
@@ -1797,25 +1816,16 @@ async function renderAutomationCenter() {
     : '';
   const pageMeta = paginate(selectedTasks, automationPage, automationPageSize);
   automationPage = pageMeta.page;
-  const workflowCards = AGENT_WORKFLOWS.map(w => `
-    <div class="module-panel workflow-card ${Number(w.id) === Number(selectedWorkflowId) ? 'active' : ''}" onclick="selectWorkflow(${w.id})">
-      <h3>${esc(w.name)}</h3>
-      <div class="module-meta">任务 ${w.task_count || 0} · 待确认 ${w.review_count || 0} · 已确认 ${w.approved_count || 0} · 已执行 ${w.executed_count || 0}</div>
-      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn btn-outline" onclick="event.stopPropagation();openEditWorkflowModal(${w.id})">编辑</button><button class="btn btn-outline" onclick="event.stopPropagation();generateWorkflowQueueFor(${w.id})">生成队列</button><button class="btn btn-primary" onclick="event.stopPropagation();executeWorkflowFor(${w.id})">执行已确认</button></div>
-    </div>`).join('');
   if (!selectedWorkflow) {
     box.innerHTML = `
-      <div class="module-panel">
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">
-          <div><h3 style="margin-bottom:4px">工作流清单</h3><div class="module-meta">点击工作流查看对应自动化工作状态、邀约达人清单和审核状态</div></div>
-          <button class="btn btn-primary" onclick="openWorkflowModal()">新增自动化工作流任务</button>
-        </div>
-        <div class="module-grid">${workflowCards || '<div class="module-panel"><h3>暂无工作流</h3><div class="module-meta">点击右上角新增自动化工作流任务</div></div>'}</div>
-      </div>`;
+      ${workflowListPanel()}
+      ${agentSampleApplicationsPanel(agentSamples)}`;
     return;
   }
   box.innerHTML = `
     <div style="margin-bottom:12px"><button class="btn btn-outline" onclick="backToWorkflowList()">返回工作流清单</button></div>
+    ${workflowListPanel()}
+    ${agentSampleApplicationsPanel(agentSamples)}
     ${automationWorkflowBlocks(selectedWorkflow, selectedTasks)}
     ${inboxPanel(inboxMessages, selectedWorkflow.id)}
     ${optimizationPanel(optimization, selectedWorkflow.id)}
@@ -1860,6 +1870,73 @@ function optimizationPanel(data, workflowId) {
       <button class="btn btn-outline" onclick="generateOptimization(${workflowId})">重新分析</button>
     </div>
     <div style="margin-top:10px">${items.map(item => `<div class="empty-hint" style="margin:6px 0"><b>${esc(item.title)}</b>：${esc(item.reason)}<div style="margin-top:6px"><button class="abtn ok" onclick="decideOptimization(${item.id}, 'approve')">采纳</button><button class="abtn ng" onclick="decideOptimization(${item.id}, 'dismiss')">忽略</button></div></div>`).join('') || '<div class="module-meta" style="margin-top:10px">暂无建议，先运行一段时间积累数据。</div>'}</div>
+  </div>`;
+}
+
+function workflowProductIcons(workflow) {
+  const ids = (workflow?.config?.product_ids || []).map(Number);
+  const products = ids.map(id => INVITE_PRODUCTS.find(product => Number(product.id) === id)).filter(Boolean).slice(0, 3);
+  return products.map(product => productThumbHtml(product, 30)).join('') || '<span class="module-meta">-</span>';
+}
+
+function workflowListPanel() {
+  const meta = paginate(AGENT_WORKFLOWS, workflowListPage, workflowListPageSize);
+  workflowListPage = meta.page;
+  const rows = meta.items.map(workflow => `
+    <tr class="${Number(workflow.id) === Number(selectedWorkflowId) ? 'active-row' : ''}">
+      <td>${esc(workflow.updated_at || workflow.created_at || '-')}</td>
+      <td><button class="btn btn-ghost" onclick="selectWorkflow(${workflow.id})">${esc(workflow.name)}</button></td>
+      <td><div class="product-icon-list">${workflowProductIcons(workflow)}</div></td>
+      <td>${workflow.task_count || 0}</td>
+      <td>${workflow.review_count || 0}</td>
+      <td>${workflow.approved_count || 0}</td>
+      <td>${workflow.executed_count || 0}</td>
+      <td><div class="abtns"><button class="btn btn-outline" onclick="openEditWorkflowModal(${workflow.id})">编辑</button><button class="btn btn-outline" onclick="generateWorkflowQueueFor(${workflow.id})">刷新</button></div></td>
+    </tr>`).join('');
+  return `<div class="module-panel" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>工作流清单</h3><div class="module-meta">最新任务优先，Agent 自动邀约；样品审核在下方统一处理。</div></div><button class="btn btn-primary" onclick="openWorkflowModal()">新增自动化工作流任务</button></div>
+    <div class="table-wrap"><table><thead><tr><th>任务时间</th><th>工作流</th><th>产品</th><th>任务数量</th><th>待确认</th><th>已确认</th><th>已执行</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty-state">暂无工作流</div></td></tr>'}</tbody></table></div>
+    ${pagerHtml('workflow-list', meta)}
+  </div>`;
+}
+
+function viewAgentSampleReport(row) {
+  const report = row.report || {};
+  const checks = (report.checks || []).map(check => `${check.pass ? '✓' : '✗'} ${check.detail || ''}`).join('\n');
+  alert([
+    `达人：${row.creator_name || '-'}（${row.uid || row.creator_handle || '-'}）`,
+    `产品：${row.product_name || '-'}｜申请时间：${row.applied_at || '-'}`,
+    `评分：${row.score || 0}｜是否能拍摄：${row.can_shoot || '待回复'}`,
+    `Agent判断：${row.agent_analysis || '-'}`,
+    checks ? `指标明细：\n${checks}` : '',
+    report.creator_reply ? `达人回复：${report.creator_reply}` : '',
+  ].filter(Boolean).join('\n'));
+}
+
+function agentSampleApplicationsPanel(rows) {
+  const meta = paginate(rows || [], agentSamplePage, agentSamplePageSize);
+  agentSamplePage = meta.page;
+  const body = meta.items.map(row => `
+    <tr class="${row.is_new ? 'new-sample-row' : ''}">
+      <td>${row.is_new ? '<span style="display:inline-block;background:#fff1f0;color:#f5222d;border-radius:10px;padding:2px 7px;font-size:11px;margin-bottom:3px">新申请</span>' : ''}<div class="cn">${esc(row.creator_name || '-')}</div><div class="cm">${esc(row.uid || row.creator_handle || '-')}</div></td>
+      <td>${shopTagHtml(row.shop_id)}</td>
+      <td>${productThumbHtml(row, 34)}<div class="cm">${esc(row.product_name || '-')}</div></td>
+      <td>${esc(row.applied_at || '-')}</td>
+      <td><b>${Number(row.score || 0)}</b> 分</td>
+      <td>${row.has_sample_application ? '是' : '否'}</td>
+      <td>${esc(row.can_shoot || '待确认')}</td>
+      <td><div class="agent-analysis">${esc(row.agent_analysis || '-')}</div></td>
+      <td>${esc(workflowTaskStatusLabel(row.task_status))}</td>
+      <td><div class="abtns">
+        ${row.task_type === 'sample_audit' && row.task_status === 'agent_review' ? `<button class="abtn ok" onclick="confirmWorkflowTask(${row.task_id}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${row.task_id}, 'reject')">拒绝</button>` : ''}
+        ${row.task_type === 'sample_message' && row.task_status === 'awaiting_reply' ? `<button class="btn btn-outline" onclick="recordWorkflowReply(${row.task_id})">录入回复</button>` : ''}
+        <button class="btn btn-outline" onclick='viewAgentSampleReport(${JSON.stringify(row).replace(/'/g, "&#39;")})'>查看分析</button>
+      </div></td>
+    </tr>`).join('');
+  return `<div class="module-panel" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>样品审核</h3><div class="module-meta">仅显示被 Agent 邀约或确认消息触达过的样品申请；新申请自动置顶并标记。</div></div><button class="btn btn-outline" onclick="renderAutomationCenter()">立即刷新</button></div>
+    <div class="table-wrap"><table><thead><tr><th>达人名称和 ID</th><th>店铺</th><th>样品</th><th>申请时间</th><th>达人评分</th><th>是否申请样品</th><th>是否能拍摄</th><th>Agent 判断分析</th><th>状态</th><th>操作</th></tr></thead><tbody>${body || '<tr><td colspan="10"><div class="empty-state">暂无 Agent 触达的样品申请</div></td></tr>'}</tbody></table></div>
+    ${pagerHtml('agent-sample', meta)}
   </div>`;
 }
 

@@ -2617,6 +2617,64 @@ app.get('/api/agent/workflow', (req, res) => {
   });
 });
 
+app.get('/api/agent/sample-applications', (req, res) => {
+  try {
+    const shop = String(req.query.shop || 'all');
+    const limit = Math.min(1000, Math.max(20, Number(req.query.limit || 500)));
+    const rows = db.prepare(`
+      SELECT s.*, p.name AS product_name, p.sku AS product_sku,
+        p.emoji AS product_emoji, p.image_url AS product_image_url,
+        sh.name AS shop_name
+      FROM samples s
+      LEFT JOIN products p ON p.id = s.product_id
+      LEFT JOIN shops sh ON sh.id = s.shop_id
+      WHERE s.status <> 'cancelled'
+        AND (? = 'all' OR s.shop_id = ?)
+        AND EXISTS (
+          SELECT 1 FROM agent_workflow_tasks at
+          WHERE CAST(at.sample_id AS TEXT) = CAST(s.id AS TEXT)
+            AND at.task_type IN ('sample_message', 'sample_audit')
+        )
+      ORDER BY datetime(s.applied_at) DESC, s.id DESC
+      LIMIT ?
+    `).all(shop, shop, limit);
+    const taskRows = db.prepare(`
+      SELECT * FROM agent_workflow_tasks
+      WHERE task_type IN ('sample_message', 'sample_audit')
+      ORDER BY id DESC
+    `).all();
+    const bySample = new Map();
+    for (const task of taskRows) {
+      const key = String(task.sample_id || '');
+      if (!key || bySample.has(key)) continue;
+      bySample.set(key, { ...task, payload: parseJsonObject(task.payload_json, {}) });
+    }
+    res.json(rows.map((row) => {
+      const task = bySample.get(String(row.id));
+      const payload = task?.payload || {};
+      const audit = payload.reply_audit || payload.condition_audit || {};
+      const reply = payload.creator_reply || '';
+      const canShoot = task?.task_type === 'sample_audit' && payload.phase === 'final_sample_review'
+        ? (['auto_pass', 'review_pass'].includes(task.recommendation) ? '是' : '否')
+        : (task?.status === 'awaiting_reply' ? '待回复' : (reply ? '否' : '待确认'));
+      return {
+        ...row,
+        has_sample_application: true,
+        score: Number(task?.score ?? audit.score ?? 0),
+        can_shoot: canShoot,
+        agent_analysis: task?.reason || audit.reason || '等待 Agent 处理',
+        task_status: task?.status || 'pending',
+        task_type: task?.task_type || 'sample_message',
+        task_id: task?.id || null,
+        report: payload.report || null,
+        is_new: row.applied_at && Date.now() - new Date(String(row.applied_at).replace(' ', 'T')).getTime() <= 86400000,
+      };
+    }));
+  } catch (error) {
+    res.status(400).json({ error: error.message || '读取 Agent 样品申请失败' });
+  }
+});
+
 app.get('/api/agent/workflows', (req, res) => {
   res.json({ workflows: workflowList() });
 });
@@ -2747,6 +2805,9 @@ app.post('/api/agent/workflow/tasks/:id/confirm', async (req, res) => {
         messageAudit,
         { phase: 'creator_content_confirmation', sample, config_snapshot: getWorkflow(taskRow.workflow_id).config, condition_audit: taskPayload.condition_audit }
       );
+      await executeWorkflow(taskRow.workflow_id);
+    }
+    if (decision !== 'reject' && taskRow?.task_type === 'sample_audit' && taskPayload.phase === 'final_sample_review') {
       await executeWorkflow(taskRow.workflow_id);
     }
     recordLearningEvent({
