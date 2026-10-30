@@ -79,3 +79,34 @@
 5. 遗留问题和下一步建议
 
 遇到与上述规则冲突、信息缺失或需要破坏性操作时：停止，说明原因，等待确认。
+
+## Long-term development and release workflow (2026-10-30)
+
+This section is the current project workflow. If older release instructions in BASELINE.md or
+DEPLOY.md conflict with this section, this section and the explicit prohibitions above win.
+
+### Development
+
+1. Work only in this repository.
+2. Read BASELINE.md, DEPLOY.md, and docs/video/ARCHITECTURE.md before each task.
+3. Inspect the current implementation and preserve unrelated user changes.
+4. Make one focused change at a time. Do not modify protected data or secrets.
+5. Run proportional checks. At minimum run `node --check` for changed JavaScript and `git diff --check`.
+6. For runtime testing, use port 3002 only after confirming the database host and database name,
+   without printing credentials. Never test against a production database.
+7. Do not call live sync endpoints or send external messages as a test. External sends require an
+   explicit user-approved verification plan.
+
+### Handoff
+
+1. Stage only intended source and documentation files.
+2. Commit locally with `video: <stage>-<description>`.
+3. Keep the worktree clean and report the commit hash, checks, verification steps, impact, and
+   remaining risks.
+
+### Manual release boundary
+
+Production and public release are manual owner-operated steps. The agent must not run publish
+scripts, edit the local production directory, push Git branches, or operate public infrastructure.
+The owner may publish the reviewed local commit through the approved release process after the
+3002 verification is complete.

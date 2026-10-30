@@ -25,22 +25,25 @@ Public server URL:
 http://120.26.178.11:3001/
 ```
 
-Release flow:
+Current release boundary:
 
 ```powershell
-git add .
-git commit -m "Your message"
-git push origin main
+git add <intended-files>
+git commit -m "video: <stage>-<description>"
 ```
 
-Publish the clean commit to local production and verify port `3001`:
+The coding agent stops after the clean local commit. The owner manually reviews and publishes the
+commit to local production, verifies port `3001`, and then decides whether to publish publicly.
+The coding agent must not run either publish script, edit `agimia-erp-production`, or run `git push`.
+
+Owner-only local production release, when explicitly performed by the owner:
 
 ```powershell
 cd C:\Users\Administrator\Desktop\agimia-erp-shell
 .\publish-to-production.ps1 -Confirmed
 ```
 
-After local production verification, publish the same commit publicly:
+Owner-only public release, after local verification:
 
 ```powershell
 .\publish-to-public.ps1 -Confirmed

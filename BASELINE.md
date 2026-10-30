@@ -34,9 +34,9 @@ Database schema changes belong in `database/migrations` and must be repeatable.
 1. Work only in the development Git worktree.
 2. Test on a preview port such as `3002` without calling live sync endpoints unnecessarily.
 3. Commit the complete change and keep the worktree clean.
-4. Run `publish-to-production.ps1 -Confirmed` and verify local port `3001`.
-5. Push the same commit to `origin/main`.
-6. Run `publish-to-public.ps1 -Confirmed` and verify the public health endpoint and changed workflow.
+4. Hand the clean local commit to the owner for manual production review and release.
+5. The coding agent does not run publish scripts, push branches, or edit the production directory.
+6. Public release and post-release verification are owner-operated actions outside the coding task.
 
 Both publish scripts create code and SQLite backups before changing a runtime. Public deployment
 uses a Git archive and systemd; it does not use the public server's dirty worktree as a release source.
