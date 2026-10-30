@@ -1675,15 +1675,20 @@ function generateWorkflowQueue(workflowId = null) {
   for (const sample of sampleRows) {
     const item = { ...sample, sample_id: sample.id };
     const conditionAudit = agentScoreSample(item, config);
-    insertWorkflowTask(workflow.id, 'sample_audit', 'agent_review', item, conditionAudit, {
-      phase: 'sample_application_review',
+    const messageAudit = {
+      score: conditionAudit.score,
+      recommendation: 'pending_reply',
+      reason: '已收到样品申请，Agent 自动确认达人是否能拍摄并发布',
+    };
+    insertWorkflowTask(workflow.id, 'sample_message', 'admin_approved', item, messageAudit, {
+      phase: 'creator_content_confirmation',
       sample: item,
       config_snapshot: config,
       condition_audit: conditionAudit,
       audit_profile: getProductAuditProfile(item.product_id),
       report: {
         basic_data: { uid: item.uid, name: item.creator_name, handle: item.creator_handle, fans: item.fans, category: item.category, avg_view: item.avg_view, monthly_videos: item.monthly_videos, orders_30d: item.total_orders, star: item.star },
-        decision: conditionAudit.recommendation === 'auto_pass' ? '建议通过' : '建议不通过/人工复核',
+        decision: conditionAudit.recommendation === 'auto_pass' ? '回复后建议通过' : '回复后建议人工复核',
         reason: conditionAudit.reason,
         checks: conditionAudit.checks || [],
         score: conditionAudit.score,
@@ -1839,7 +1844,7 @@ function judgeSampleReply(replyText, sample, config) {
     return { score: 0, recommendation: 'manual_review', reason: `回复意向不明确，需人工跟进：${replyText}` };
   }
   if (conditionAudit.recommendation !== 'auto_pass') {
-    return { ...conditionAudit, recommendation: 'manual_review', reason: `达人已回复可拍摄，但条件未全满足：${conditionAudit.reason}` };
+    return { ...conditionAudit, recommendation: 'review_pass', reason: `达人已回复可拍摄，但条件未全满足，建议管理员复核：${conditionAudit.reason}` };
   }
   return { score: 100, recommendation: 'auto_pass', reason: `达人回复可拍摄并发布，条件满足：${replyText}` };
 }
@@ -2776,18 +2781,36 @@ app.post('/api/agent/workflow/tasks/:id/reply', (req, res) => {
       creator_replied_at: nowText(),
       reply_audit: audit,
     };
-    const messageStatus = audit.recommendation === 'auto_pass' ? 'executed' : 'failed';
+    const messageStatus = ['auto_pass', 'review_pass'].includes(audit.recommendation) ? 'executed' : 'failed';
     db.prepare(`
       UPDATE agent_workflow_tasks
       SET status = ?, recommendation = ?, score = ?, reason = ?, payload_json = ?, updated_at = ?, executed_at = ?
       WHERE id = ?
     `).run(messageStatus, audit.recommendation, audit.score, audit.reason, JSON.stringify(nextPayload), nowText(), nowText(), id);
-    if (audit.recommendation === 'auto_pass') {
+    if (['auto_pass', 'review_pass'].includes(audit.recommendation)) {
       insertWorkflowTask(workflow.id, 'sample_audit', 'agent_review', { ...sample, sample_id: task.sample_id }, audit, {
         phase: 'final_sample_review',
         sample,
         creator_reply: replyText,
         config_snapshot: workflow.config,
+        report: {
+          basic_data: {
+            uid: sample.uid,
+            name: sample.creator_name,
+            handle: sample.creator_handle,
+            fans: sample.fans,
+            avg_view: sample.avg_view,
+            monthly_videos: sample.monthly_videos ?? sample.videos,
+            orders_30d: sample.total_orders ?? sample.sales_count,
+            star: sample.star,
+          },
+          decision: audit.recommendation === 'auto_pass' ? '建议通过' : '建议人工复核',
+          reason: audit.reason,
+          checks: audit.checks || [],
+          score: audit.score,
+          rule_source: audit.rule_source || 'creator_score_table_v1',
+          creator_reply: replyText,
+        },
       });
     }
     recordLearningEvent({

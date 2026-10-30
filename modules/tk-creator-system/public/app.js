@@ -1698,8 +1698,8 @@ function automationWorkflowBlocks(workflow, tasks = []) {
     <div class="automation-flow">
       <div class="automation-step"><b>自动邀约</b><span>${esc(workflow?.name || '未选择工作流')} · 邀约达人 ${inviteCount} 位</span></div>
       <div class="automation-step"><b>样品申请列表</b><span>待回复 ${awaitingReply} 条</span></div>
-      <div class="automation-step"><b>样品申请确认</b><span>待管理员确认 ${review} 条</span></div>
-      <div class="automation-step"><b>最终审核</b><span>确认后发送拍摄消息，回复可拍摄后再由管理员最终确认</span></div>
+      <div class="automation-step"><b>自动确认拍摄</b><span>Agent 已发送/等待回复 ${awaitingReply} 条</span></div>
+      <div class="automation-step"><b>最终审核</b><span>达人回复可拍摄后，Agent 生成建议，管理员最终确认 ${review} 条</span></div>
       <div class="automation-step"><b>自动分配</b><span>已执行 ${executed} 条</span></div>
     </div>`;
 }
