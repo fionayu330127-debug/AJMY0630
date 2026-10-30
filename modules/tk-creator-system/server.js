@@ -2623,7 +2623,18 @@ app.put('/api/agent/product-audit-profiles/:productId', (req, res) => {
 
 app.put('/api/agent/settings', (req, res) => {
   try {
-    res.json(saveAgentSettings(req.body || {}));
+    const settings = saveAgentSettings(req.body || {});
+    if (syncTimer) {
+      clearTimeout(syncTimer);
+      syncTimer = null;
+    }
+    if (agentTimer) {
+      clearTimeout(agentTimer);
+      agentTimer = null;
+    }
+    startShopSyncScheduler();
+    startAgentScheduler();
+    res.json(settings);
   } catch (error) {
     res.status(400).json({ error: error.message || '保存 Agent 配置失败' });
   }
