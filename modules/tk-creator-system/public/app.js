@@ -1464,16 +1464,19 @@ function workflowTaskStatusLabel(status) {
     agent_review: '待管理员确认',
     admin_approved: '已确认',
     admin_rejected: '已拒绝',
+    application_confirmed: '申请已确认，等待达人回复',
     awaiting_reply: '待达人回复',
     executed: '已执行',
     failed: '执行失败',
   }[status] || status || '-';
 }
 
-function workflowTaskTypeLabel(type) {
+function workflowTaskTypeLabel(type, task = null) {
+  if (type === 'sample_audit' && task?.payload?.phase === 'sample_application_review') return '样品申请初审';
+  if (type === 'sample_audit' && task?.payload?.phase === 'final_sample_review') return '样品最终审核';
+  if (type === 'sample_message') return '确认拍摄与发布';
   return {
     invite: '自动邀约',
-    sample_message: '确认拍摄消息',
     sample_audit: '样品审核',
   }[type] || type || '-';
 }
@@ -1695,8 +1698,8 @@ function automationWorkflowBlocks(workflow, tasks = []) {
     <div class="automation-flow">
       <div class="automation-step"><b>自动邀约</b><span>${esc(workflow?.name || '未选择工作流')} · 邀约达人 ${inviteCount} 位</span></div>
       <div class="automation-step"><b>样品申请列表</b><span>待回复 ${awaitingReply} 条</span></div>
-      <div class="automation-step"><b>Agent判断</b><span>生成审核待确认 ${review} 条</span></div>
-      <div class="automation-step"><b>管理员确认</b><span>已确认 ${approved} 条</span></div>
+      <div class="automation-step"><b>样品申请确认</b><span>待管理员确认 ${review} 条</span></div>
+      <div class="automation-step"><b>最终审核</b><span>确认后发送拍摄消息，回复可拍摄后再由管理员最终确认</span></div>
       <div class="automation-step"><b>自动分配</b><span>已执行 ${executed} 条</span></div>
     </div>`;
 }
@@ -1717,7 +1720,7 @@ function workflowTaskRows(tasks) {
   window.__WORKFLOW_TASKS = tasks;
   return tasks.map(t => `
     <tr>
-      <td>${workflowTaskTypeLabel(t.task_type)}</td>
+      <td>${workflowTaskTypeLabel(t.task_type, t)}</td>
       <td><div class="cn">${esc(t.creator_name || t.uid)}</div><div class="cm">${esc(t.creator_handle || t.uid || '')}</div></td>
       <td>${t.shop_id ? shopTagHtml(t.shop_id) : '-'}</td>
       <td>${Number(t.score || 0)} 分</td>
@@ -1726,7 +1729,7 @@ function workflowTaskRows(tasks) {
       <td>${workflowRecommendationLabel(t.recommendation)}<div class="agent-load">${esc(t.reason || '')}</div></td>
       <td>${workflowTaskStatusLabel(t.status)}</td>
       <td>
-        ${['agent_review','admin_approved'].includes(t.status) ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${t.id}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${t.id}, 'reject')">拒绝</button></div>` : ''}
+        ${t.task_type === 'sample_audit' && ['agent_review','admin_approved'].includes(t.status) ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${t.id}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${t.id}, 'reject')">拒绝</button></div>` : ''}
         ${t.task_type === 'sample_message' && t.status === 'awaiting_reply' ? `<button class="btn btn-outline" onclick="recordWorkflowReply(${t.id})">录入回复</button>` : ''}
         ${t.task_type === 'sample_audit' ? `<button class="btn btn-outline" onclick="viewWorkflowReport(${t.id})">查看分析</button>` : ''}
         ${t.invitation_record_id ? `<div class="agent-load">邀约#${t.invitation_record_id}</div>` : ''}
@@ -1947,7 +1950,7 @@ function workflowPanelHtml() {
   `).join('') || '<div class="empty-state">暂无 BD 成员</div>';
   const rows = tasks.map(t => `
     <tr>
-      <td>${workflowTaskTypeLabel(t.task_type)}</td>
+      <td>${workflowTaskTypeLabel(t.task_type, t)}</td>
       <td><div class="cn">${esc(t.creator_name || t.uid)}</div><div class="cm">${esc(t.creator_handle || t.uid || '')}</div></td>
       <td>${t.shop_id ? shopTagHtml(t.shop_id) : '-'}</td>
       <td>${Number(t.score || 0)} 分</td>
@@ -1956,7 +1959,7 @@ function workflowPanelHtml() {
       <td>${workflowRecommendationLabel(t.recommendation)}<div class="agent-load">${esc(t.reason || '')}</div></td>
       <td>${workflowTaskStatusLabel(t.status)}</td>
       <td>
-        ${['agent_review','admin_approved'].includes(t.status) ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${t.id}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${t.id}, 'reject')">拒绝</button></div>` : ''}
+        ${t.task_type === 'sample_audit' && ['agent_review','admin_approved'].includes(t.status) ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${t.id}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${t.id}, 'reject')">拒绝</button></div>` : ''}
         ${t.task_type === 'sample_message' && t.status === 'awaiting_reply' ? `<button class="btn btn-outline" onclick="recordWorkflowReply(${t.id})">录入回复</button>` : ''}
         ${t.task_type === 'sample_audit' ? `<button class="btn btn-outline" onclick="viewWorkflowReport(${t.id})">查看分析</button>` : ''}
         ${t.invitation_record_id ? `<div class="agent-load">邀约#${t.invitation_record_id}</div>` : ''}
@@ -2022,7 +2025,7 @@ async function saveWorkflowConfig() {
 async function generateWorkflowQueue() {
   toast('正在生成 Agent 工作流队列...');
   AGENT_WORKFLOW = await api('/api/agent/workflow/queue', { method: 'POST', body: JSON.stringify(workflowPayloadFromForm()) });
-  toast(`队列已生成：邀约 ${AGENT_WORKFLOW.invite_count || 0} 条，样品审核 ${AGENT_WORKFLOW.sample_count || 0} 条`);
+  toast(`队列已生成并自动执行：达标邀约 ${AGENT_WORKFLOW.invite_count || 0}/${AGENT_WORKFLOW.invite_target || 50}，样品申请待确认 ${AGENT_WORKFLOW.sample_count || 0} 条${AGENT_WORKFLOW.invite_shortfall ? `，还缺 ${AGENT_WORKFLOW.invite_shortfall} 位达标达人` : ''}`);
   renderAgentCenter();
 }
 

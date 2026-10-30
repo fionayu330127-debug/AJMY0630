@@ -1147,6 +1147,7 @@ function saveWorkflow(input = {}, createNew = false) {
   config.commission_rate = Number(config.commission_rate || 0);
   config.invite_max_per_creator = Math.max(1, Number(config.invite_max_per_creator || 1));
   config.invite_daily_limit = Math.max(1, Number(config.invite_daily_limit || 50));
+  config.invite_target_count = Math.max(1, Number(config.invite_target_count || config.invite_daily_limit || 50));
   config.audit_min_score = Number(config.audit_min_score || 70);
   config.score_model = config.score_model === 'creator_table_v1' ? 'creator_table_v1' : 'creator_table_v1';
   if (config.score_model === 'creator_table_v1') {
@@ -1159,8 +1160,9 @@ function saveWorkflow(input = {}, createNew = false) {
   }
   config.auto_approve_score = Number(config.auto_approve_score || 90);
   config.experiment_id = config.experiment_id ? Number(config.experiment_id) : null;
-  config.send_mode = config.send_mode === 'auto' ? 'auto' : 'manual';
-  config.sample_approval_mode = config.sample_approval_mode === 'auto' ? 'auto' : 'manual';
+  // Invites run automatically; sample approval remains an explicit admin gate.
+  config.send_mode = 'auto';
+  config.sample_approval_mode = 'manual';
   config.assign_mode = config.assign_mode === 'least_load' ? 'least_load' : 'round_robin';
   config.product_audit_rules = config.product_audit_rules && typeof config.product_audit_rules === 'object'
     ? config.product_audit_rules
@@ -1626,16 +1628,10 @@ function generateWorkflowQueue(workflowId = null) {
   const candidateQuery = {
     source: config.source,
     shop: config.shop,
-    min_star: config.min_star,
-    min_fans: config.min_fans,
-    min_fulfillment: config.min_fulfillment,
-    min_avg_view: config.min_avg_view,
-    min_orders: config.min_orders,
-    category: config.category,
   };
   const candidates = listInviteCandidates(candidateQuery);
   const diagnostics = inviteCandidateDiagnostics(candidateQuery);
-  const inviteLimit = Math.max(1, Number(config.invite_daily_limit || 50));
+  const inviteLimit = Math.max(1, Number(config.invite_target_count || config.invite_daily_limit || 50));
   const maxPerCreator = Math.max(1, Number(config.invite_max_per_creator || 1));
   const today = nowText().slice(0, 10);
   const todayCreated = db.prepare(`
@@ -1651,6 +1647,7 @@ function generateWorkflowQueue(workflowId = null) {
     if (remainingInviteSlots <= 0) break;
     if (Number(candidate.invited_count || 0) >= maxPerCreator) continue;
     const audit = agentScoreCandidate(candidate, config);
+    if (audit.recommendation !== 'auto_pass') continue;
     const profile = getProductAuditProfile(candidate.product_id || config.product_ids?.[0]);
     insertWorkflowTask(workflow.id, 'invite', 'admin_approved', candidate, audit, { candidate, config_snapshot: config, audit_profile: profile });
     inviteCount += 1;
@@ -1678,10 +1675,8 @@ function generateWorkflowQueue(workflowId = null) {
   for (const sample of sampleRows) {
     const item = { ...sample, sample_id: sample.id };
     const conditionAudit = agentScoreSample(item, config);
-    const auditStatus = conditionAudit.recommendation === 'auto_pass' && config.sample_approval_mode === 'auto'
-      ? 'admin_approved'
-      : 'agent_review';
-    insertWorkflowTask(workflow.id, 'sample_audit', auditStatus, item, conditionAudit, {
+    insertWorkflowTask(workflow.id, 'sample_audit', 'agent_review', item, conditionAudit, {
+      phase: 'sample_application_review',
       sample: item,
       config_snapshot: config,
       condition_audit: conditionAudit,
@@ -1695,13 +1690,16 @@ function generateWorkflowQueue(workflowId = null) {
         rule_source: conditionAudit.rule_source || 'workflow_defaults',
       },
     });
-    if (conditionAudit.recommendation === 'auto_pass') {
-      const messageAudit = { score: conditionAudit.score, recommendation: 'pending_reply', reason: '条件匹配，待发送确认拍摄与发布消息' };
-      insertWorkflowTask(workflow.id, 'sample_message', config.sample_approval_mode === 'auto' ? 'admin_approved' : 'agent_review', item, messageAudit, { sample: item, config_snapshot: config, condition_audit: conditionAudit });
-      sampleCount += 1;
-    }
+    sampleCount += 1;
   }
-  return { workflow, invite_count: inviteCount, sample_count: sampleCount, diagnostics };
+  return {
+    workflow,
+    invite_count: inviteCount,
+    invite_target: inviteLimit,
+    invite_shortfall: Math.max(0, inviteLimit - inviteCount),
+    sample_count: sampleCount,
+    diagnostics,
+  };
 }
 
 function workflowTasks(workflowId, limit = 120) {
@@ -1911,7 +1909,7 @@ async function executeWorkflow(workflowId = null) {
   const inbox_reply_results = await sendWorkflowInboxReplies(inboxTasks, workflow);
   const messageTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_message' && task.status === 'admin_approved');
   const sample_message_results = await sendWorkflowSampleMessages(messageTasks, workflow);
-  const sampleTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_audit' && task.status === 'admin_approved');
+  const sampleTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_audit' && task.status === 'admin_approved' && task.payload?.phase === 'final_sample_review');
   let assigned = 0;
   for (const [index, task] of sampleTasks.entries()) {
     if (!task.sample_id) continue;
@@ -2718,15 +2716,34 @@ app.post('/api/agent/workflows/:id/queue', (req, res) => {
   }
 });
 
-app.post('/api/agent/workflow/tasks/:id/confirm', (req, res) => {
+app.post('/api/agent/workflow/tasks/:id/confirm', async (req, res) => {
   try {
     const id = Number(req.params.id || 0);
     const decision = String(req.body?.decision || 'approve');
-    const status = decision === 'reject' ? 'admin_rejected' : 'admin_approved';
     const task = db.prepare('SELECT id FROM agent_workflow_tasks WHERE id = ?').get(id);
     if (!task) return res.status(404).json({ error: '工作流任务不存在' });
-    const taskRow = db.prepare('SELECT workflow_id, sample_id FROM agent_workflow_tasks WHERE id = ?').get(id);
+    const taskRow = db.prepare('SELECT * FROM agent_workflow_tasks WHERE id = ?').get(id);
+    const taskPayload = parseJsonObject(taskRow?.payload_json, {});
+    const isSampleApplicationGate = taskRow?.task_type === 'sample_audit' && taskPayload.phase === 'sample_application_review';
+    const status = decision === 'reject' ? 'admin_rejected' : (isSampleApplicationGate ? 'application_confirmed' : 'admin_approved');
     db.prepare('UPDATE agent_workflow_tasks SET status = ?, updated_at = ? WHERE id = ?').run(status, nowText(), id);
+    if (decision !== 'reject' && isSampleApplicationGate) {
+      const sample = taskPayload.sample || {};
+      const messageAudit = {
+        score: taskRow.score || 0,
+        recommendation: 'pending_reply',
+        reason: '管理员确认样品申请，Agent 将确认达人是否能拍摄并发布',
+      };
+      insertWorkflowTask(
+        taskRow.workflow_id,
+        'sample_message',
+        'admin_approved',
+        { ...sample, sample_id: taskRow.sample_id },
+        messageAudit,
+        { phase: 'creator_content_confirmation', sample, config_snapshot: getWorkflow(taskRow.workflow_id).config, condition_audit: taskPayload.condition_audit }
+      );
+      await executeWorkflow(taskRow.workflow_id);
+    }
     recordLearningEvent({
       workflowId: taskRow?.workflow_id,
       eventType: 'admin_decision',
@@ -2767,6 +2784,7 @@ app.post('/api/agent/workflow/tasks/:id/reply', (req, res) => {
     `).run(messageStatus, audit.recommendation, audit.score, audit.reason, JSON.stringify(nextPayload), nowText(), nowText(), id);
     if (audit.recommendation === 'auto_pass') {
       insertWorkflowTask(workflow.id, 'sample_audit', 'agent_review', { ...sample, sample_id: task.sample_id }, audit, {
+        phase: 'final_sample_review',
         sample,
         creator_reply: replyText,
         config_snapshot: workflow.config,
