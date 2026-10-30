@@ -1380,7 +1380,7 @@ function agentTemplateManagerHtml() {
       </div>
       <div class="form-row-2">
         <div class="form-row"><label class="form-label">模板名称</label><input class="form-input" id="agent-template-name" placeholder="例如 初次私信 / 样品合作邀约"></div>
-        <div class="form-row"><label class="form-label">模板类型</label><select class="form-input" id="agent-template-type" onchange="onAgentTemplateTypeChange()"><option value="dm">私信消息</option><option value="collab">合作邀约</option></select></div>
+        <div class="form-row"><label class="form-label">模板类型</label><select class="form-input" id="agent-template-type" onchange="onAgentTemplateTypeChange()"><option value="dm">私信消息</option><option value="collab">合作邀约</option><option value="confirmation">确认拍摄与发布</option></select></div>
       </div>
       <div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="agent-template-commission" type="number" min="0" max="100" step="0.01" placeholder="合作邀约填写，任务创建时自动读取"></div>
       <div class="form-row" id="agent-template-product-row" style="display:none"><label class="form-label">默认合作产品</label><select class="form-input" id="agent-template-product">${productOptions}</select></div>
@@ -1388,7 +1388,7 @@ function agentTemplateManagerHtml() {
       <input type="hidden" id="agent-template-id">
       <div style="display:flex;gap:8px;margin-bottom:12px"><button class="btn btn-primary" onclick="saveInvitationTemplate()">保存模板</button><button class="btn btn-outline" onclick="clearInvitationTemplateForm()">清空</button></div>
       <div class="agent-list">
-        ${INVITE_TEMPLATES.map(t => `<div class="agent-row"><div><strong>${esc(t.name)}</strong><div class="agent-load">${t.type === 'collab' ? '合作邀约' : '私信消息'} · ${esc((t.content || '').slice(0, 80))}</div></div><div style="display:flex;gap:8px"><button class="btn btn-outline" onclick="editInvitationTemplate(${t.id})">编辑</button><button class="btn btn-ghost" onclick="deleteInvitationTemplate(${t.id})">停用</button></div></div>`).join('') || '<div class="empty-state">暂无模板</div>'}
+        ${INVITE_TEMPLATES.map(t => `<div class="agent-row"><div><strong>${esc(t.name)}</strong><div class="agent-load">${t.type === 'collab' ? '合作邀约' : (t.type === 'confirmation' ? '确认拍摄与发布' : '私信消息')} · ${esc((t.content || '').slice(0, 80))}</div></div><div style="display:flex;gap:8px"><button class="btn btn-outline" onclick="editInvitationTemplate(${t.id})">编辑</button><button class="btn btn-ghost" onclick="deleteInvitationTemplate(${t.id})">停用</button></div></div>`).join('') || '<div class="empty-state">暂无模板</div>'}
       </div>
     </div>`;
 }
@@ -1469,6 +1469,7 @@ function workflowPayloadFromForm() {
     config: {
       shop: document.getElementById('workflow-shop')?.value || curStore,
       template_id: Number(document.getElementById('workflow-template')?.value || 0),
+      confirmation_template_id: Number(document.getElementById('workflow-confirmation-template')?.value || 0) || null,
       product_ids: selectedProductIds,
       score_model: 'creator_table_v1',
       audit_min_score: Number(document.getElementById('workflow-score-threshold')?.value || 70),
@@ -1576,12 +1577,14 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
 function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 'create') {
   const shopOptions = SHOPS.map(s => `<option value="${s.id}" ${String(config.shop || curStore) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
   const templateOptions = INVITE_TEMPLATES.filter(t => t.type === 'collab').map(t => `<option value="${t.id}" ${Number(config.template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+  const confirmationTemplateOptions = INVITE_TEMPLATES.filter(t => t.type === 'confirmation').map(t => `<option value="${t.id}" ${Number(config.confirmation_template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   const threshold = [60, 70, 80, 90].map(value => `<option value="${value}" ${Number(config.audit_min_score || 70) === value ? 'selected' : ''}>${value}分以上</option>`).join('');
   return `
     <div class="form-row"><label class="form-label">选择店铺</label><select class="form-input" id="workflow-shop" onchange="onWorkflowShopChange(this.value)">${shopOptions}</select></div>
     <div class="form-row"><label class="form-label">选择产品</label><div class="workflow-product-pick"><button class="btn btn-outline" type="button" id="workflow-product-button" onclick="openWorkflowProductModal()">选择产品</button><span class="invite-product-summary" id="workflow-product-summary"></span></div></div>
     <div class="form-row"><label class="form-label">达人分数值（审核要求）</label><select class="form-input" id="workflow-score-threshold">${threshold}</select><div class="module-meta">评分公式：30天成交件数/1000×40 + 30天视频平均播放量/5000×30 +（30天成交件数/30天发布视频个数）/10×30，单项最高不超过对应权重。</div></div>
     <div class="form-row"><label class="form-label">选择邀约模板</label><select class="form-input" id="workflow-template">${templateOptions || '<option value="">暂无合作邀约模板</option>'}</select><div class="module-meta">佣金比例和邀约话术由模板决定，任务创建时不再单独设置。</div></div>
+    <div class="form-row"><label class="form-label">选择确认拍摄与发布模板</label><select class="form-input" id="workflow-confirmation-template">${confirmationTemplateOptions || '<option value="">使用系统默认话术</option>'}</select><div class="module-meta">达人申请样品后，Agent 使用此模板确认是否能拍摄与发布。</div></div>
     <button class="btn btn-primary" style="width:100%" onclick="saveWorkflowFromModal()">${mode === 'edit' ? '保存并重新运行工作流' : '保存并创建工作流'}</button>`;
 }
 

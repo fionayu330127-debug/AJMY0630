@@ -805,6 +805,12 @@ const DEFAULT_INVITATION_TEMPLATES = [
     type: 'dm',
     content: '您好 {{creator_name}}，感谢之前与 {{shop_name}} 的合作。我们近期有新的商品和活动，想再次邀请您参与推广合作，方便的话可以回复确认档期。',
   },
+  {
+    name: '确认拍摄与发布',
+    channel: 'im',
+    type: 'confirmation',
+    content: '您好 {{creator_name}}，您申请的 {{product_name}} 样品已收到。请确认是否可以拍摄并发布 TikTok 视频；如果可以，请回复预计发布时间和内容形式。',
+  },
 ];
 
 function ensureInvitationTemplates() {
@@ -816,6 +822,7 @@ function ensureInvitationTemplates() {
   `);
   const now = nowText();
   DEFAULT_INVITATION_TEMPLATES.forEach((tpl) => insert.run(tpl.name, tpl.channel, tpl.type || 'dm', tpl.content, now, now));
+  return;
 }
 
 ensureInvitationTemplates();
@@ -825,6 +832,11 @@ db.prepare(`
       updated_at = ?
   WHERE active = 1 AND name LIKE '%样品合作邀约%'
 `).run(nowText());
+if (!db.prepare("SELECT id FROM invitation_templates WHERE active = 1 AND type = 'confirmation' LIMIT 1").get()) {
+  const now = nowText();
+  db.prepare(`INSERT INTO invitation_templates (name, channel, type, content, active, created_at, updated_at) VALUES (?, 'im', 'confirmation', ?, 1, ?, ?)`)
+    .run('确认拍摄与发布', '您好 {{creator_name}}，您申请的 {{product_name}} 样品已收到。请确认是否可以拍摄并发布 TikTok 视频；如果可以，请回复预计发布时间和内容形式。', now, now);
+}
 
 function getAgentSettings() {
   const rows = db.prepare('SELECT key, value FROM agent_settings').all();
@@ -1099,6 +1111,7 @@ function defaultWorkflowConfig() {
     min_orders: 0,
     category: '',
     template_id: firstTemplate?.id || '',
+    confirmation_template_id: db.prepare("SELECT id FROM invitation_templates WHERE active = 1 AND type = 'confirmation' ORDER BY id LIMIT 1").get()?.id || null,
     product_ids: firstProduct?.id ? [firstProduct.id] : [],
     commission_rate: 15,
     send_mode: 'manual',
@@ -1160,6 +1173,7 @@ function saveWorkflow(input = {}, createNew = false) {
   }
   config.auto_approve_score = Number(config.auto_approve_score || 90);
   config.experiment_id = config.experiment_id ? Number(config.experiment_id) : null;
+  config.confirmation_template_id = config.confirmation_template_id ? Number(config.confirmation_template_id) : null;
   // Invites run automatically; sample approval remains an explicit admin gate.
   config.send_mode = 'auto';
   config.sample_approval_mode = 'manual';
@@ -1824,7 +1838,8 @@ async function sendWorkflowInvitations(tasks, workflow) {
   return results;
 }
 
-function sampleConfirmationMessage(config, sample) {
+function sampleConfirmationMessage(config, sample, template = null, shop = null, product = null) {
+  if (template) return renderInvitationMessage(template, sample, shop, product);
   return String(config.auto_reply_template || '').trim() ||
     `您好，您申请的样品我们已收到。请确认收到样品后是否可以拍摄并发布 TikTok 视频；如果可以，请回复预计发布时间和内容形式。`;
 }
@@ -1864,7 +1879,11 @@ async function sendWorkflowSampleMessages(tasks, workflow) {
     const sample = task.payload?.sample || task.payload || {};
     const shop = db.prepare('SELECT * FROM shops WHERE id = ?').get(sample.shop_id || task.shop_id || config.shop) ||
       db.prepare('SELECT * FROM shops ORDER BY id LIMIT 1').get();
-    const message = sampleConfirmationMessage(config, sample);
+    const confirmationTemplate = config.confirmation_template_id
+      ? db.prepare("SELECT * FROM invitation_templates WHERE id = ? AND active = 1 AND type = 'confirmation'").get(config.confirmation_template_id)
+      : null;
+    const product = sample.product_id ? db.prepare('SELECT * FROM products WHERE id = ?').get(sample.product_id) : null;
+    const message = sampleConfirmationMessage(config, sample, confirmationTemplate, shop, product);
     let sendResult;
     try {
       sendResult = await sendTikTokInvitation({ shop, creator: { ...sample, creator_open_id: sample.uid || task.uid }, message });
@@ -1879,8 +1898,8 @@ async function sendWorkflowSampleMessages(tasks, workflow) {
       task.creator_name,
       task.creator_handle,
       sample.uid || task.uid,
-      null,
-      'dm',
+      confirmationTemplate?.id || null,
+      'confirmation',
       sample.product_id || null,
       sample.product_id ? JSON.stringify([sample.product_id]) : null,
       Number(sample.commission_rate || config.commission_rate || 0),
@@ -3088,7 +3107,7 @@ app.post('/api/invitations/templates', (req, res) => {
   const name = String(req.body?.name || '').trim();
   const content = String(req.body?.content || '').trim();
   const channel = String(req.body?.channel || 'im').trim() || 'im';
-  const type = ['dm', 'collab'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
+  const type = ['dm', 'collab', 'confirmation'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
   const productId = req.body?.product_id ? Number(req.body.product_id) : null;
   const commissionRate = req.body?.commission_rate === '' || req.body?.commission_rate === undefined ? null : Number(req.body.commission_rate);
   if (!name || !content) return res.status(400).json({ error: '缺少模板名称或内容' });
@@ -3109,7 +3128,7 @@ app.put('/api/invitations/templates/:id', (req, res) => {
   const name = String(req.body?.name || '').trim();
   const content = String(req.body?.content || '').trim();
   const channel = String(req.body?.channel || 'im').trim() || 'im';
-  const type = ['dm', 'collab'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
+  const type = ['dm', 'collab', 'confirmation'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
   const productId = req.body?.product_id ? Number(req.body.product_id) : null;
   const commissionRate = req.body?.commission_rate === '' || req.body?.commission_rate === undefined ? null : Number(req.body.commission_rate);
   if (!id) return res.status(400).json({ error: '模板 ID 不正确' });
