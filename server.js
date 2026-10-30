@@ -2006,6 +2006,8 @@ async function start() {
   await videoV2.ensureVideoSchema();
   await videoV2.startLeaseReaper();
   tkApp.startShopSyncScheduler?.();
+  // The root ERP process must also start the Agent's daily workflow runner.
+  tkApp.startAgentScheduler?.();
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`濂ュ悏绫充簹 ERP running at http://0.0.0.0:${PORT}`);
     console.log(`TK 杈句汉绠＄悊绯荤粺 mounted at http://0.0.0.0:${PORT}/tk/`);
