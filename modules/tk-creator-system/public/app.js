@@ -2216,6 +2216,11 @@ async function renderAgentCenter() {
           <div class="form-row"><label class="form-label">跟进间隔（天）</label><input class="form-input" id="agent-followup-days" type="number" min="1" value="${esc(settings.followup_interval_days ?? 3)}"></div>
         </div>
         <div class="form-row-2">
+          <div class="form-row"><label class="form-label">每次任务邀约人数</label><input class="form-input" id="agent-invite-target-count" type="number" min="1" value="${esc(settings.invite_target_count ?? 50)}"><div class="module-meta">每次生成工作流队列时，Agent 会持续筛选，直到达到该数量或没有更多达标达人。</div></div>
+          <div class="form-row"><label class="form-label">样品申请每日巡检时间</label><input class="form-input" id="agent-sample-sync-time" type="time" value="${String(settings.sample_sync_hour ?? 7).padStart(2, '0')}:00"></div>
+        </div>
+        <div class="form-row"><label class="form-label">Agent 每日自动运行时间</label><input class="form-input" id="agent-daily-run-time" type="time" value="${String(settings.agent_daily_hour ?? 8).padStart(2, '0')}:${String(settings.agent_daily_minute ?? 30).padStart(2, '0')}"><div class="module-meta">自动执行邀约、样品申请巡检、收件箱同步和审核队列生成。</div></div>
+        <div class="form-row-2">
           <div class="form-row"><label class="form-label">自动审核最低粉丝</label><input class="form-input" id="agent-min-followers" type="number" min="0" value="${esc(settings.audit_min_followers ?? 1000)}"></div>
           <div class="form-row"><label class="form-label">最低履约率（%）</label><input class="form-input" id="agent-min-fulfillment" type="number" min="0" max="100" value="${esc(settings.audit_min_fulfillment ?? 80)}"></div>
         </div>
@@ -2226,10 +2231,18 @@ async function renderAgentCenter() {
 }
 
 async function saveAgentSettings() {
+  const sampleSyncTime = document.getElementById('agent-sample-sync-time')?.value || '07:00';
+  const dailyRunTime = document.getElementById('agent-daily-run-time')?.value || '08:30';
+  const [sampleSyncHour] = sampleSyncTime.split(':').map(Number);
+  const [agentDailyHour, agentDailyMinute] = dailyRunTime.split(':').map(Number);
   const payload = {
     invite_template: document.getElementById('agent-invite-template')?.value || '',
     followup_template: document.getElementById('agent-followup-template')?.value || '',
     review_rules: document.getElementById('agent-review-rules')?.value || '',
+    sample_sync_hour: sampleSyncHour,
+    agent_daily_hour: agentDailyHour,
+    agent_daily_minute: agentDailyMinute,
+    invite_target_count: document.getElementById('agent-invite-target-count')?.value || 50,
     invite_daily_limit: document.getElementById('agent-invite-limit')?.value || 50,
     audit_min_followers: document.getElementById('agent-min-followers')?.value || 0,
     audit_min_fulfillment: document.getElementById('agent-min-fulfillment')?.value || 0,

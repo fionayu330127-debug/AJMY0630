@@ -779,6 +779,10 @@ const DEFAULT_AGENT_SETTINGS = {
   invite_template: '您好，我们是店铺BD，看到您的内容风格和我们的商品很匹配，想邀请您参与样品合作。',
   followup_template: '您好，样品进度想和您确认一下。如已收到样品，方便的话请告知预计发布时间。',
   review_rules: '按近90天出单、内容质量、履约率和沟通效率复盘达人，沉淀复邀和加佣建议。',
+  sample_sync_hour: 7,
+  agent_daily_hour: 8,
+  agent_daily_minute: 30,
+  invite_target_count: 50,
   invite_daily_limit: 50,
   audit_min_followers: 1000,
   audit_min_fulfillment: 80,
@@ -844,8 +848,9 @@ function getAgentSettings() {
   for (const row of rows) {
     if (Object.prototype.hasOwnProperty.call(data, row.key)) data[row.key] = row.value;
   }
-  for (const key of ['invite_daily_limit', 'audit_min_followers', 'audit_min_fulfillment', 'followup_interval_days']) {
-    data[key] = Number(data[key] || DEFAULT_AGENT_SETTINGS[key]);
+  for (const key of ['sample_sync_hour', 'agent_daily_hour', 'agent_daily_minute', 'invite_target_count', 'invite_daily_limit', 'audit_min_followers', 'audit_min_fulfillment', 'followup_interval_days']) {
+    const value = Number(data[key]);
+    data[key] = Number.isFinite(value) ? value : DEFAULT_AGENT_SETTINGS[key];
   }
   return data;
 }
@@ -856,7 +861,12 @@ function saveAgentSettings(input = {}) {
   Object.keys(DEFAULT_AGENT_SETTINGS).forEach((key) => {
     if (input[key] !== undefined) next[key] = input[key];
   });
-  next.invite_daily_limit = Math.max(1, Number(next.invite_daily_limit || 50));
+  const settingNumber = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  next.sample_sync_hour = Math.max(0, Math.min(23, settingNumber(next.sample_sync_hour, 7)));
+  next.agent_daily_hour = Math.max(0, Math.min(23, settingNumber(next.agent_daily_hour, 8)));
+  next.agent_daily_minute = Math.max(0, Math.min(59, settingNumber(next.agent_daily_minute, 30)));
+  next.invite_target_count = Math.max(1, settingNumber(next.invite_target_count, 50));
+  next.invite_daily_limit = Math.max(1, settingNumber(next.invite_daily_limit, next.invite_target_count || 50));
   next.audit_min_followers = Math.max(0, Number(next.audit_min_followers || 0));
   next.audit_min_fulfillment = Math.max(0, Math.min(100, Number(next.audit_min_fulfillment || 0)));
   next.followup_interval_days = Math.max(1, Number(next.followup_interval_days || 3));
@@ -1645,7 +1655,8 @@ function generateWorkflowQueue(workflowId = null) {
   };
   const candidates = listInviteCandidates(candidateQuery);
   const diagnostics = inviteCandidateDiagnostics(candidateQuery);
-  const inviteLimit = Math.max(1, Number(config.invite_target_count || config.invite_daily_limit || 50));
+  const inviteSettings = getAgentSettings();
+  const inviteLimit = Math.max(1, Number(inviteSettings.invite_target_count || config.invite_target_count || config.invite_daily_limit || 50));
   const maxPerCreator = Math.max(1, Number(config.invite_max_per_creator || 1));
   const today = nowText().slice(0, 10);
   const todayCreated = db.prepare(`
@@ -2466,7 +2477,8 @@ async function syncAllShops(source = 'manual', shopId = 'all') {
 function msUntilNextSchedule() {
   const now = new Date();
   const next = new Date(now);
-  next.setHours(Number(process.env.TK_SAMPLE_DAILY_SYNC_HOUR || 7), 0, 0, 0);
+  const settings = getAgentSettings();
+  next.setHours(settings.sample_sync_hour, 0, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
   return { next, ms: next.getTime() - now.getTime() };
 }
@@ -2510,7 +2522,8 @@ function startShopSyncScheduler() {
 function agentScheduleDelay() {
   const now = new Date();
   const next = new Date(now);
-  next.setHours(Number(process.env.TK_AGENT_DAILY_HOUR || 8), Number(process.env.TK_AGENT_DAILY_MINUTE || 30), 0, 0);
+  const settings = getAgentSettings();
+  next.setHours(settings.agent_daily_hour, settings.agent_daily_minute, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
   return { next, ms: next.getTime() - now.getTime() };
 }
