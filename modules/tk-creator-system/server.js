@@ -867,9 +867,9 @@ function saveAgentSettings(input = {}) {
   next.agent_daily_minute = Math.max(0, Math.min(59, settingNumber(next.agent_daily_minute, 30)));
   next.invite_target_count = Math.max(1, settingNumber(next.invite_target_count, 50));
   next.invite_daily_limit = Math.max(1, settingNumber(next.invite_daily_limit, next.invite_target_count || 50));
-  next.audit_min_followers = Math.max(0, Number(next.audit_min_followers || 0));
-  next.audit_min_fulfillment = Math.max(0, Math.min(100, Number(next.audit_min_fulfillment || 0)));
-  next.followup_interval_days = Math.max(1, Number(next.followup_interval_days || 3));
+  next.audit_min_followers = Math.max(0, settingNumber(next.audit_min_followers, 0));
+  next.audit_min_fulfillment = Math.max(0, Math.min(100, settingNumber(next.audit_min_fulfillment, 0)));
+  next.followup_interval_days = Math.max(1, settingNumber(next.followup_interval_days, 3));
   const stmt = db.prepare(`
     INSERT INTO agent_settings (key, value, updated_at)
     VALUES (?, ?, ?)
@@ -1857,22 +1857,22 @@ function sampleConfirmationMessage(config, sample, template = null, shop = null,
 
 function judgeSampleReply(replyText, sample, config) {
   const text = String(replyText || '').trim().toLowerCase();
-  const negative = /(不能|不可以|无法|不会|拒绝|取消|不拍|不发|できません|無理|投稿できない|撮影できない|no|can't|cannot|not able|sorry)/i.test(text);
-  const positive = /(可以|能|会|愿意|確認|确认|拍摄|拍攝|发布|發布|投稿|撮影|できます|可能|ok|yes|sure|will|can|available)/i.test(text);
+  const negativeSignals = text.match(/不能|不可以|无法|不会|拒绝|取消|不拍|不发|できません|無理|投稿できない|撮影できない|can't|cannot|not able|no\b|sorry/gi) || [];
+  const positiveSignals = text.match(/可以拍|可以发|可以發布|可以发布|愿意拍|愿意发|确认可以|確認できます|できます|可能です|ok\b|yes\b|sure\b|will\b|can\b|available\b|拍摄并发布|撮影して投稿/gi) || [];
   const conditionAudit = agentScoreSample(sample, config);
   if (!text) {
-    return { score: 0, recommendation: 'manual_review', reason: '未录入达人回复' };
+    return { score: 0, recommendation: 'manual_review', reason: '未录入达人回复', reply_signals: [] };
   }
-  if (negative) {
-    return { score: 0, recommendation: 'manual_review', reason: `模型判断不可合作：${replyText}` };
+  if (negativeSignals.length || (positiveSignals.length && negativeSignals.length)) {
+    return { score: 0, recommendation: 'manual_review', reason: `回复包含拒绝或矛盾表述，需人工确认：${replyText}`, reply_signals: negativeSignals };
   }
-  if (!positive) {
-    return { score: 0, recommendation: 'manual_review', reason: `回复意向不明确，需人工跟进：${replyText}` };
+  if (!positiveSignals.length) {
+    return { score: 0, recommendation: 'manual_review', reason: `回复意向不明确，需人工跟进：${replyText}`, reply_signals: [] };
   }
   if (conditionAudit.recommendation !== 'auto_pass') {
-    return { ...conditionAudit, recommendation: 'review_pass', reason: `达人已回复可拍摄，但条件未全满足，建议管理员复核：${conditionAudit.reason}` };
+    return { ...conditionAudit, recommendation: 'review_pass', reason: `达人已回复可拍摄，但条件未全满足，建议管理员复核：${conditionAudit.reason}`, reply_signals: positiveSignals };
   }
-  return { score: 100, recommendation: 'auto_pass', reason: `达人回复可拍摄并发布，条件满足：${replyText}` };
+  return { score: 100, recommendation: 'auto_pass', reason: `达人回复可拍摄并发布，条件满足：${replyText}`, reply_signals: positiveSignals };
 }
 
 async function sendWorkflowSampleMessages(tasks, workflow) {
@@ -1936,34 +1936,42 @@ async function sendWorkflowSampleMessages(tasks, workflow) {
   return results;
 }
 
+const workflowRuns = new Map();
+
 async function executeWorkflow(workflowId = null) {
   const workflow = getWorkflow(workflowId);
-  const inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
-  const inviteResults = await sendWorkflowInvitations(inviteTasks, workflow);
-  const inboxTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
-  const inbox_reply_results = await sendWorkflowInboxReplies(inboxTasks, workflow);
-  const messageTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_message' && task.status === 'admin_approved');
-  const sample_message_results = await sendWorkflowSampleMessages(messageTasks, workflow);
-  const sampleTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_audit' && task.status === 'admin_approved' && task.payload?.phase === 'final_sample_review');
-  let assigned = 0;
-  for (const [index, task] of sampleTasks.entries()) {
-    if (!task.sample_id) continue;
-    const bdId = bdIdForWorkflowTask(workflow.config, index);
-    const updates = [];
-    const params = [];
-    updates.push("status = CASE WHEN status = 'pending' THEN 'approved' ELSE status END");
-    if (bdId) { updates.push('bd_id = ?'); params.push(bdId); }
-    params.push(task.sample_id);
-    db.prepare(`UPDATE samples SET ${updates.join(', ')} WHERE id = ?`).run(...params);
-    markSampleLibraryReady(task.sample_id);
-    if (bdId) {
-      notifyBdAssigned(task.sample_id).catch((error) => console.error(`[wecom] workflow notification error for sample ${task.sample_id}:`, error.message));
+  const runKey = String(workflow.id);
+  if (workflowRuns.has(runKey)) return workflowRuns.get(runKey);
+  const run = (async () => {
+    const inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+    const inviteResults = await sendWorkflowInvitations(inviteTasks, workflow);
+    const inboxTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
+    const inbox_reply_results = await sendWorkflowInboxReplies(inboxTasks, workflow);
+    const messageTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_message' && task.status === 'admin_approved');
+    const sample_message_results = await sendWorkflowSampleMessages(messageTasks, workflow);
+    const sampleTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_audit' && task.status === 'admin_approved' && task.payload?.phase === 'final_sample_review');
+    let assigned = 0;
+    for (const [index, task] of sampleTasks.entries()) {
+      if (!task.sample_id) continue;
+      const bdId = bdIdForWorkflowTask(workflow.config, index);
+      const updates = [];
+      const params = [];
+      updates.push("status = CASE WHEN status = 'pending' THEN 'approved' ELSE status END");
+      if (bdId) { updates.push('bd_id = ?'); params.push(bdId); }
+      params.push(task.sample_id);
+      db.prepare(`UPDATE samples SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+      markSampleLibraryReady(task.sample_id);
+      if (bdId) {
+        notifyBdAssigned(task.sample_id).catch((error) => console.error(`[wecom] workflow notification error for sample ${task.sample_id}:`, error.message));
+      }
+      db.prepare('UPDATE agent_workflow_tasks SET status = ?, assigned_bd_id = ?, updated_at = ?, executed_at = ? WHERE id = ?')
+        .run('executed', bdId || null, nowText(), nowText(), task.id);
+      assigned += 1;
     }
-    db.prepare('UPDATE agent_workflow_tasks SET status = ?, assigned_bd_id = ?, updated_at = ?, executed_at = ? WHERE id = ?')
-      .run('executed', bdId || null, nowText(), nowText(), task.id);
-    assigned += 1;
-  }
-  return { invite_results: inviteResults, inbox_reply_results, sample_message_results, assigned_samples: assigned };
+    return { invite_results: inviteResults, inbox_reply_results, sample_message_results, assigned_samples: assigned };
+  })();
+  workflowRuns.set(runKey, run);
+  try { return await run; } finally { workflowRuns.delete(runKey); }
 }
 
 function workflowList() {
