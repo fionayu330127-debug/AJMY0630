@@ -104,9 +104,14 @@ DEPLOY.md conflict with this section, this section and the explicit prohibitions
 3. Keep the worktree clean and report the commit hash, checks, verification steps, impact, and
    remaining risks.
 
-### Manual release boundary
+### Release boundary
 
-Production and public release are manual owner-operated steps. The agent must not run publish
-scripts, edit the local production directory, push Git branches, or operate public infrastructure.
-The owner may publish the reviewed local commit through the approved release process after the
-3002 verification is complete.
+This section supersedes the earlier owner-only publish restriction in this file. The restriction on
+`git push`, direct production-directory edits, and unconfirmed or unrelated release actions remains
+in force.
+
+Codex may run the approved publish script only after the user explicitly requests that exact
+release action. Before publishing, Codex must verify that the intended commit is clean and that
+the required local verification has completed. Codex must not edit the local production directory,
+push Git branches, or perform unrelated public-infrastructure operations. Publishing remains a
+separate, explicitly confirmed action and must not be inferred from a normal coding request.

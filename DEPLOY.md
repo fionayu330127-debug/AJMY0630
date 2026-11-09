@@ -32,18 +32,18 @@ git add <intended-files>
 git commit -m "video: <stage>-<description>"
 ```
 
-The coding agent stops after the clean local commit. The owner manually reviews and publishes the
-commit to local production, verifies port `3001`, and then decides whether to publish publicly.
-The coding agent must not run either publish script, edit `agimia-erp-production`, or run `git push`.
+The coding agent normally stops after the clean local commit. After explicit owner confirmation for
+the exact release target, Codex may run the corresponding publish script and report its result. It
+must not edit `agimia-erp-production` directly or run `git push`.
 
-Owner-only local production release, when explicitly performed by the owner:
+Explicitly confirmed local production release:
 
 ```powershell
 cd C:\Users\Administrator\Desktop\agimia-erp-shell
 .\publish-to-production.ps1 -Confirmed
 ```
 
-Owner-only public release, after local verification:
+Explicitly confirmed public release, after local verification:
 
 ```powershell
 .\publish-to-public.ps1 -Confirmed
