@@ -36,7 +36,8 @@ Database schema changes belong in `database/migrations` and must be repeatable.
 3. Commit the complete change and keep the worktree clean.
 4. Hand the clean local commit to the owner for manual production review and release.
 5. The coding agent may run an approved publish script only after the owner explicitly requests that
-   exact release action; it must not push branches or edit the production directory directly.
+   exact release action. It may run a normal `git push` only after the owner explicitly names the
+   remote and branch; force pushes and direct production-directory edits remain forbidden.
 6. Public release and post-release verification require explicit owner confirmation and remain
    separate from ordinary coding tasks.
 

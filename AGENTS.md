@@ -106,12 +106,12 @@ DEPLOY.md conflict with this section, this section and the explicit prohibitions
 
 ### Release boundary
 
-This section supersedes the earlier owner-only publish restriction in this file. The restriction on
-`git push`, direct production-directory edits, and unconfirmed or unrelated release actions remains
-in force.
+This section supersedes the earlier owner-only publish restriction in this file. Codex may perform a
+normal `git push` only after the user explicitly names the remote and branch. Force pushes, branch
+deletions, direct production-directory edits, and unconfirmed or unrelated release actions remain
+forbidden.
 
 Codex may run the approved publish script only after the user explicitly requests that exact
-release action. Before publishing, Codex must verify that the intended commit is clean and that
-the required local verification has completed. Codex must not edit the local production directory,
-push Git branches, or perform unrelated public-infrastructure operations. Publishing remains a
-separate, explicitly confirmed action and must not be inferred from a normal coding request.
+release action. Before publishing or pushing, Codex must verify that the intended commit is clean
+and that the required local verification has completed. Publishing remains a separate, explicitly
+confirmed action and must not be inferred from a normal coding request.

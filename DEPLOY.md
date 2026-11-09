@@ -34,7 +34,8 @@ git commit -m "video: <stage>-<description>"
 
 The coding agent normally stops after the clean local commit. After explicit owner confirmation for
 the exact release target, Codex may run the corresponding publish script and report its result. It
-must not edit `agimia-erp-production` directly or run `git push`.
+may run a normal `git push` only after the owner explicitly names the remote and branch. It must not
+edit `agimia-erp-production` directly or use force push.
 
 Explicitly confirmed local production release:
 
