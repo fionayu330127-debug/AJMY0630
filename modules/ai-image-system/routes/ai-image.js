@@ -123,8 +123,12 @@ function uploadableImagesFromFiles(files, defaultPrefix = 'reference') {
   }));
 }
 
-function imageApiKey() {
-  return env('CCTQ_IMAGE') || env('OPENAI_IMAGE_API_KEY') || env('OPENAI_API_KEY');
+function imageApiKeys() {
+  return [...new Set([
+    env('CCTQ_IMAGE'),
+    env('OPENAI_IMAGE_API_KEY'),
+    env('OPENAI_API_KEY'),
+  ].filter(Boolean))];
 }
 
 function imageApiUrl(endpoint) {
@@ -381,15 +385,27 @@ async function cctqImageEdit({ prompt, images, size: requestedSize, retry = true
   }, images);
 
   const request = async () => {
-    const resp = await postBuffer(imageApiUrl('/images/edits'), {
-      Authorization: `Bearer ${imageApiKey()}`,
-      Accept: 'application/json',
-      'Content-Type': `multipart/form-data; boundary=${boundary}`,
-      'Content-Length': String(body.length),
-      'User-Agent': 'cctq-image-skill/1.0',
-      Connection: 'close',
-    }, body);
-    const payload = await parseImageResponse(resp);
+    let payload;
+    let lastError;
+    const keys = imageApiKeys();
+    for (let index = 0; index < keys.length; index += 1) {
+      const resp = await postBuffer(imageApiUrl('/images/edits'), {
+        Authorization: `Bearer ${keys[index]}`,
+        Accept: 'application/json',
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': String(body.length),
+        'User-Agent': 'cctq-image-skill/1.0',
+        Connection: 'close',
+      }, body);
+      try {
+        payload = await parseImageResponse(resp);
+        break;
+      } catch (err) {
+        lastError = err;
+        if (err.statusCode !== 401 || index === keys.length - 1) throw err;
+      }
+    }
+    if (!payload) throw lastError || new Error('image API returned no payload');
     const b64 = await readImageResultAsB64(payload.data[0]);
     const resultBuffer = Buffer.from(b64, 'base64');
     const actualSize = readImageSize(resultBuffer);
