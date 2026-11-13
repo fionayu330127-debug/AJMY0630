@@ -49,6 +49,7 @@ let WORKFLOW_PRODUCT_SHOP = '';
 let WORKFLOW_BD_SELECTED = new Set();
 let inviteFilterTimer = null;
 let CURRENT_USER = null;
+let agentCenterTab = 'overview';
 
 // ════ API HELPERS ════
 async function api(path, opts = {}) {
@@ -539,10 +540,10 @@ function inviteFilterPayload() {
     source: INVITE_SOURCE,
     shop: curStore,
     search: document.getElementById('invite-search')?.value || '',
-    min_fans: document.getElementById('invite-min-fans')?.value || 0,
-    min_fulfillment: document.getElementById('invite-min-fulfillment')?.value || 0,
     min_avg_view: document.getElementById('invite-min-view')?.value || 0,
     min_orders: document.getElementById('invite-min-orders')?.value || 0,
+    min_gmv: document.getElementById('invite-min-gmv')?.value || 0,
+    min_monthly_videos: document.getElementById('invite-min-videos')?.value || 0,
     min_star: document.getElementById('invite-min-star')?.value || 0,
     category: document.getElementById('invite-category')?.value || '',
     imported: INVITE_IMPORTED,
@@ -1372,6 +1373,9 @@ async function renderBDMgmt() {
 
 function agentTemplateManagerHtml() {
   const productOptions = '<option value="">发送时选择产品</option>' + INVITE_PRODUCTS.map(p => `<option value="${p.id}">${esc(p.emoji || '')} ${esc(p.name)}${p.sku ? ` · ${esc(p.sku)}` : ''}</option>`).join('');
+  const sceneOptions = [['first_invite','首次邀约'],['reinvite','复邀老达人'],['publish_followup','催发布'],['sample_followup','询问样品收到'],['inquiry','回复咨询']].map(([v, label]) => `<option value="${v}">${label}</option>`).join('');
+  const shopOptions = SHOPS.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
+  const sceneLabels = { first_invite: '首次邀约', reinvite: '复邀老达人', publish_followup: '催发布', sample_followup: '询问样品收到', inquiry: '回复咨询', shipping_followup: '物流跟进' };
   return `
     <div class="module-panel">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px">
@@ -1382,13 +1386,18 @@ function agentTemplateManagerHtml() {
         <div class="form-row"><label class="form-label">模板名称</label><input class="form-input" id="agent-template-name" placeholder="例如 初次私信 / 样品合作邀约"></div>
         <div class="form-row"><label class="form-label">模板类型</label><select class="form-input" id="agent-template-type" onchange="onAgentTemplateTypeChange()"><option value="dm">私信消息</option><option value="collab">合作邀约</option><option value="confirmation">确认拍摄与发布</option></select></div>
       </div>
+      <div class="form-row-2">
+        <div class="form-row"><label class="form-label">使用场景</label><select class="form-input" id="agent-template-scene">${sceneOptions}</select></div>
+        <div class="form-row"><label class="form-label">语言</label><select class="form-input" id="agent-template-language"><option value="zh">中文</option><option value="en">English</option><option value="ja">日本語</option></select></div>
+      </div>
+      <div class="form-row"><label class="form-label">适用店铺（可多选，不选表示全部店铺）</label><select class="form-input" id="agent-template-shops" multiple size="${Math.min(4, Math.max(2, SHOPS.length))}">${shopOptions}</select></div>
       <div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="agent-template-commission" type="number" min="0" max="100" step="0.01" placeholder="合作邀约填写，任务创建时自动读取"></div>
       <div class="form-row" id="agent-template-product-row" style="display:none"><label class="form-label">默认合作产品</label><select class="form-input" id="agent-template-product">${productOptions}</select></div>
-      <div class="form-row"><label class="form-label">内容变量：{{creator_name}} {{creator_handle}} {{shop_name}} {{product_name}} {{product_link}} {{sample_apply_link}}</label><textarea class="bd-note-ta" id="agent-template-content" style="min-height:100px" placeholder="输入模板内容"></textarea></div>
+      <div class="form-row"><label class="form-label">内容变量：{{commission}} {{product_name}} {{shop_name}} {{creator_name}}</label><div class="module-meta">兼容变量：{{creator_handle}} {{product_link}} {{sample_apply_link}}</div><textarea class="bd-note-ta" id="agent-template-content" style="min-height:100px" placeholder="输入模板内容"></textarea></div>
       <input type="hidden" id="agent-template-id">
-      <div style="display:flex;gap:8px;margin-bottom:12px"><button class="btn btn-primary" onclick="saveInvitationTemplate()">保存模板</button><button class="btn btn-outline" onclick="clearInvitationTemplateForm()">清空</button></div>
+      <div style="display:flex;gap:8px;margin-bottom:12px"><button class="btn btn-primary" onclick="saveInvitationTemplate()">保存模板</button><button class="btn btn-outline" onclick="previewInvitationTemplate()">预览</button><button class="btn btn-outline" onclick="clearInvitationTemplateForm()">清空</button></div>
       <div class="agent-list">
-        ${INVITE_TEMPLATES.map(t => `<div class="agent-row"><div><strong>${esc(t.name)}</strong><div class="agent-load">${t.type === 'collab' ? '合作邀约' : (t.type === 'confirmation' ? '确认拍摄与发布' : '私信消息')} · ${esc((t.content || '').slice(0, 80))}</div></div><div style="display:flex;gap:8px"><button class="btn btn-outline" onclick="editInvitationTemplate(${t.id})">编辑</button><button class="btn btn-ghost" onclick="deleteInvitationTemplate(${t.id})">停用</button></div></div>`).join('') || '<div class="empty-state">暂无模板</div>'}
+        ${INVITE_TEMPLATES.map(t => { const st = t.stats || {}; return `<div class="agent-row"><div><strong>${esc(t.name)}</strong><div class="agent-load">${sceneLabels[t.scene] || '未分类'} · ${t.language === 'zh' ? '中文' : t.language === 'en' ? 'English' : '日本語'} · v${t.version || 1} · ${t.active ? '启用' : '停用'}</div><div class="agent-load">发送 ${st.sent_count || 0} · 回复 ${st.reply_count || 0}（${Math.round((st.reply_rate || 0) * 100)}%） · 接受 ${st.accepted_count || 0}（${Math.round((st.accept_rate || 0) * 100)}%）</div><div class="agent-load">${esc((t.content || '').slice(0, 80))}</div></div><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><button class="btn btn-outline" onclick="editInvitationTemplate(${t.id})">编辑</button><button class="btn btn-outline" onclick="previewInvitationTemplate(${t.id})">预览</button><button class="btn btn-outline" onclick="loadTemplateVersions(${t.id})">版本</button><button class="btn btn-ghost" onclick="deleteInvitationTemplate(${t.id})">停用</button></div></div>`; }).join('') || '<div class="empty-state">暂无模板</div>'}
       </div>
     </div>`;
 }
@@ -1403,6 +1412,9 @@ function clearInvitationTemplateForm() {
   ['agent-template-id','agent-template-name','agent-template-content','agent-template-commission'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   const type = document.getElementById('agent-template-type');
   if (type) type.value = 'dm';
+  const scene = document.getElementById('agent-template-scene'); if (scene) scene.value = 'first_invite';
+  const language = document.getElementById('agent-template-language'); if (language) language.value = 'zh';
+  document.querySelectorAll('#agent-template-shops option').forEach(o => { o.selected = false; });
   const product = document.getElementById('agent-template-product');
   if (product) product.value = '';
   onAgentTemplateTypeChange();
@@ -1414,6 +1426,10 @@ function editInvitationTemplate(id) {
   document.getElementById('agent-template-id').value = tpl.id;
   document.getElementById('agent-template-name').value = tpl.name || '';
   document.getElementById('agent-template-type').value = tpl.type || 'dm';
+  document.getElementById('agent-template-scene').value = tpl.scene || 'first_invite';
+  document.getElementById('agent-template-language').value = tpl.language || 'zh';
+  const shops = new Set((tpl.shop_ids || []).map(String));
+  document.querySelectorAll('#agent-template-shops option').forEach(o => { o.selected = shops.has(String(o.value)); });
   document.getElementById('agent-template-content').value = tpl.content || '';
   document.getElementById('agent-template-commission').value = tpl.commission_rate ?? '';
   const product = document.getElementById('agent-template-product');
@@ -1426,19 +1442,41 @@ async function saveInvitationTemplate() {
   const body = {
     name: document.getElementById('agent-template-name')?.value.trim() || '',
     type: document.getElementById('agent-template-type')?.value || 'dm',
+    scene: document.getElementById('agent-template-scene')?.value || 'first_invite',
+    language: document.getElementById('agent-template-language')?.value || 'zh',
+    shop_ids: Array.from(document.getElementById('agent-template-shops')?.selectedOptions || []).map(o => o.value),
     product_id: document.getElementById('agent-template-product')?.value || null,
     commission_rate: document.getElementById('agent-template-commission')?.value || '',
     channel: 'im',
     content: document.getElementById('agent-template-content')?.value.trim() || '',
   };
   if (!body.name || !body.content) return toast('请填写模板名称和内容');
-  await api(id ? `/api/invitations/templates/${id}` : '/api/invitations/templates', {
-    method: id ? 'PUT' : 'POST',
-    body: JSON.stringify(body),
-  });
-  toast('模板已保存');
-  clearInvitationTemplateForm();
-  renderAgentCenter();
+  try {
+    await api(id ? `/api/invitations/templates/${id}` : '/api/invitations/templates', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) });
+    toast('模板已保存并生成新版本'); clearInvitationTemplateForm(); renderAgentCenter();
+  } catch (error) { toast(error.message || '模板保存失败'); }
+}
+
+async function previewInvitationTemplate(id = null) {
+  const templateId = id || document.getElementById('agent-template-id')?.value;
+  if (!templateId) return toast('请先保存模板后预览');
+  try {
+    const result = await api(`/api/invitations/templates/${templateId}/preview`, { method: 'POST', body: JSON.stringify({ commission: document.getElementById('agent-template-commission')?.value || 15, product_name: '示例商品', shop_name: '示例店铺', creator_name: '达人示例' }) });
+    window.alert(`模板预览\n\n${result.message || ''}`);
+  } catch (error) { toast(error.message || '预览失败'); }
+}
+
+async function loadTemplateVersions(id) {
+  try {
+    const versions = await api(`/api/invitations/templates/${id}/versions`);
+    if (!versions.length) return toast('暂无历史版本');
+    const pick = window.prompt(`历史版本：\n${versions.map(v => `v${v.version} · ${v.created_at}`).join('\n')}\n\n输入版本号查看详情，输入“回滚:vX”恢复版本`);
+    if (!pick) return;
+    const rollback = pick.match(/^回滚:?v?(\d+)$/i);
+    if (rollback) { if (!window.confirm(`确认回滚到 v${rollback[1]}？将生成新的当前版本。`)) return; await api(`/api/invitations/templates/${id}/rollback`, { method: 'POST', body: JSON.stringify({ version: Number(rollback[1]) }) }); toast('已回滚并生成新版本'); return renderAgentCenter(); }
+    const version = versions.find(v => Number(v.version) === Number(pick.replace(/^v/i, '')));
+    if (version) window.alert(`v${version.version}\n\n${version.content}`); else toast('未找到该版本');
+  } catch (error) { toast(error.message || '读取版本失败'); }
 }
 
 async function deleteInvitationTemplate(id) {
@@ -1472,7 +1510,6 @@ function workflowPayloadFromForm() {
       confirmation_template_id: Number(document.getElementById('workflow-confirmation-template')?.value || 0) || null,
       product_ids: selectedProductIds,
       score_model: 'creator_table_v1',
-      audit_min_score: Number(document.getElementById('workflow-score-threshold')?.value || 70),
     },
   };
 }
@@ -1541,7 +1578,7 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
     </div>
     <div class="form-row-2">
       <div class="form-row"><label class="form-label">邀约模板</label><select class="form-input" id="workflow-template">${templateOptions}</select></div>
-      <div class="form-row"><label class="form-label">发送方式</label><select class="form-input" id="workflow-send-mode"><option value="manual" ${config.send_mode !== 'auto' ? 'selected' : ''}>手动邀约</option><option value="auto" ${config.send_mode === 'auto' ? 'selected' : ''}>自动发送</option></select></div>
+      <div class="form-row"><label class="form-label">发送方式</label><select class="form-input" id="workflow-send-mode" disabled><option value="auto" selected>自动发送（已启用）</option></select></div>
     </div>
     <div class="form-row"><label class="form-label">邀约话术 A/B 实验</label><select class="form-input" id="workflow-experiment"><option value="0">不启用</option>${experimentOptions}</select><div class="module-meta">仅选择“运行中”的实验才会分流；同一 UID 始终使用同一版本。</div></div>
     <div class="form-row-2">
@@ -1550,10 +1587,8 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
     </div>
     <div class="form-row-2">
       <div class="form-row"><label class="form-label">最低星级</label><input class="form-input" id="workflow-min-star" type="number" min="0" max="5" value="${esc(config.min_star ?? 0)}"></div>
-      <div class="form-row"><label class="form-label">最低粉丝</label><input class="form-input" id="workflow-min-fans" type="number" min="0" value="${esc(config.min_fans ?? 1000)}"></div>
     </div>
     <div class="form-row-2">
-      <div class="form-row"><label class="form-label">最低履约率 %</label><input class="form-input" id="workflow-min-fulfillment" type="number" min="0" max="100" value="${esc(config.min_fulfillment ?? 0)}"></div>
       <div class="form-row"><label class="form-label">最低均播放</label><input class="form-input" id="workflow-min-avg-view" type="number" min="0" value="${esc(config.min_avg_view ?? 0)}"></div>
     </div>
     <div class="form-row-2">
@@ -1562,9 +1597,8 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
     </div>
     <div class="form-row-2">
       <div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="workflow-commission" type="number" min="0" max="100" value="${esc(config.commission_rate ?? 15)}"></div>
-      <div class="form-row"><label class="form-label">样品审批</label><select class="form-input" id="workflow-sample-approval"><option value="manual" ${config.sample_approval_mode !== 'auto' ? 'selected' : ''}>手动审批</option><option value="auto" ${config.sample_approval_mode === 'auto' ? 'selected' : ''}>自动审批</option></select></div>
+      <div class="form-row"><label class="form-label">样品审批</label><select class="form-input" id="workflow-sample-approval" disabled><option value="manual" selected>手动审批（已启用）</option></select></div>
     </div>
-    <div class="form-row"><div class="module-meta">Agent自动审核规则：达人必须同时满足最低星级、最低粉丝、最低履约率、最低均播放、最低近30天销量和类目关键词条件，才会自动通过；选择“联盟中心达人池”时，近30天销量只使用 TK 联盟中心达人画像字段 sales_count_30d，包含其他商家商品，不读取合作达人库或本店联盟订单。</div></div>
     <div class="form-row"><label class="form-label">合作商品</label><div class="workflow-product-pick"><button class="btn btn-outline" type="button" id="workflow-product-button" onclick="openWorkflowProductModal()">选择商品</button><span class="invite-product-summary" id="workflow-product-summary"></span></div></div>
     <div class="form-row"><label class="form-label">商品审核指标模板（JSON）</label><textarea class="bd-note-ta" id="workflow-product-rules" style="min-height:130px;font-family:monospace">${esc(JSON.stringify(productRules, null, 2))}</textarea><div class="module-meta">保存后会记住到每个已选商品。支持 monthly_orders（月成交件数）、monthly_videos（月发布视频数）、followers、fulfillment_rate、avg_view、star；运算符 gte/gt/lte/lt/eq。weight 是权重，required=true 表示必需条件。</div></div>
     <div class="form-row"><label class="form-label">参与分配 BD</label><div class="workflow-bd-select"><button class="form-input workflow-bd-trigger" type="button" onclick="toggleWorkflowBdDropdown()"><span id="workflow-bd-summary">请选择负责 BD</span><span>▾</span></button><div class="workflow-bd-menu" id="workflow-bd-menu">${bdOptions || '<div class="empty-state">暂无 BD 成员</div>'}</div></div><div class="module-meta" id="workflow-bd-mode">选择多位 BD 后将按顺序轮流分配</div></div>
@@ -1578,11 +1612,9 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
   const shopOptions = SHOPS.map(s => `<option value="${s.id}" ${String(config.shop || curStore) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
   const templateOptions = INVITE_TEMPLATES.filter(t => t.type === 'collab').map(t => `<option value="${t.id}" ${Number(config.template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   const confirmationTemplateOptions = INVITE_TEMPLATES.filter(t => t.type === 'confirmation').map(t => `<option value="${t.id}" ${Number(config.confirmation_template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
-  const threshold = [60, 70, 80, 90].map(value => `<option value="${value}" ${Number(config.audit_min_score || 70) === value ? 'selected' : ''}>${value}分以上</option>`).join('');
   return `
     <div class="form-row"><label class="form-label">选择店铺</label><select class="form-input" id="workflow-shop" onchange="onWorkflowShopChange(this.value)">${shopOptions}</select></div>
     <div class="form-row"><label class="form-label">选择产品</label><div class="workflow-product-pick"><button class="btn btn-outline" type="button" id="workflow-product-button" onclick="openWorkflowProductModal()">选择产品</button><span class="invite-product-summary" id="workflow-product-summary"></span></div></div>
-    <div class="form-row"><label class="form-label">达人分数值（审核要求）</label><select class="form-input" id="workflow-score-threshold">${threshold}</select><div class="module-meta">评分公式：30天成交件数/1000×40 + 30天视频平均播放量/5000×30 +（30天成交件数/30天发布视频个数）/10×30，单项最高不超过对应权重。</div></div>
     <div class="form-row"><label class="form-label">选择邀约模板</label><select class="form-input" id="workflow-template">${templateOptions || '<option value="">暂无合作邀约模板</option>'}</select><div class="module-meta">佣金比例和邀约话术由模板决定，任务创建时不再单独设置。</div></div>
     <div class="form-row"><label class="form-label">选择确认拍摄与发布模板</label><select class="form-input" id="workflow-confirmation-template">${confirmationTemplateOptions || '<option value="">使用系统默认话术</option>'}</select><div class="module-meta">达人申请样品后，Agent 使用此模板确认是否能拍摄与发布。</div></div>
     <button class="btn btn-primary" style="width:100%" onclick="saveWorkflowFromModal()">${mode === 'edit' ? '保存并重新运行工作流' : '保存并创建工作流'}</button>`;
@@ -1731,9 +1763,9 @@ function workflowEmptyHint(workflow, config = {}, diagnostics = null) {
     if (pool.requires_sync) {
       return `<div class="empty-hint">当前工作流没有生成邀约达人。联盟中心达人池或近30天销量尚未同步：当前店铺达人池 ${esc(pool.total || 0)} 人，已同步近30天销量 ${esc(pool.with_sales_30d || 0)} 人。请先同步联盟中心达人池，或等待分批补齐 Performance 详情。</div>`;
     }
-    return `<div class="empty-hint">当前工作流没有生成邀约达人。当前店铺联盟中心达人池 ${esc(pool.total || 0)} 人，其中已同步近30天销量 ${esc(pool.with_sales_30d || 0)} 人；本工作流要求近30天销量 >= ${esc(config.min_orders ?? 0)}、最低粉丝 ${esc(config.min_fans ?? 0)}、最低履约率 ${esc(config.min_fulfillment ?? 0)}%、最低均播放 ${esc(config.min_avg_view ?? 0)}。请降低条件或继续分批同步更多达人 Performance 详情后再生成队列。</div>`;
+    return `<div class="empty-hint">当前工作流没有生成邀约达人。当前店铺联盟中心达人池 ${esc(pool.total || 0)} 人，其中已同步近30天销量 ${esc(pool.with_sales_30d || 0)} 人；请检查审核标准和数据同步状态后再生成队列。</div>`;
   }
-  return `<div class="empty-hint">当前工作流没有生成邀约达人。可能原因：最低近30天销量 ${esc(config.min_orders ?? 0)}、最低粉丝 ${esc(config.min_fans ?? 0)}、星级/履约率/类目筛选过严，或达人已达到每人邀约上限 ${esc(config.invite_max_per_creator ?? 1)} 次。调整条件后点击“生成队列”。</div>`;
+  return `<div class="empty-hint">当前工作流没有生成邀约达人。可能原因：数据未同步、审核标准未达标，或达人已达到每人邀约上限 ${esc(config.invite_max_per_creator ?? 1)} 次。请检查审核标准后点击“生成队列”。</div>`;
 }
 
 function workflowTaskRows(tasks) {
@@ -1866,13 +1898,18 @@ async function replyAgentInbox(id) {
 function optimizationPanel(data, workflowId) {
   if (!data) return '';
   const m = data.metrics || {};
-  const items = (data.suggestions || []).slice(0, 5);
+  const statusLabel = { pending: '待审核', approved: '已启用', dismissed: '已驳回', rolled_back: '已回退' };
+  const items = data.suggestions || [];
+  const experiments = data.experiments || [];
+  const rows = items.map(item => `<tr><td>${esc(item.created_at || '-')}</td><td><b>${esc(item.title)}</b><div class="module-meta">${esc(item.suggestion_type || '-')}</div></td><td>${esc(item.reason)}</td><td>${esc(item.expected_impact || '需启用后观察实际变化')}</td><td><span class="status-tag">${statusLabel[item.status] || item.status}</span></td><td><div class="abtns">${item.status === 'pending' ? `<button class="abtn ok" onclick="decideOptimization(${item.id}, 'approve')">启用</button><button class="abtn ng" onclick="decideOptimization(${item.id}, 'dismiss')">驳回</button>` : ''}${item.status === 'approved' ? `<button class="btn btn-outline" onclick="rollbackOptimization(${item.id})">回退</button>` : ''}<button class="btn btn-outline" onclick="viewOptimization(${item.id})">详情</button></div></td></tr>`).join('');
+  const experimentRows = experiments.map(item => { const report = item.report || {}; return `<tr><td>${esc(item.name)}</td><td>${esc(item.status)}</td><td>${(report.variants || []).map(v => `${esc(v.name)}：发送${v.sent || 0} / 回复率${Math.round((v.reply_rate || 0) * 100)}% / 接受率${Math.round((v.accept_rate || 0) * 100)}%`).join('<br>') || '-'}</td><td>${report.enough_data ? '数据充足' : '数据积累中'}</td></tr>`; }).join('');
   return `<div class="module-panel" style="margin-bottom:12px">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
-      <div><h3>经验优化建议</h3><div class="module-meta">邀约 ${m.invitation_total || 0} · 已发送 ${m.sent || 0} · 有效合作 ${m.fulfilled || 0} · 已发布 ${m.published || 0}</div></div>
-      <button class="btn btn-outline" onclick="generateOptimization(${workflowId})">重新分析</button>
+      <div><h3>优化建议</h3><div class="module-meta">邀约 ${m.invitation_total || 0} · 已发送 ${m.sent || 0} · 有效合作 ${m.fulfilled || 0} · 已发布 ${m.published || 0}</div></div>
+      <div class="abtns"><button class="btn btn-outline" onclick="generateOptimization(${workflowId})">重新分析</button><button class="btn btn-primary" onclick="createOptimizationExperiment()">新增 A/B 测试</button></div>
     </div>
-    <div style="margin-top:10px">${items.map(item => `<div class="empty-hint" style="margin:6px 0"><b>${esc(item.title)}</b>：${esc(item.reason)}<div style="margin-top:6px"><button class="abtn ok" onclick="decideOptimization(${item.id}, 'approve')">采纳</button><button class="abtn ng" onclick="decideOptimization(${item.id}, 'dismiss')">忽略</button></div></div>`).join('') || '<div class="module-meta" style="margin-top:10px">暂无建议，先运行一段时间积累数据。</div>'}</div>
+    <div class="table-wrap" style="margin-top:12px"><table><thead><tr><th>创建时间</th><th>建议</th><th>依据的数据说明</th><th>预期影响</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="6"><div class="empty-state">暂无优化建议，点击“重新分析”生成结构化建议。</div></td></tr>'}</tbody></table></div>
+    <div style="margin-top:18px"><h3>话术 A/B 测试</h3><div class="module-meta">仅记录分组和结果，不自动启用或对外发送。</div><div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>测试名称</th><th>状态</th><th>分组结果</th><th>数据状态</th></tr></thead><tbody>${experimentRows || '<tr><td colspan="4"><div class="empty-state">暂无 A/B 测试。</div></td></tr>'}</tbody></table></div></div>
   </div>`;
 }
 
@@ -1956,6 +1993,29 @@ async function decideOptimization(id, decision) {
     ? (applied ? '建议已采纳，审核阈值已更新' : `建议已采纳：${result.application?.reason || '请在工作流设置中实施'}`)
     : '建议已忽略');
   renderAutomationCenter();
+}
+
+async function viewOptimization(id) {
+  const item = await api(`/api/agent/optimization/${id}`);
+  alert([`建议：${item.title}`, `状态：${item.status}`, `创建时间：${item.created_at}`, `依据：${item.reason}`, `预期影响：${item.expected_impact || '-'}`, `修改前：${JSON.stringify(item.before || {}, null, 2)}`, `修改后：${JSON.stringify(item.after || {}, null, 2)}`].join('\n\n'));
+}
+
+async function rollbackOptimization(id) {
+  if (!confirm('确认回退？系统会恢复启用前版本，并记录本次操作。')) return;
+  await api(`/api/agent/optimization/${id}/rollback`, { method: 'POST', body: '{}' });
+  toast('优化建议已回退');
+  renderAgentCenter();
+}
+
+async function createOptimizationExperiment() {
+  const name = prompt('请输入 A/B 测试名称');
+  if (!name) return;
+  const first = prompt('请输入话术 A 模板 ID');
+  const second = prompt('请输入话术 B 模板 ID');
+  if (!first || !second || Number(first) === Number(second)) return toast('需要两个不同的话术模板 ID');
+  await api('/api/agent/experiments', { method: 'POST', body: JSON.stringify({ name, variants: [{ name: 'A', template_id: Number(first), weight: 50 }, { name: 'B', template_id: Number(second), weight: 50 }] }) });
+  toast('A/B 测试已创建，当前为草稿，不会自动发送');
+  renderAgentCenter();
 }
 
 function selectWorkflow(id) {
@@ -2071,10 +2131,8 @@ function workflowPanelHtml() {
       </div>
       <div class="form-row-2">
         <div class="form-row"><label class="form-label">最低星级</label><input class="form-input" id="workflow-min-star" type="number" min="0" max="5" value="${esc(config.min_star ?? 0)}"></div>
-        <div class="form-row"><label class="form-label">最低粉丝</label><input class="form-input" id="workflow-min-fans" type="number" min="0" value="${esc(config.min_fans ?? 1000)}"></div>
       </div>
       <div class="form-row-2">
-        <div class="form-row"><label class="form-label">最低履约率 %</label><input class="form-input" id="workflow-min-fulfillment" type="number" min="0" max="100" value="${esc(config.min_fulfillment ?? 0)}"></div>
         <div class="form-row"><label class="form-label">最低均播放</label><input class="form-input" id="workflow-min-avg-view" type="number" min="0" value="${esc(config.min_avg_view ?? 0)}"></div>
       </div>
       <div class="form-row-2">
@@ -2083,10 +2141,10 @@ function workflowPanelHtml() {
       </div>
       <div class="form-row-2">
         <div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="workflow-commission" type="number" min="0" max="100" value="${esc(config.commission_rate ?? 15)}"></div>
-        <div class="form-row"><label class="form-label">发送方式</label><select class="form-input" id="workflow-send-mode"><option value="manual" ${config.send_mode !== 'auto' ? 'selected' : ''}>手动邀约</option><option value="auto" ${config.send_mode === 'auto' ? 'selected' : ''}>自动发送</option></select></div>
+        <div class="form-row"><label class="form-label">发送方式</label><select class="form-input" id="workflow-send-mode" disabled><option value="auto" selected>自动发送（已启用）</option></select></div>
       </div>
       <div class="form-row-2">
-        <div class="form-row"><label class="form-label">样品审批</label><select class="form-input" id="workflow-sample-approval"><option value="manual" ${config.sample_approval_mode !== 'auto' ? 'selected' : ''}>手动审批</option><option value="auto" ${config.sample_approval_mode === 'auto' ? 'selected' : ''}>自动审批</option></select></div>
+        <div class="form-row"><label class="form-label">样品审批</label><select class="form-input" id="workflow-sample-approval" disabled><option value="manual" selected>手动审批（已启用）</option></select></div>
         <div class="form-row"><label class="form-label">Agent自动审核</label><div class="module-meta">同时满足上方全部筛选条件才自动通过，否则进入人工确认。</div></div>
       </div>
       <div class="form-row"><label class="form-label">合作商品</label><div class="agent-check-grid">${productList}</div></div>
@@ -2122,6 +2180,17 @@ async function executeWorkflow() {
   toast(`执行完成：邀约 ${AGENT_WORKFLOW.invite_results?.length || 0} 条，分配样品 ${AGENT_WORKFLOW.assigned_samples || 0} 条`);
   renderAgentCenter();
 }
+
+function settingsEnhancementHtml(auth, settings) {
+  const tokenRows = (auth.shops || []).map(shop => `<tr><td>${esc(shop.name)}</td><td>${shop.has_access_token ? '已配置' : '未配置'}</td><td>${shop.token_expires_at ? esc(shop.token_expires_at) : '-'}</td><td>${esc(shop.last_sync_at || '-')}</td><td>${esc(shop.last_sync_status || shop.last_sync_message || '-')}</td><td><button class="btn ${shop.authorized ? 'btn-outline' : 'btn-primary'}" onclick="openTikTokAuth('${shop.id}')">${shop.authorized ? '重新授权' : '去授权'}</button></td></tr>`).join('');
+  const bdRows = BD_LIST.map(b => `<tr><td>${esc(b.name)}</td><td>${b.load || 0}</td><td><input class="form-input" style="width:110px" type="number" min="1" value="${esc(b.max_load || 20)}" id="bd-max-load-${b.id}"></td><td><button class="btn btn-outline" onclick="saveBdLoad(${b.id})">保存</button></td></tr>`).join('');
+  return `<div class="agent-settings-section module-panel"><h3>TikTok Shop 授权</h3><div class="module-meta">Redirect URI：${esc(auth.redirect_uri || '-')} · Token 仅显示状态和到期时间；到期前 7 天提醒。</div><div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>店铺</th><th>Access Token</th><th>到期时间</th><th>上次同步</th><th>结果</th><th>操作</th></tr></thead><tbody>${tokenRows || '<tr><td colspan="6"><div class="empty-state">暂无店铺</div></td></tr>'}</tbody></table></div></div>
+    <div class="agent-settings-section module-panel"><div style="display:flex;justify-content:space-between;align-items:center"><h3>BD 成员</h3><button class="btn btn-outline" onclick="syncBDMembers()">同步员工名单</button></div><div class="module-meta">成员来源为同步员工名单；最大负载用于自动分配时的容量参考。</div><div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>成员</th><th>当前负载</th><th>最大负载</th><th>操作</th></tr></thead><tbody>${bdRows || '<tr><td colspan="4"><div class="empty-state">暂无 BD 成员</div></td></tr>'}</tbody></table></div></div>
+    <div class="module-panel"><h3>AI 接口</h3><div class="module-meta">当前默认不调用 AI。API Key 只显示后四位，测试连接仅校验配置。</div><div class="form-row"><label class="form-label">API Key</label><input class="form-input" id="agent-ai-api-key" value="${esc(settings.ai_api_key || '')}" placeholder="保存后仅显示后四位"></div><div class="form-row-2"><div class="form-row"><label class="form-label">模型</label><select class="form-input" id="agent-ai-model"><option value="不调用 AI">不调用 AI</option><option value="gpt-4o-mini" ${settings.ai_model === 'gpt-4o-mini' ? 'selected' : ''}>gpt-4o-mini</option><option value="自定义">自定义</option></select></div><div class="form-row"><label class="form-label">月度费用上限</label><input class="form-input" id="agent-ai-budget" type="number" min="0" value="${esc(settings.ai_monthly_budget ?? 0)}"></div></div><div class="abtns"><button class="btn btn-primary" onclick="saveAgentSettings()">保存配置</button><button class="btn btn-outline" onclick="testAgentAi()">测试连接</button></div></div>
+    <div class="module-panel"><h3>护栏与通知</h3><div class="module-meta">所有对外动作仍需遵守 Agent 启停和人工确认流程。</div><div class="form-row-2"><div class="form-row"><label class="form-label">邀约每日上限</label><input class="form-input" id="agent-invite-limit" type="number" min="1" value="${esc(settings.invite_daily_limit ?? 50)}"></div><div class="form-row"><label class="form-label">跟进间隔（天）</label><input class="form-input" id="agent-followup-days" type="number" min="1" value="${esc(settings.followup_interval_days ?? 3)}"></div></div><div class="form-row"><label class="form-label">通知 Webhook 地址</label><input class="form-input" id="agent-notify-webhook" value="${esc(settings.notify_webhook || '')}" placeholder="保存后仅显示后四位"></div><label style="display:flex;gap:8px;align-items:center;margin:10px 0"><input type="checkbox" id="agent-notify-failure" ${settings.notify_failure_enabled !== 0 ? 'checked' : ''}> 同步失败或异常时通知我</label><div class="form-row"><label class="form-label">运行日志保留天数</label><input class="form-input" id="agent-log-retention" type="number" min="1" value="${esc(settings.log_retention_days ?? 90)}"></div><div class="abtns"><button class="btn btn-primary" onclick="saveAgentSettings()">保存配置</button><button class="btn btn-outline" onclick="testAgentNotify()">测试发送</button></div></div>
+  </div>`;
+}
+
 async function renderAgentCenter() {
   const box = document.getElementById('agent-center');
   if (!box) return;
@@ -2139,10 +2208,14 @@ async function renderAgentCenter() {
       auth_url: ''
     }))
   };
-  const [bdList, auth, settings] = await Promise.all([
+  const [overview, bdList, auth, settings, reviewData, runLogs, optimization] = await Promise.all([
+    api('/api/agent/overview').catch(() => ({ runtime: { paused: false }, flows: [], today: {}, pending_confirmations: 0, pending_items: [], month_ai_cost: 0, month_ai_cost_limit: 0, standard: null })),
     api('/api/bd').catch(() => BD_LIST),
     api('/api/tiktok/auth/status').catch(() => fallbackAuth),
     api('/api/agent/settings').catch(() => AGENT_SETTINGS || {}),
+    api('/api/agent/review-standards').catch(() => ({ standard: null })),
+    api('/api/agent/run-logs?limit=10').catch(() => []),
+    api('/api/agent/optimization').catch(() => null),
   ]);
   BD_LIST = bdList;
   AGENT_SETTINGS = settings;
@@ -2151,84 +2224,71 @@ async function renderAgentCenter() {
     api('/api/invitations/templates').catch(() => []),
     productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
   ]);
-  const totalLoad = BD_LIST.reduce((sum, b) => sum + Number(b.load || 0), 0);
-  const maxLoad = Math.max(...BD_LIST.map(b => Number(b.load || 0)), 0);
-  const avgLoad = BD_LIST.length ? Math.round(totalLoad / BD_LIST.length) : 0;
+  const standard = reviewData.standard || { version: 1, sample_pass_line: 70, invite_pass_line: 70, orders_base: 1000, views_base: 5000, conversion_base: 10, orders_weight: 30, views_weight: 30, conversion_weight: 30, fans_hard_limit: 1000, fans_score_1000: 3, fans_score_5000: 5, fans_score_50000: 8, fans_score_200000: 10, missing_data_action: '疑', zero_video_action: '第三项计0分，其余照常' };
+  const tabs = [['overview', '概览'], ['templates', '模板与话术库'], ['review', '审核标准'], ['optimize', '优化建议'], ['settings', '设置']];
+  const overviewHtml = () => {
+    const flows = overview.flows || [];
+    const flowCards = flows.map(flow => `<div class="agent-flow-card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><h3>${esc(flow.label)}</h3><button class="agent-switch ${flow.active ? 'on' : ''}" aria-label="${esc(flow.label)}启停" onclick="toggleAgentFlow('${flow.key}', ${!flow.active})"></button></div><div class="module-meta">按当前审核标准 v${esc(standard.version)} 执行</div><div class="agent-flow-meta">上次运行：${esc(flow.last_run_at || '-')}<br>上次结果：${esc(flow.last_result?.result || '-')}<br>下次运行：${esc(flow.next_run_at || '-')}</div><div class="agent-flow-actions"><button class="btn btn-outline" onclick="trialAgentFlow('${flow.key}')">试运行</button></div></div>`).join('');
+    const logs = (runLogs || []).map(row => `<tr><td>${esc(row.created_at)}</td><td>${esc(row.flow_label)}</td><td>${esc(row.mode === 'trial' ? '试运行' : '定时')}</td><td>${esc(row.summary?.result || row.status)}</td></tr>`).join('');
+    const pending = (overview.pending_items || []).map(row => `<tr onclick="showPage('automation')" style="cursor:pointer"><td>${esc(row.task_type)}</td><td>${esc(row.creator_name || row.uid || '-')}</td><td>${esc(row.reason || '待确认')}</td></tr>`).join('');
+    return `<div class="agent-overview-head"><div><h2 style="margin:0 0 4px">Agent 概览</h2><div class="module-meta">只展示运行状态、今日动作和待处理事项</div></div><div class="agent-runtime"><span class="agent-runtime-status">${overview.runtime?.paused ? '已暂停' : '运行中'}</span><button class="btn ${overview.runtime?.paused ? 'btn-primary' : 'btn-outline'}" onclick="toggleAllAgents(${!overview.runtime?.paused})">${overview.runtime?.paused ? '恢复全部 Agent' : '一键暂停全部 Agent'}</button></div></div><div class="module-grid"><div class="module-panel"><h3>今日已发邀约数</h3><div class="module-num">${overview.today?.sent_invites || 0} <span style="font-size:14px;color:#697586">/ ${overview.today?.invite_limit || 0}</span></div><div class="module-meta">对比每日上限</div></div><div class="module-panel" onclick="showPage('automation')" style="cursor:pointer"><h3>待我确认事项数</h3><div class="module-num">${overview.pending_confirmations || 0}</div><div class="module-meta">点击进入处理队列</div></div><div class="module-panel"><h3>本月 AI 费用</h3><div class="module-num">¥${overview.month_ai_cost || 0} <span style="font-size:14px;color:#697586">/ ¥${overview.month_ai_cost_limit || 0}</span></div><div class="module-meta">当前未接入 AI，费用暂为 0</div></div></div><div class="agent-flow-grid">${flowCards || '<div class="agent-empty">暂无任务流</div>'}</div><div class="agent-config-grid"><div class="agent-list-panel"><h3>最近10条运行记录</h3><table><thead><tr><th>时间</th><th>任务流</th><th>类型</th><th>结果</th></tr></thead><tbody>${logs || '<tr><td colspan="4"><div class="agent-empty">暂无运行记录，试运行后会显示在这里</div></td></tr>'}</tbody></table></div><div class="agent-list-panel"><h3>待我确认</h3><table><thead><tr><th>类型</th><th>达人</th><th>说明</th></tr></thead><tbody>${pending || '<tr><td colspan="3"><div class="agent-empty">暂无待确认事项</div></td></tr>'}</tbody></table></div></div>`;
+  };
+  const settingsHtml = `<div class="agent-settings-section module-panel"><h3>TikTok Shop 授权</h3><div class="module-meta" style="margin-bottom:10px">Redirect URI：${esc(auth.redirect_uri || '')}</div><div class="agent-list">${(auth.shops || []).map(shop => `<div class="agent-row"><div><strong>${esc(shop.name)}</strong><div class="agent-load">Access Token：${shop.has_access_token ? '已保存' : '缺失'} · Refresh Token：${shop.has_refresh_token ? '已保存' : '缺失'} · shop_cipher：${shop.has_shop_cipher ? '已保存' : '缺失'}</div><div class="agent-load">上次同步：${esc(shop.last_sync_at || '-')} ${esc(shop.last_sync_message || '')}</div></div><button class="btn ${shop.authorized ? 'btn-outline' : 'btn-primary'}" onclick="openTikTokAuth('${shop.id}')">${shop.authorized ? '重新授权' : '去授权'}</button></div>`).join('') || '<div class="agent-empty">暂无店铺</div>'}</div></div><div class="agent-settings-section module-panel"><div style="display:flex;justify-content:space-between;align-items:center"><h3>BD 成员</h3><button class="btn btn-outline" onclick="syncBDMembers()">同步员工名单</button></div><div class="agent-list">${BD_LIST.map(b => `<div class="agent-row"><div><strong>${esc(b.name)}</strong><div class="agent-load">系统员工 · 负责 ${b.load || 0} 个达人 · 企微 ${esc(b.wecom_userid || '未配置')}</div></div></div>`).join('') || '<div class="agent-empty">暂无 BD 成员</div>'}</div></div>${agentTemplateManagerHtml()}<div class="agent-config-grid"><div class="module-panel"><h3>话术模板</h3><div class="form-row"><label class="form-label">自动邀约话术</label><textarea class="bd-note-ta" id="agent-invite-template">${esc(settings.invite_template || '')}</textarea></div><div class="form-row"><label class="form-label">BD 跟进话术</label><textarea class="bd-note-ta" id="agent-followup-template">${esc(settings.followup_template || '')}</textarea></div></div><div class="module-panel"><h3>Agent 配置</h3><div class="form-row"><label class="form-label">复盘口径</label><textarea class="bd-note-ta" id="agent-review-rules">${esc(settings.review_rules || '')}</textarea></div><div class="form-row-2"><div class="form-row"><label class="form-label">邀约每日上限</label><input class="form-input" id="agent-invite-limit" type="number" min="1" value="${esc(settings.invite_daily_limit ?? 50)}"></div><div class="form-row"><label class="form-label">跟进间隔（天）</label><input class="form-input" id="agent-followup-days" type="number" min="1" value="${esc(settings.followup_interval_days ?? 3)}"></div></div><div class="form-row"><label class="form-label">Agent 每日自动运行时间</label><input class="form-input" id="agent-daily-run-time" type="time" value="${String(settings.agent_daily_hour ?? 8).padStart(2, '0')}:${String(settings.agent_daily_minute ?? 30).padStart(2, '0')}"></div><div class="form-row"><label class="form-label">自动分配策略</label><textarea class="bd-note-ta" id="agent-assign-strategy">${esc(settings.assign_strategy || '')}</textarea></div><button class="btn btn-primary" onclick="saveAgentSettings()">保存 Agent 配置</button></div></div>`;
+  const settingsExtrasHtml = `<div class="module-panel" style="margin-top:12px"><h3>运行参数</h3><div class="form-row-2"><div class="form-row"><label class="form-label">每次任务邀约人数</label><input class="form-input" id="agent-invite-target-count" type="number" min="1" value="${esc(settings.invite_target_count ?? 50)}"></div><div class="form-row"><label class="form-label">样品申请每日巡检时间</label><input class="form-input" id="agent-sample-sync-time" type="time" value="${String(settings.sample_sync_hour ?? 7).padStart(2, '0')}:00"></div></div></div>`;
+  let content = agentCenterTab === 'overview' ? overviewHtml() : agentCenterTab === 'review' ? reviewStandardPanelHtml(standard) : agentCenterTab === 'settings' ? settingsEnhancementHtml(auth, settings) : agentCenterTab === 'templates' ? agentTemplateManagerHtml() : optimizationPanel(optimization, overview.flows?.[0]?.workflow_id || 0);
   box.innerHTML = `
-    <div class="module-grid">
-      <div class="module-panel"><h3>BD 成员</h3><div class="module-num">${BD_LIST.length}</div><div class="module-meta">当前启用成员</div></div>
-      <div class="module-panel"><h3>跟进达人</h3><div class="module-num">${totalLoad}</div><div class="module-meta">按 UID 去重统计</div></div>
-      <div class="module-panel"><h3>平均负载</h3><div class="module-num">${avgLoad}</div><div class="module-meta">每位 BD 当前负责达人</div></div>
+    <div class="agent-tabs">
+      ${tabs.map(([key, label]) => `<button class="agent-tab ${agentCenterTab === key ? 'active' : ''}" onclick="setAgentCenterTab('${key}')">${label}</button>`).join('')}
     </div>
-    <div class="module-panel">
-      <h3>TikTok Shop 授权</h3>
-      <div class="module-meta" style="margin-bottom:10px">Redirect URI：${auth.redirect_uri}</div>
-      <div class="agent-list">
-        ${auth.shops.map(shop => `
-          <div class="agent-row">
-            <div>
-              <strong>${shop.name}</strong>
-              <div class="agent-load">
-                Access Token：${shop.has_access_token ? '已保存' : '缺失'} ·
-                Refresh Token：${shop.has_refresh_token ? '已保存' : '缺失'} ·
-                shop_cipher：${shop.has_shop_cipher ? '已保存' : '缺失'}
-              </div>
-              <div class="agent-load">上次同步：${shop.last_sync_at || '-'} ${shop.last_sync_message || ''}</div>
-            </div>
-            <button class="btn ${shop.authorized ? 'btn-outline' : 'btn-primary'}" onclick="openTikTokAuth('${shop.id}')">
-              ${shop.authorized ? '重新授权' : '去授权'}
-            </button>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-    <div class="agent-grid">
-      <div class="agent-list">
-        ${BD_LIST.map(b => `
-          <div class="agent-row">
-            <div><strong>${b.name}</strong><div class="agent-load">系统员工 · 负责 ${b.load || 0} 个达人 · 企微 ${b.wecom_userid || '未配置'}</div></div>
-            <span class="shop-tag st-both">${maxLoad && b.load === maxLoad ? '高负载' : '正常'}</span>
-          </div>
-        `).join('') || '<div class="empty-state">暂无 BD 成员</div>'}
-      </div>
-      <div class="module-panel">
-        <h3>Agent 任务流</h3>
-        <div class="workflow">
-          <div class="step"><b>自动邀约</b><span>按达人画像、店铺类目和每日上限生成邀约任务</span></div>
-          <div class="step"><b>自动审核</b><span>按粉丝量、履约率、内容数据和合作规则给出审核建议</span></div>
-          <div class="step"><b>自动分配</b><span>按店铺、达人类型、BD 负载和历史合作经验分配负责人</span></div>
-          <div class="step"><b>BD跟进</b><span>围绕样品寄出、视频发布和超时未回复触发跟进提醒</span></div>
-        </div>
-      </div>
-    </div>
-    ${agentTemplateManagerHtml()}
-    <div class="agent-config-grid">
-      <div class="module-panel">
-        <h3>话术模板</h3>
-        <div class="form-row"><label class="form-label">自动邀约话术</label><textarea class="bd-note-ta" id="agent-invite-template">${esc(settings.invite_template || '')}</textarea></div>
-        <div class="form-row"><label class="form-label">BD 跟进话术</label><textarea class="bd-note-ta" id="agent-followup-template">${esc(settings.followup_template || '')}</textarea></div>
-      </div>
-      <div class="module-panel">
-        <h3>复盘规则</h3>
-        <div class="form-row"><label class="form-label">复盘口径</label><textarea class="bd-note-ta" id="agent-review-rules">${esc(settings.review_rules || '')}</textarea></div>
-        <div class="form-row-2">
-          <div class="form-row"><label class="form-label">邀约每日上限</label><input class="form-input" id="agent-invite-limit" type="number" min="1" value="${esc(settings.invite_daily_limit ?? 50)}"></div>
-          <div class="form-row"><label class="form-label">跟进间隔（天）</label><input class="form-input" id="agent-followup-days" type="number" min="1" value="${esc(settings.followup_interval_days ?? 3)}"></div>
-        </div>
-        <div class="form-row-2">
-          <div class="form-row"><label class="form-label">每次任务邀约人数</label><input class="form-input" id="agent-invite-target-count" type="number" min="1" value="${esc(settings.invite_target_count ?? 50)}"><div class="module-meta">每次生成工作流队列时，Agent 会持续筛选，直到达到该数量或没有更多达标达人。</div></div>
-          <div class="form-row"><label class="form-label">样品申请每日巡检时间</label><input class="form-input" id="agent-sample-sync-time" type="time" value="${String(settings.sample_sync_hour ?? 7).padStart(2, '0')}:00"></div>
-        </div>
-        <div class="form-row"><label class="form-label">Agent 每日自动运行时间</label><input class="form-input" id="agent-daily-run-time" type="time" value="${String(settings.agent_daily_hour ?? 8).padStart(2, '0')}:${String(settings.agent_daily_minute ?? 30).padStart(2, '0')}"><div class="module-meta">自动执行邀约、样品申请巡检、收件箱同步和审核队列生成。</div></div>
-        <div class="form-row-2">
-          <div class="form-row"><label class="form-label">自动审核最低粉丝</label><input class="form-input" id="agent-min-followers" type="number" min="0" value="${esc(settings.audit_min_followers ?? 1000)}"></div>
-          <div class="form-row"><label class="form-label">最低履约率（%）</label><input class="form-input" id="agent-min-fulfillment" type="number" min="0" max="100" value="${esc(settings.audit_min_fulfillment ?? 80)}"></div>
-        </div>
-        <div class="form-row"><label class="form-label">自动分配策略</label><textarea class="bd-note-ta" id="agent-assign-strategy">${esc(settings.assign_strategy || '')}</textarea></div>
-        <button class="btn btn-primary" onclick="saveAgentSettings()">保存 Agent 配置</button>
-      </div>
-    </div>`;
+    <div class="module-meta agent-standard-link" style="margin:0 0 12px;cursor:pointer" onclick="setAgentCenterTab('review')">当前审核标准版本：v${esc(standard.version)} · 点击查看审核标准</div>${content}`;
+  if (agentCenterTab === 'review') updateReviewCalculator();
 }
+
+function setAgentCenterTab(tab) {
+  agentCenterTab = tab;
+  renderAgentCenter();
+}
+
+async function toggleAllAgents(paused) {
+  await api('/api/agent/runtime', { method: 'PUT', body: JSON.stringify({ paused }) });
+  toast(paused ? '全部 Agent 已暂停' : '全部 Agent 已恢复');
+  renderAgentCenter();
+}
+
+async function toggleAgentFlow(flowKey, active) {
+  await api(`/api/agent/flows/${flowKey}`, { method: 'PUT', body: JSON.stringify({ active }) });
+  toast(active ? '任务流已启用' : '任务流已停用');
+  renderAgentCenter();
+}
+
+async function trialAgentFlow(flowKey) {
+  const result = await api(`/api/agent/flows/${flowKey}/trial`, { method: 'POST', body: JSON.stringify({}) });
+  toast(result.summary?.result || '试运行完成');
+  renderAgentCenter();
+}
+
+function reviewStandardPanelHtml(s) {
+  return `<div class="module-panel review-standard-panel">
+    <div class="review-standard-head"><div><h2>审核通过线</h2><div class="module-meta">达人总分达到分数，才判断为通过；邀约筛选和样品审核分别使用对应通过线</div></div><span class="review-version">v${esc(s.version)}</span></div>
+    <div class="form-row-2"><div class="form-row"><label class="form-label">样品审核通过线</label><input class="form-input review-field" id="review-sample-line" type="number" min="0" max="100" value="${esc(s.sample_pass_line)}"></div><div class="form-row"><label class="form-label">邀约筛选通过线</label><input class="form-input review-field" id="review-invite-line" type="number" min="0" max="100" value="${esc(s.invite_pass_line)}"></div></div>
+    <h3>达人打分依据</h3><div class="review-fan-table"><div class="review-row review-row-head"><span>抓取指标</span><span>粉丝区间</span><span>计分取值</span><span>分数</span></div>${[['1000-5000','fans_score_1000'],['5000-50000','fans_score_5000'],['50000-200000','fans_score_50000'],['200000以上','fans_score_200000']].map(([label, key]) => `<div class="review-row"><span>粉丝数</span><span>${label}</span><input class="form-input review-field fan-score" id="review-${key}" type="number" min="0" value="${esc(s[key])}"><span>${esc(s[key])}</span></div>`).join('')}</div><div class="review-table"><div class="review-row review-row-head"><span>抓取指标</span><span>基准值</span><span>计分取值</span><span>权重</span></div>
+      ${[['orders','30天成交件数','orders_base','orders_weight','成交件数 ÷ 基准值'],['views','30天视频平均播放量','views_base','views_weight','平均播放量 ÷ 基准值'],['conversion','成交件数 ÷ 发布视频数','conversion_base','conversion_weight','(成交件数 ÷ 视频数) ÷ 基准值']].map(([key, label, base, weight, formula]) => `<div class="review-row"><span>${label}</span><input class="form-input review-field review-base" id="review-${base}" type="number" min="0.000001" value="${esc(s[base])}"><span class="module-meta">${formula}</span><input class="form-input review-field review-weight" id="review-${weight}" type="number" min="0" max="100" value="${esc(s[weight])}"></div>`).join('')}
+    </div><div id="review-weight-total" class="review-weight-total">权重合计：100 ✓</div>
+    <div class="form-row-2"><div class="form-row"><label class="form-label">粉丝数硬门槛</label><input class="form-input review-field" id="review-fans-limit" type="number" min="0" value="${esc(s.fans_hard_limit)}"></div><div class="form-row"><label class="form-label">缺数据处理方式</label><select class="form-input review-field" id="review-missing-action"><option value="疑" ${s.missing_data_action === '疑' ? 'selected' : ''}>存疑，交给人工确认</option><option value="不通过" ${s.missing_data_action === '不通过' ? 'selected' : ''}>不通过</option></select></div></div>
+    <div class="form-row"><label class="form-label">视频数为 0 的处理方式</label><select class="form-input review-field" id="review-zero-video-action"><option value="第三项计0分，其余照常" selected>第三项计 0 分，其余照常</option></select></div>
+    <button class="btn btn-primary" onclick="saveReviewStandard()">保存审核标准</button>
+    <div class="review-calculator"><h3>试算器</h3><div class="module-meta">输入一位达人的数据，实时验证当前标准的结论。</div><div class="form-row-2 review-calc-inputs"><div class="form-row"><label class="form-label">粉丝数</label><input class="form-input" id="calc-fans" type="number" value="5200" oninput="updateReviewCalculator()"></div><div class="form-row"><label class="form-label">30天成交件数</label><input class="form-input" id="calc-orders" type="number" value="1000" oninput="updateReviewCalculator()"></div><div class="form-row"><label class="form-label">平均播放量</label><input class="form-input" id="calc-views" type="number" value="5000" oninput="updateReviewCalculator()"></div><div class="form-row"><label class="form-label">发布视频数</label><input class="form-input" id="calc-videos" type="number" value="100" oninput="updateReviewCalculator()"></div></div><div id="review-calc-result" class="review-calc-result"></div></div>
+  </div>`;
+}
+
+function reviewStandardPayload() {
+  return { sample_pass_line: Number(document.getElementById('review-sample-line')?.value), invite_pass_line: Number(document.getElementById('review-invite-line')?.value), orders_base: Number(document.getElementById('review-orders_base')?.value), views_base: Number(document.getElementById('review-views_base')?.value), conversion_base: Number(document.getElementById('review-conversion_base')?.value), orders_weight: Number(document.getElementById('review-orders_weight')?.value), views_weight: Number(document.getElementById('review-views_weight')?.value), conversion_weight: Number(document.getElementById('review-conversion_weight')?.value), fans_hard_limit: Number(document.getElementById('review-fans-limit')?.value), fans_score_1000: Number(document.getElementById('review-fans_score_1000')?.value), fans_score_5000: Number(document.getElementById('review-fans_score_5000')?.value), fans_score_50000: Number(document.getElementById('review-fans_score_50000')?.value), fans_score_200000: Number(document.getElementById('review-fans_score_200000')?.value), missing_data_action: document.getElementById('review-missing-action')?.value, zero_video_action: document.getElementById('review-zero-video-action')?.value };
+}
+
+function reviewCalculatorValues() {
+  const s = reviewStandardPayload(); const orders = Number(document.getElementById('calc-orders')?.value || 0); const views = Number(document.getElementById('calc-views')?.value || 0); const videos = Number(document.getElementById('calc-videos')?.value || 0); const fans = Number(document.getElementById('calc-fans')?.value || 0); const fanScore = fans < s.fans_hard_limit ? 0 : fans < 5000 ? s.fans_score_1000 : fans < 50000 ? s.fans_score_5000 : fans < 200000 ? s.fans_score_50000 : s.fans_score_200000; const scores = [fanScore, Math.min(orders / s.orders_base, 1) * s.orders_weight, Math.min(views / s.views_base, 1) * s.views_weight, videos > 0 ? Math.min((orders / videos) / s.conversion_base, 1) * s.conversion_weight : 0].map(v => Math.round(v * 100) / 100); const total = Math.round(scores.reduce((a, b) => a + b, 0) * 100) / 100; const decision = fans < s.fans_hard_limit ? '不通过：粉丝数低于硬门槛' : total >= s.sample_pass_line ? '通过' : '不通过：总分未达到样品审核通过线'; return { scores, total, decision }; }
+function updateReviewCalculator() { const el = document.getElementById('review-calc-result'); if (!el) return; const r = reviewCalculatorValues(); const s = reviewStandardPayload(); el.innerHTML = `<div class="review-calc-cards"><div><span>粉丝数</span><strong>${r.scores[0]} / 10</strong></div><div><span>成交件数</span><strong>${r.scores[1]} / ${s.orders_weight}</strong></div><div><span>播放量</span><strong>${r.scores[2]} / ${s.views_weight}</strong></div><div><span>成交效率</span><strong>${r.scores[3]} / ${s.conversion_weight}</strong></div><div><span>总分</span><strong>${r.total}</strong></div></div><div class="review-conclusion">结论：${esc(r.decision)}</div>`; }
+async function saveReviewStandard() { const payload = reviewStandardPayload(); const total = payload.orders_weight + payload.views_weight + payload.conversion_weight + payload.fans_score_200000; if (Math.abs(total - 100) > 0.000001) return toast('三项权重与粉丝最高分合计必须是 100'); await api('/api/agent/review-standards', { method: 'PUT', body: JSON.stringify(payload) }); toast('审核标准已保存'); renderAgentCenter(); }
 
 async function saveAgentSettings() {
   const sampleSyncTime = document.getElementById('agent-sample-sync-time')?.value || '07:00';
@@ -2244,14 +2304,32 @@ async function saveAgentSettings() {
     agent_daily_minute: agentDailyMinute,
     invite_target_count: document.getElementById('agent-invite-target-count')?.value || 50,
     invite_daily_limit: document.getElementById('agent-invite-limit')?.value || 50,
-    audit_min_followers: document.getElementById('agent-min-followers')?.value || 0,
-    audit_min_fulfillment: document.getElementById('agent-min-fulfillment')?.value || 0,
     assign_strategy: document.getElementById('agent-assign-strategy')?.value || '',
     followup_interval_days: document.getElementById('agent-followup-days')?.value || 1,
+    ai_api_key: document.getElementById('agent-ai-api-key')?.value || '',
+    ai_model: document.getElementById('agent-ai-model')?.value || '不调用 AI',
+    ai_monthly_budget: document.getElementById('agent-ai-budget')?.value || 0,
+    notify_webhook: document.getElementById('agent-notify-webhook')?.value || '',
+    notify_failure_enabled: document.getElementById('agent-notify-failure')?.checked ? 1 : 0,
+    log_retention_days: document.getElementById('agent-log-retention')?.value || 90,
   };
   AGENT_SETTINGS = await api('/api/agent/settings', { method: 'PUT', body: JSON.stringify(payload) });
   toast('Agent 配置已保存');
   renderAgentCenter();
+}
+async function saveBdLoad(id) {
+  const value = Number(document.getElementById(`bd-max-load-${id}`)?.value || 20);
+  if (!Number.isFinite(value) || value < 1) return toast('最大负载必须是正整数');
+  await api(`/api/bd/${id}`, { method: 'PATCH', body: JSON.stringify({ max_load: value }) });
+  toast('BD 最大负载已保存');
+}
+async function testAgentAi() {
+  const result = await api('/api/agent/settings/test-ai', { method: 'POST', body: '{}' });
+  toast(result.message || 'AI 配置已检查');
+}
+async function testAgentNotify() {
+  const result = await api('/api/agent/settings/test-notify', { method: 'POST', body: '{}' });
+  toast(result.message || '通知配置已检查');
 }
 async function openTikTokAuth(shopId) {
   try {

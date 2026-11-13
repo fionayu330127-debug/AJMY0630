@@ -273,14 +273,14 @@ async function listBdMembers() {
   }
 
   const list = db.prepare(`
-    SELECT id, name, email, wecom_userid, external_user_id, source, active
+    SELECT id, name, email, wecom_userid, external_user_id, source, active, max_load
     FROM bd_members
     WHERE active = 1
     ORDER BY source = 'employee' DESC, id
   `).all();
   return list.map((b) => {
     const load = db.prepare(`SELECT COUNT(DISTINCT uid) AS c FROM samples WHERE bd_id = ?`).get(b.id).c;
-    return { ...b, load };
+    return { ...b, load, max_load: Number(b.max_load || 20) };
   });
 }
 
@@ -575,6 +575,30 @@ CREATE TABLE IF NOT EXISTS agent_settings (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS agent_runtime_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  paused INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_flow_states (
+  flow_key TEXT PRIMARY KEY,
+  active INTEGER NOT NULL DEFAULT 1,
+  last_run_at TEXT,
+  last_result TEXT,
+  next_run_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_run_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  flow_key TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'scheduled',
+  status TEXT NOT NULL,
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS affiliate_creators (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   shop_id TEXT,
@@ -590,6 +614,8 @@ CREATE TABLE IF NOT EXISTS affiliate_creators (
   avg_view REAL,
   sales_count_30d INTEGER,
   sales_amount_30d REAL,
+  gmv_30d REAL,
+  videos_30d INTEGER,
   sales_currency TEXT,
   profile_json TEXT,
   synced_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -601,11 +627,31 @@ CREATE TABLE IF NOT EXISTS invitation_templates (
   name TEXT NOT NULL,
   channel TEXT NOT NULL DEFAULT 'im',
   type TEXT NOT NULL DEFAULT 'dm',
+  scene TEXT NOT NULL DEFAULT 'first_invite',
+  shop_ids TEXT NOT NULL DEFAULT '[]',
+  language TEXT NOT NULL DEFAULT 'zh',
+  version INTEGER NOT NULL DEFAULT 1,
   product_id INTEGER,
   content TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS invitation_template_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id INTEGER NOT NULL,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  scene TEXT NOT NULL,
+  shop_ids TEXT NOT NULL DEFAULT '[]',
+  language TEXT NOT NULL DEFAULT 'zh',
+  type TEXT NOT NULL DEFAULT 'dm',
+  product_id INTEGER,
+  content TEXT NOT NULL,
+  commission_rate REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(template_id, version)
 );
 
 CREATE TABLE IF NOT EXISTS invitation_records (
@@ -664,6 +710,28 @@ CREATE TABLE IF NOT EXISTS agent_workflow_tasks (
   UNIQUE(workflow_id, task_type, uid, sample_id)
 );
 
+CREATE TABLE IF NOT EXISTS review_standards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version INTEGER NOT NULL UNIQUE,
+  sample_pass_line REAL NOT NULL DEFAULT 70,
+  invite_pass_line REAL NOT NULL DEFAULT 70,
+  orders_base REAL NOT NULL DEFAULT 1000,
+  views_base REAL NOT NULL DEFAULT 5000,
+  conversion_base REAL NOT NULL DEFAULT 10,
+  orders_weight REAL NOT NULL DEFAULT 30,
+  views_weight REAL NOT NULL DEFAULT 30,
+  conversion_weight REAL NOT NULL DEFAULT 30,
+  fans_hard_limit REAL NOT NULL DEFAULT 1000,
+  fans_score_1000 REAL NOT NULL DEFAULT 3,
+  fans_score_5000 REAL NOT NULL DEFAULT 5,
+  fans_score_50000 REAL NOT NULL DEFAULT 8,
+  fans_score_200000 REAL NOT NULL DEFAULT 10,
+  missing_data_action TEXT NOT NULL DEFAULT '疑',
+  zero_video_action TEXT NOT NULL DEFAULT '第三项计0分，其余照常',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS agent_learning_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   workflow_id INTEGER,
@@ -686,6 +754,15 @@ CREATE TABLE IF NOT EXISTS agent_optimization_suggestions (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   applied_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_suggestion_operations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  suggestion_id INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  before_json TEXT NOT NULL DEFAULT '{}',
+  after_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS agent_experiments (
@@ -745,10 +822,23 @@ CREATE TABLE IF NOT EXISTS agent_template_terms (
 );
 `);
 
+db.prepare('INSERT OR IGNORE INTO agent_runtime_state (id, paused, updated_at) VALUES (1, 0, ?)').run(nowText());
+for (const flowKey of ['auto_invite', 'auto_review', 'auto_assign', 'bd_followup']) {
+  db.prepare('INSERT OR IGNORE INTO agent_flow_states (flow_key, active, updated_at) VALUES (?, 1, ?)').run(flowKey, nowText());
+}
+
 try { db.exec('ALTER TABLE shops ADD COLUMN last_sync_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE shops ADD COLUMN last_sync_status TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE shops ADD COLUMN last_sync_message TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE shops ADD COLUMN token_expires_at TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE bd_members ADD COLUMN max_load INTEGER NOT NULL DEFAULT 20'); } catch (_) {}
 try { db.exec("ALTER TABLE invitation_templates ADD COLUMN type TEXT NOT NULL DEFAULT 'dm'"); } catch (_) {}
+try { db.exec("ALTER TABLE invitation_templates ADD COLUMN scene TEXT NOT NULL DEFAULT 'first_invite'"); } catch (_) {}
+try { db.exec("ALTER TABLE invitation_templates ADD COLUMN shop_ids TEXT NOT NULL DEFAULT '[]'"); } catch (_) {}
+try { db.exec("ALTER TABLE invitation_templates ADD COLUMN language TEXT NOT NULL DEFAULT 'zh'"); } catch (_) {}
+try { db.exec('ALTER TABLE invitation_templates ADD COLUMN version INTEGER NOT NULL DEFAULT 1'); } catch (_) {}
+try { db.exec("UPDATE invitation_templates SET scene = CASE WHEN type = 'confirmation' THEN 'sample_followup' WHEN name LIKE '%复邀%' THEN 'reinvite' ELSE 'first_invite' END WHERE scene IS NULL OR scene = ''"); } catch (_) {}
+try { db.exec("UPDATE invitation_templates SET shop_ids = '[]' WHERE shop_ids IS NULL OR shop_ids = ''"); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_templates ADD COLUMN product_id INTEGER'); } catch (_) {}
 try { db.exec("ALTER TABLE invitation_records ADD COLUMN template_type TEXT NOT NULL DEFAULT 'dm'"); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN product_id INTEGER'); } catch (_) {}
@@ -760,6 +850,10 @@ try { db.exec("ALTER TABLE invitation_records ADD COLUMN sample_approval_mode TE
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN sample_apply_link TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN experiment_id INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN experiment_variant_id INTEGER'); } catch (_) {}
+try { db.exec("ALTER TABLE agent_optimization_suggestions ADD COLUMN expected_impact TEXT NOT NULL DEFAULT ''"); } catch (_) {}
+try { db.exec("ALTER TABLE agent_optimization_suggestions ADD COLUMN before_json TEXT NOT NULL DEFAULT '{}'"); } catch (_) {}
+try { db.exec("ALTER TABLE agent_optimization_suggestions ADD COLUMN after_json TEXT NOT NULL DEFAULT '{}'"); } catch (_) {}
+try { db.exec('ALTER TABLE agent_optimization_suggestions ADD COLUMN decision_at TEXT'); } catch (_) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_agent_inbox_shop_received ON agent_inbox_messages(shop_id, received_at)'); } catch (_) {}
 try { db.exec('ALTER TABLE products ADD COLUMN product_url TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN commission_rate REAL'); } catch (_) {}
@@ -768,8 +862,17 @@ try { db.exec('ALTER TABLE samples ADD COLUMN published_at TEXT'); } catch (_) {
 try { db.exec('ALTER TABLE samples ADD COLUMN wecom_overdue_notified_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN invitation_record_id INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN assigned_bd_id INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN review_standard_version INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE agent_workflow_tasks ADD COLUMN score_details_json TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE review_standards ADD COLUMN fans_score_1000 REAL NOT NULL DEFAULT 3'); } catch (_) {}
+try { db.exec('ALTER TABLE review_standards ADD COLUMN fans_score_5000 REAL NOT NULL DEFAULT 5'); } catch (_) {}
+try { db.exec('ALTER TABLE review_standards ADD COLUMN fans_score_50000 REAL NOT NULL DEFAULT 8'); } catch (_) {}
+try { db.exec('ALTER TABLE review_standards ADD COLUMN fans_score_200000 REAL NOT NULL DEFAULT 10'); } catch (_) {}
 try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_count_30d INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_amount_30d REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN gmv_30d REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN videos_30d INTEGER'); } catch (_) {}
+try { db.exec('UPDATE affiliate_creators SET gmv_30d = sales_amount_30d WHERE gmv_30d IS NULL AND sales_amount_30d IS NOT NULL'); } catch (_) {}
 try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_currency TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN normalized_handle TEXT'); } catch (_) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_affiliate_creators_shop_sales ON affiliate_creators(shop_id, sales_count_30d)'); } catch (_) {}
@@ -788,31 +891,177 @@ const DEFAULT_AGENT_SETTINGS = {
   audit_min_fulfillment: 80,
   assign_strategy: '按店铺、达人类型、BD负载和历史合作经验自动分配',
   followup_interval_days: 3,
+  monthly_ai_cost_limit: 0,
+  ai_api_key: '',
+  ai_model: '不调用 AI',
+  ai_monthly_budget: 0,
+  notify_webhook: '',
+  notify_failure_enabled: 1,
+  log_retention_days: 90,
 };
+
+const AGENT_FLOW_LABELS = {
+  auto_invite: '自动邀约',
+  auto_review: '自动审核',
+  auto_assign: '自动分配',
+  bd_followup: 'BD跟进',
+};
+
+function getAgentRuntime() {
+  const row = db.prepare('SELECT * FROM agent_runtime_state WHERE id = 1').get();
+  return { paused: Boolean(row?.paused), updated_at: row?.updated_at || '' };
+}
+
+function getAgentFlowStates() {
+  return db.prepare('SELECT * FROM agent_flow_states ORDER BY CASE flow_key WHEN \'auto_invite\' THEN 1 WHEN \'auto_review\' THEN 2 WHEN \'auto_assign\' THEN 3 ELSE 4 END')
+    .all()
+    .map((row) => ({ ...row, key: row.flow_key, label: AGENT_FLOW_LABELS[row.flow_key] || row.flow_key, active: Boolean(row.active), last_result: parseJsonObject(row.last_result, {}) }));
+}
+
+function recordAgentRun(flowKey, mode, status, summary = {}) {
+  const now = nowText();
+  db.prepare('INSERT INTO agent_run_logs (flow_key, mode, status, summary_json, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(flowKey, mode, status, JSON.stringify(summary), now);
+  db.prepare('UPDATE agent_flow_states SET last_run_at = ?, last_result = ?, updated_at = ? WHERE flow_key = ?')
+    .run(now, JSON.stringify(summary), now, flowKey);
+}
+
+function agentPendingCount() {
+  return Number(db.prepare("SELECT COUNT(*) AS c FROM agent_workflow_tasks WHERE status = 'agent_review'").get()?.c || 0);
+}
+
+function agentOverviewData() {
+  const settings = getAgentSettings();
+  const today = nowText().slice(0, 10);
+  const month = today.slice(0, 7);
+  const sentToday = Number(db.prepare("SELECT COUNT(*) AS c FROM invitation_records WHERE status = 'sent' AND substr(COALESCE(sent_at, created_at), 1, 10) = ?").get(today)?.c || 0);
+  const monthCost = Number(db.prepare("SELECT COALESCE(SUM(CASE WHEN status = 'sent' THEN 0 ELSE 0 END), 0) AS c FROM invitation_records WHERE substr(created_at, 1, 7) = ?").get(month)?.c || 0);
+  const pendingItems = db.prepare("SELECT id, task_type, creator_name, uid, reason, updated_at FROM agent_workflow_tasks WHERE status = 'agent_review' ORDER BY updated_at DESC, id DESC LIMIT 10").all();
+  return {
+    runtime: getAgentRuntime(),
+    flows: getAgentFlowStates(),
+    today: { sent_invites: sentToday, invite_limit: Number(settings.invite_daily_limit || 0) },
+    pending_confirmations: agentPendingCount(),
+    pending_items: pendingItems,
+    month_ai_cost: monthCost,
+    month_ai_cost_limit: Number(settings.monthly_ai_cost_limit || 0),
+    standard: getReviewStandard(),
+  };
+}
+
+function defaultReviewStandard() {
+  return {
+    version: 1,
+    sample_pass_line: 70,
+    invite_pass_line: 70,
+    orders_base: 1000,
+    views_base: 5000,
+    conversion_base: 10,
+    orders_weight: 30,
+    views_weight: 30,
+    conversion_weight: 30,
+    fans_hard_limit: 1000,
+    fans_score_1000: 3,
+    fans_score_5000: 5,
+    fans_score_50000: 8,
+    fans_score_200000: 10,
+    missing_data_action: '疑',
+    zero_video_action: '第三项计0分，其余照常',
+  };
+}
+
+function normalizeReviewStandard(input = {}, version = null) {
+  const defaults = defaultReviewStandard();
+  const number = (key, min = 0) => {
+    const value = Number(input[key] ?? defaults[key]);
+    return Number.isFinite(value) && value >= min ? value : defaults[key];
+  };
+  return {
+    version: Number(version || input.version || defaults.version),
+    sample_pass_line: number('sample_pass_line'),
+    invite_pass_line: number('invite_pass_line'),
+    orders_base: number('orders_base', 0.000001),
+    views_base: number('views_base', 0.000001),
+    conversion_base: number('conversion_base', 0.000001),
+    orders_weight: number('orders_weight'),
+    views_weight: number('views_weight'),
+    conversion_weight: number('conversion_weight'),
+    fans_hard_limit: number('fans_hard_limit'),
+    fans_score_1000: number('fans_score_1000'),
+    fans_score_5000: number('fans_score_5000'),
+    fans_score_50000: number('fans_score_50000'),
+    fans_score_200000: number('fans_score_200000'),
+    missing_data_action: String(input.missing_data_action || defaults.missing_data_action),
+    zero_video_action: String(input.zero_video_action || defaults.zero_video_action),
+  };
+}
+
+function getReviewStandard(version = null) {
+  const row = version
+    ? db.prepare('SELECT * FROM review_standards WHERE version = ?').get(Number(version))
+    : db.prepare('SELECT * FROM review_standards ORDER BY version DESC LIMIT 1').get();
+  if (row) return normalizeReviewStandard(row, row.version);
+  const standard = defaultReviewStandard();
+  db.prepare(`
+    INSERT INTO review_standards (
+      version, sample_pass_line, invite_pass_line, orders_base, views_base, conversion_base,
+      orders_weight, views_weight, conversion_weight, fans_hard_limit,
+      fans_score_1000, fans_score_5000, fans_score_50000, fans_score_200000,
+      missing_data_action, zero_video_action
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(standard.version, standard.sample_pass_line, standard.invite_pass_line, standard.orders_base, standard.views_base, standard.conversion_base, standard.orders_weight, standard.views_weight, standard.conversion_weight, standard.fans_hard_limit, standard.fans_score_1000, standard.fans_score_5000, standard.fans_score_50000, standard.fans_score_200000, standard.missing_data_action, standard.zero_video_action);
+  return standard;
+}
+
+function saveReviewStandard(input = {}) {
+  const standard = normalizeReviewStandard(input);
+  const weightTotal = standard.orders_weight + standard.views_weight + standard.conversion_weight + standard.fans_score_200000;
+  if (Math.abs(weightTotal - 100) > 0.000001) throw new Error('三项权重合计必须是 100');
+  const current = getReviewStandard();
+  const nextVersion = Number(current.version || 0) + 1;
+  const now = nowText();
+  db.prepare(`
+    INSERT INTO review_standards (
+      version, sample_pass_line, invite_pass_line, orders_base, views_base, conversion_base,
+      orders_weight, views_weight, conversion_weight, fans_hard_limit,
+      fans_score_1000, fans_score_5000, fans_score_50000, fans_score_200000,
+      missing_data_action, zero_video_action, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(nextVersion, standard.sample_pass_line, standard.invite_pass_line, standard.orders_base, standard.views_base, standard.conversion_base, standard.orders_weight, standard.views_weight, standard.conversion_weight, standard.fans_hard_limit, standard.fans_score_1000, standard.fans_score_5000, standard.fans_score_50000, standard.fans_score_200000, standard.missing_data_action, standard.zero_video_action, now, now);
+  return getReviewStandard(nextVersion);
+}
 
 const DEFAULT_INVITATION_TEMPLATES = [
   {
     name: '样品合作邀约',
     channel: 'im',
     type: 'collab',
+    scene: 'first_invite',
+    language: 'zh',
     content: '您好 {{creator_name}}，我们是 {{shop_name}} 店铺BD。想邀请您体验 {{product_name}}。您可以直接点击链接申请样品：{{sample_apply_link}}',
   },
   {
     name: '私信初次触达',
     channel: 'im',
     type: 'dm',
+    scene: 'first_invite',
+    language: 'zh',
     content: '您好 {{creator_name}}，我们是 {{shop_name}} 店铺BD。看到您的内容风格和我们的商品很匹配，想了解是否有合作兴趣。',
   },
   {
     name: '复邀老合作达人',
     channel: 'im',
     type: 'dm',
+    scene: 'reinvite',
+    language: 'zh',
     content: '您好 {{creator_name}}，感谢之前与 {{shop_name}} 的合作。我们近期有新的商品和活动，想再次邀请您参与推广合作，方便的话可以回复确认档期。',
   },
   {
     name: '确认拍摄与发布',
     channel: 'im',
     type: 'confirmation',
+    scene: 'sample_followup',
+    language: 'zh',
     content: '您好 {{creator_name}}，您申请的 {{product_name}} 样品已收到。请确认是否可以拍摄并发布 TikTok 视频；如果可以，请回复预计发布时间和内容形式。',
   },
 ];
@@ -821,11 +1070,11 @@ function ensureInvitationTemplates() {
   const count = db.prepare('SELECT COUNT(*) AS c FROM invitation_templates WHERE active = 1').get().c;
   if (count) return;
   const insert = db.prepare(`
-    INSERT INTO invitation_templates (name, channel, type, content, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 1, ?, ?)
+    INSERT INTO invitation_templates (name, channel, type, scene, language, content, active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
   `);
   const now = nowText();
-  DEFAULT_INVITATION_TEMPLATES.forEach((tpl) => insert.run(tpl.name, tpl.channel, tpl.type || 'dm', tpl.content, now, now));
+  DEFAULT_INVITATION_TEMPLATES.forEach((tpl) => insert.run(tpl.name, tpl.channel, tpl.type || 'dm', tpl.scene || 'first_invite', tpl.language || 'zh', tpl.content, now, now));
   return;
 }
 
@@ -838,7 +1087,7 @@ db.prepare(`
 `).run(nowText());
 if (!db.prepare("SELECT id FROM invitation_templates WHERE active = 1 AND type = 'confirmation' LIMIT 1").get()) {
   const now = nowText();
-  db.prepare(`INSERT INTO invitation_templates (name, channel, type, content, active, created_at, updated_at) VALUES (?, 'im', 'confirmation', ?, 1, ?, ?)`)
+  db.prepare(`INSERT INTO invitation_templates (name, channel, type, scene, language, content, active, created_at, updated_at) VALUES (?, 'im', 'confirmation', 'sample_followup', 'zh', ?, 1, ?, ?)`)
     .run('确认拍摄与发布', '您好 {{creator_name}}，您申请的 {{product_name}} 样品已收到。请确认是否可以拍摄并发布 TikTok 视频；如果可以，请回复预计发布时间和内容形式。', now, now);
 }
 
@@ -852,14 +1101,18 @@ function getAgentSettings() {
     const value = Number(data[key]);
     data[key] = Number.isFinite(value) ? value : DEFAULT_AGENT_SETTINGS[key];
   }
+  data.ai_api_key = data.ai_api_key ? `********${String(data.ai_api_key).slice(-4)}` : '';
+  data.notify_webhook = data.notify_webhook ? `${String(data.notify_webhook).slice(0, 12)}...${String(data.notify_webhook).slice(-4)}` : '';
   return data;
 }
 
 function saveAgentSettings(input = {}) {
   const current = getAgentSettings();
   const next = { ...current };
+  next.ai_api_key = db.prepare("SELECT value FROM agent_settings WHERE key = 'ai_api_key'").get()?.value || '';
+  next.notify_webhook = db.prepare("SELECT value FROM agent_settings WHERE key = 'notify_webhook'").get()?.value || '';
   Object.keys(DEFAULT_AGENT_SETTINGS).forEach((key) => {
-    if (input[key] !== undefined) next[key] = input[key];
+    if (input[key] !== undefined && !(key === 'ai_api_key' && /^\*+/.test(String(input[key] || '')))) next[key] = input[key];
   });
   const settingNumber = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
   next.sample_sync_hour = Math.max(0, Math.min(23, settingNumber(next.sample_sync_hour, 7)));
@@ -870,6 +1123,10 @@ function saveAgentSettings(input = {}) {
   next.audit_min_followers = Math.max(0, settingNumber(next.audit_min_followers, 0));
   next.audit_min_fulfillment = Math.max(0, Math.min(100, settingNumber(next.audit_min_fulfillment, 0)));
   next.followup_interval_days = Math.max(1, settingNumber(next.followup_interval_days, 3));
+  next.ai_monthly_budget = Math.max(0, settingNumber(next.ai_monthly_budget, 0));
+  next.ai_model = String(next.ai_model || '不调用 AI');
+  next.notify_failure_enabled = next.notify_failure_enabled ? 1 : 0;
+  next.log_retention_days = Math.max(1, settingNumber(next.log_retention_days, 90));
   const stmt = db.prepare(`
     INSERT INTO agent_settings (key, value, updated_at)
     VALUES (?, ?, ?)
@@ -929,10 +1186,14 @@ function buildCreatorCandidate(row, source, shopMap = {}) {
     avg_view: rowMetricNumber(row.avg_view),
     monthly_avg_view: rowMetricNumber(row.avg_view || profile.monthly_avg_view || profile.avg_view),
     monthly_videos: profile.monthly_videos ?? profile.videos ?? profile.published_videos,
+    videos_30d: row.videos_30d === undefined || row.videos_30d === null
+      ? (profile.videos_30d ?? profile.video_count_30d ?? profile.published_videos_30d ?? profile.monthly_videos ?? profile.videos ?? profile.published_videos)
+      : Number(row.videos_30d || 0),
     star: Number(row.star || 0),
     total_orders: Number(row.total_orders || 0),
     sales_count_30d: row.sales_count_30d === undefined || row.sales_count_30d === null ? null : Number(row.sales_count_30d || 0),
     sales_amount: Number(row.sales_amount || 0),
+    gmv_30d: row.gmv_30d === undefined || row.gmv_30d === null ? Number(row.sales_amount || 0) : Number(row.gmv_30d || 0),
     metrics_source: row.metrics_source || (source === 'shop_pool' ? 'affiliate_center' : 'shop_orders'),
     latest_at: row.latest_at || row.applied_at || row.library_added_at || row.synced_at || '',
     last_invited_at: row.last_invited_at || '',
@@ -946,6 +1207,8 @@ function applyCandidateFilters(list, query = {}) {
   const minAvgView = parseNumberFilter(query.min_avg_view, 0);
   const minStar = parseNumberFilter(query.min_star, 0);
   const minOrders = parseNumberFilter(query.min_orders, 0);
+  const minGmv = parseNumberFilter(query.min_gmv, 0);
+  const minVideos = parseNumberFilter(query.min_monthly_videos, 0);
   const category = String(query.category || '').trim().toLowerCase();
   const search = String(query.search || '').trim().toLowerCase();
 
@@ -955,6 +1218,8 @@ function applyCandidateFilters(list, query = {}) {
     if (minAvgView && Number(item.avg_view || 0) < minAvgView) return false;
     if (minStar && Number(item.star || 0) < minStar) return false;
     if (minOrders && Number(item.total_orders || 0) < minOrders) return false;
+    if (minGmv && Number(item.gmv_30d || 0) < minGmv) return false;
+    if (minVideos && Number(item.videos_30d ?? item.monthly_videos ?? 0) < minVideos) return false;
     if (category && !String(item.category || '').toLowerCase().includes(category)) return false;
     if (search) {
       const haystack = `${item.uid} ${item.creator_name} ${item.creator_handle}`.toLowerCase();
@@ -1079,6 +1344,8 @@ function listInviteCandidates(query = {}) {
         ac.avg_view,
         ac.profile_json,
         ac.sales_count_30d,
+        ac.gmv_30d,
+        ac.videos_30d,
         COALESCE(ac.sales_count_30d, 0) AS total_orders,
         ac.sales_amount_30d AS sales_amount,
         ac.synced_at AS latest_at,
@@ -1403,53 +1670,75 @@ function auditByWorkflowConditions(item, config, customRules = null) {
 }
 
 function agentScoreCandidate(item, config) {
-  return config.score_model === 'creator_table_v1'
-    ? scoreCreatorByTable(item, config)
-    : auditByWorkflowConditions(item, config, productAuditRules(item.product_id || config.product_ids?.[0], config));
+  return scoreByReviewStandard(item, getReviewStandard(), 'invite');
 }
 
 function agentScoreSample(sample, config) {
-  if (config.score_model === 'creator_table_v1') return scoreCreatorByTable({
+  return scoreByReviewStandard({
     ...sample,
     total_orders: sample.total_orders ?? sample.sales_count ?? 0,
     monthly_videos: sample.monthly_videos ?? sample.videos,
-  }, config);
-  return auditByWorkflowConditions({
-    ...sample,
-    avg_view: rowMetricNumber(sample.avg_view),
-    total_orders: sample.total_orders ?? sample.sales_count ?? 0,
-    monthly_videos: sample.monthly_videos ?? sample.videos ?? 0,
-  }, config, productAuditRules(sample.product_id, config));
+  }, getReviewStandard(), 'sample');
 }
 
-function scoreCreatorByTable(item, config) {
-  const orders = Number(item.monthly_orders ?? item.total_orders ?? item.sales_count_30d ?? item.sales_count ?? 0);
-  const avgView = rowMetricNumber(item.monthly_avg_view ?? item.avg_view);
+function scoreByReviewStandard(item, standard, thresholdType) {
+  const ordersValue = item.monthly_orders ?? item.total_orders ?? item.sales_count_30d ?? item.sales_count;
+  const viewsValue = item.monthly_avg_view ?? item.avg_view;
   const videosValue = item.monthly_videos ?? item.videos ?? item.published_videos;
-  const videosAvailable = videosValue !== undefined && videosValue !== null && videosValue !== '';
+  const orders = Number(ordersValue || 0);
+  const views = rowMetricNumber(viewsValue);
   const videos = Number(videosValue || 0);
-  const ratio = videosAvailable && videos > 0 ? orders / videos : null;
+  const conversion = videos > 0 ? orders / videos : 0;
+  const missing = [ordersValue, viewsValue, videosValue].some((value) => value === undefined || value === null || value === '');
+  const fanScore = fansScoreForValue(Number(item.fans || item.followers || 0), standard);
   const checks = [
-    { name: '30天成交件数', metric: 'monthly_orders', actual: orders, base: 1000, weight: 40, score: Math.min(40, orders / 1000 * 40), pass: orders > 0 },
-    { name: '30天视频平均播放量', metric: 'monthly_avg_view', actual: avgView, base: 5000, weight: 30, score: Math.min(30, avgView / 5000 * 30), pass: avgView > 0 },
-    { name: '30天成交件数/30天发布视频个数', metric: 'orders_per_video', actual: ratio, base: 10, weight: 30, score: ratio === null ? 0 : Math.min(30, ratio / 10 * 30), pass: ratio !== null },
+    { name: '粉丝数', metric: 'fans', actual: Number(item.fans || item.followers || 0), base: standard.fans_hard_limit, weight: fanScore, score: fanScore },
+    { name: '30天成交件数', metric: 'orders', actual: orders, base: standard.orders_base, weight: standard.orders_weight, score: Math.min(orders / standard.orders_base, 1) * standard.orders_weight },
+    { name: '30天视频平均播放量', metric: 'views', actual: views, base: standard.views_base, weight: standard.views_weight, score: Math.min(views / standard.views_base, 1) * standard.views_weight },
+    { name: '成交件数 ÷ 发布视频数', metric: 'conversion', actual: conversion, base: standard.conversion_base, weight: standard.conversion_weight, score: Math.min(conversion / standard.conversion_base, 1) * standard.conversion_weight },
   ].map((check) => ({
     ...check,
-    available: check.metric === 'orders_per_video' ? videosAvailable : true,
-    detail: check.metric === 'orders_per_video' && !videosAvailable
-      ? `${check.name} 数据缺失`
-      : `${check.name}：${check.actual === null ? '-' : Number(check.actual.toFixed ? check.actual.toFixed(2) : check.actual)}，得分 ${Math.round(check.score * 100) / 100}/${check.weight}`,
+    score: Math.round(check.score * 100) / 100,
+    detail: `${check.name}：${Number(check.actual.toFixed ? check.actual.toFixed(2) : check.actual)}，得分 ${Math.round(check.score * 100) / 100}/${check.weight}`,
   }));
   const score = Math.round(checks.reduce((sum, check) => sum + check.score, 0) * 100) / 100;
-  const threshold = Number(config.audit_min_score || 70);
+  const fans = Number(item.fans || item.followers || 0);
+  const threshold = thresholdType === 'invite' ? standard.invite_pass_line : standard.sample_pass_line;
+  let decision = '通过';
+  let recommendation = 'auto_pass';
+  let reason = `总分 ${score}，达到${thresholdType === 'invite' ? '邀约筛选' : '样品审核'}通过线 ${threshold}`;
+  if (fans < standard.fans_hard_limit) {
+    decision = '不通过';
+    recommendation = 'manual_review';
+    reason = `粉丝数 ${fans} 低于硬门槛 ${standard.fans_hard_limit}`;
+  } else if (missing) {
+    decision = standard.missing_data_action === '不通过' ? '不通过' : '存疑';
+    recommendation = 'manual_review';
+    reason = standard.missing_data_action === '不通过' ? '缺少30天数据，按当前标准不通过' : '缺少30天数据，需人工确认';
+  } else if (score < threshold) {
+    decision = '不通过';
+    recommendation = 'manual_review';
+    reason = `总分 ${score} 未达到通过线 ${threshold}`;
+  }
   return {
     score,
-    recommendation: score >= threshold && checks.every((check) => check.available) ? 'auto_pass' : 'manual_review',
-    reason: !videosAvailable ? '缺少30天发布视频个数，需人工补充数据' : `按达人评分表计算 ${score} 分，审核门槛 ${threshold} 分`,
+    recommendation,
+    decision,
+    reason,
     checks: checks.map((check) => ({ ...check, pass: check.score > 0 })),
-    rule_source: 'creator_score_table_v1',
-    score_formula: '成交件数/1000*40 + 平均播放量/5000*30 + (成交件数/发布视频数)/10*30，单项最高不超过权重',
+    score_details: checks,
+    review_standard_version: standard.version,
+    rule_source: 'review_standards',
+    score_formula: 'min(实际值÷基准值, 1)×权重；总分为三项之和；视频数为0时第三项计0分',
   };
+}
+
+function fansScoreForValue(fans, standard) {
+  if (fans < standard.fans_hard_limit) return 0;
+  if (fans < 5000) return standard.fans_score_1000;
+  if (fans < 50000) return standard.fans_score_5000;
+  if (fans < 200000) return standard.fans_score_50000;
+  return standard.fans_score_200000;
 }
 
 function recordLearningEvent({ workflowId, eventType, uid, sampleId, input, outcome, lesson }) {
@@ -1526,11 +1815,11 @@ function buildOptimizationReport(workflowId = null) {
 
 function saveOptimizationSuggestions(workflowId, suggestions) {
   const insert = db.prepare(`
-    INSERT INTO agent_optimization_suggestions (workflow_id, suggestion_type, title, reason, proposal_json)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO agent_optimization_suggestions (workflow_id, suggestion_type, title, reason, proposal_json, expected_impact)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
   const ids = [];
-  for (const item of suggestions) ids.push(Number(insert.run(workflowId, item.suggestion_type, item.title, item.reason, JSON.stringify(item.proposal || {})).lastInsertRowid));
+  for (const item of suggestions) ids.push(Number(insert.run(workflowId, item.suggestion_type, item.title, item.reason, JSON.stringify(item.proposal || {}), String(item.expected_impact || '需启用后观察实际变化')).lastInsertRowid));
   return ids;
 }
 
@@ -1612,9 +1901,10 @@ function insertWorkflowTask(workflowId, type, status, item, audit, payload = {})
   db.prepare(`
     INSERT INTO agent_workflow_tasks (
       workflow_id, task_type, status, shop_id, uid, creator_name, creator_handle,
-      sample_id, score, recommendation, reason, payload_json, created_at, updated_at
+      sample_id, score, recommendation, reason, payload_json, review_standard_version,
+      score_details_json, created_at, updated_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(workflow_id, task_type, uid, sample_id) DO UPDATE SET
       status = CASE
         WHEN agent_workflow_tasks.status IN ('executed','admin_rejected','awaiting_reply') THEN agent_workflow_tasks.status
@@ -1627,6 +1917,8 @@ function insertWorkflowTask(workflowId, type, status, item, audit, payload = {})
       recommendation = excluded.recommendation,
       reason = excluded.reason,
       payload_json = excluded.payload_json,
+      review_standard_version = excluded.review_standard_version,
+      score_details_json = excluded.score_details_json,
       updated_at = excluded.updated_at
   `).run(
     workflowId,
@@ -1641,6 +1933,8 @@ function insertWorkflowTask(workflowId, type, status, item, audit, payload = {})
     audit.recommendation,
     audit.reason,
     JSON.stringify(payload),
+    audit.review_standard_version || null,
+    JSON.stringify(audit.score_details || audit.checks || []),
     nowText(),
     nowText()
   );
@@ -1656,7 +1950,14 @@ function generateWorkflowQueue(workflowId = null) {
   const candidates = listInviteCandidates(candidateQuery);
   const diagnostics = inviteCandidateDiagnostics(candidateQuery);
   const inviteSettings = getAgentSettings();
-  const inviteLimit = Math.max(1, Number(inviteSettings.invite_target_count || config.invite_target_count || config.invite_daily_limit || 50));
+  // Keep the per-run target separate from the daily cap. A scheduled run may
+  // happen more than once (or be triggered manually), so both limits must be
+  // applied before creating new invite tasks.
+  const runTarget = Math.max(1, Number(inviteSettings.invite_target_count || config.invite_target_count || 50));
+  const dailyLimit = Math.max(1, Math.min(
+    Number(inviteSettings.invite_daily_limit || runTarget),
+    Number(config.invite_daily_limit || runTarget)
+  ));
   const maxPerCreator = Math.max(1, Number(config.invite_max_per_creator || 1));
   const today = nowText().slice(0, 10);
   const todayCreated = db.prepare(`
@@ -1666,7 +1967,9 @@ function generateWorkflowQueue(workflowId = null) {
       AND task_type = 'invite'
       AND date(created_at) = ?
   `).get(workflow.id, today).c;
-  let remainingInviteSlots = Math.max(0, inviteLimit - Number(todayCreated || 0));
+  const remainingToday = Math.max(0, dailyLimit - Number(todayCreated || 0));
+  const inviteLimit = Math.min(runTarget, remainingToday);
+  let remainingInviteSlots = inviteLimit;
   let inviteCount = 0;
   for (const candidate of candidates) {
     if (remainingInviteSlots <= 0) break;
@@ -1726,6 +2029,7 @@ function generateWorkflowQueue(workflowId = null) {
     workflow,
     invite_count: inviteCount,
     invite_target: inviteLimit,
+    invite_daily_limit: dailyLimit,
     invite_shortfall: Math.max(0, inviteLimit - inviteCount),
     sample_count: sampleCount,
     diagnostics,
@@ -1938,18 +2242,18 @@ async function sendWorkflowSampleMessages(tasks, workflow) {
 
 const workflowRuns = new Map();
 
-async function executeWorkflow(workflowId = null) {
+async function executeWorkflow(workflowId = null, options = {}) {
   const workflow = getWorkflow(workflowId);
   const runKey = String(workflow.id);
   if (workflowRuns.has(runKey)) return workflowRuns.get(runKey);
   const run = (async () => {
-    const inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+    const inviteTasks = options.invite === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
     const inviteResults = await sendWorkflowInvitations(inviteTasks, workflow);
-    const inboxTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
+    const inboxTasks = options.followup === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
     const inbox_reply_results = await sendWorkflowInboxReplies(inboxTasks, workflow);
-    const messageTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_message' && task.status === 'admin_approved');
+    const messageTasks = options.review === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_message' && task.status === 'admin_approved');
     const sample_message_results = await sendWorkflowSampleMessages(messageTasks, workflow);
-    const sampleTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_audit' && task.status === 'admin_approved' && task.payload?.phase === 'final_sample_review');
+    const sampleTasks = options.assign === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_audit' && task.status === 'admin_approved' && task.payload?.phase === 'final_sample_review');
     let assigned = 0;
     for (const [index, task] of sampleTasks.entries()) {
       if (!task.sample_id) continue;
@@ -2034,6 +2338,7 @@ function renderInvitationMessage(template, creator, shop, product = null, record
     product_link: firstProduct ? productLink(firstProduct, recordId) : '',
     sample_apply_link: applyLink,
     commission_rate: options.commission_rate ? percentText(options.commission_rate) : '',
+    commission: options.commission_rate ? percentText(options.commission_rate) : '',
   };
   return String(template.content || '').replace(/\{\{([a-z_]+)\}\}/g, (_, key) => vars[key] ?? '');
 }
@@ -2083,6 +2388,9 @@ async function createTargetCollaboration({ shop, creator, products, message, com
   }
   if (!creator.creator_open_id) {
     return { pending: '缺少 creator_open_id，已生成待后台私信发送记录' };
+  }
+  if (process.env.TK_INVITE_EXECUTE !== '1') {
+    return { pending: 'TK_INVITE_EXECUTE 未开启，当前仅生成待发送记录' };
   }
   const tiktokProducts = (products || [])
     .filter((product) => firstText(product.external_product_id))
@@ -2402,11 +2710,19 @@ function importEnvAuthorizationToShop(shopId = 'oku') {
 importEnvAuthorizationToShop('oku');
 ensureSyncSchema(db);
 
+function notifySyncFailure(shopId, source, message) {
+  const settings = getAgentSettings();
+  const webhook = db.prepare("SELECT value FROM agent_settings WHERE key = 'notify_webhook'").get()?.value || '';
+  if (!settings.notify_failure_enabled || !webhook || !/^https?:\/\//i.test(webhook)) return;
+  void fetch(webhook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event: 'sync_failed', shop_id: shopId, source, message, created_at: nowText() }) }).catch((error) => console.warn('[notify] webhook failed:', error.message));
+}
+
 function writeSyncLog(shopId, source, status, message) {
   db.prepare(`
     INSERT INTO sync_logs (shop_id, source, status, message, created_at)
     VALUES (?, ?, ?, ?, ?)
   `).run(shopId, source, status, message, nowText());
+  if (status === 'failed') notifySyncFailure(shopId, source, message);
 }
 
 async function syncOneShop(shop, source) {
@@ -2541,7 +2857,13 @@ async function runScheduledAgent() {
   const config = workflow.config;
   // Auto-run is opt-in because it can send external TikTok messages.
   if (String(process.env.TK_AGENT_AUTORUN || '').toLowerCase() !== 'true') return;
+  if (getAgentRuntime().paused) {
+    recordAgentRun('auto_review', 'scheduled', 'paused', { result: '全部 Agent 已暂停' });
+    return;
+  }
   try {
+    const activeFlows = new Set(getAgentFlowStates().filter((item) => item.active).map((item) => item.key));
+    if (!activeFlows.size) return;
     await syncSamplesForShops('schedule-agent-samples', config.shop || 'all', 0);
     const inboxShops = db.prepare(`SELECT * FROM shops ${config.shop && config.shop !== 'all' ? 'WHERE id = ?' : ''} ORDER BY id`)
       .all(...(config.shop && config.shop !== 'all' ? [config.shop] : []));
@@ -2549,8 +2871,19 @@ async function runScheduledAgent() {
       try { await syncInboxForShop(shop, workflow); }
       catch (error) { writeSyncLog(shop.id, 'schedule-agent-inbox', 'failed', error.message || '收件箱同步失败'); }
     }
-    const queued = generateWorkflowQueue(workflow.id);
-    const executed = await executeWorkflow(workflow.id);
+    const queued = activeFlows.has('auto_invite') || activeFlows.has('auto_review') || activeFlows.has('auto_assign')
+      ? generateWorkflowQueue(workflow.id)
+      : { invite_count: 0, sample_count: 0 };
+    const executed = await executeWorkflow(workflow.id, {
+      invite: activeFlows.has('auto_invite'),
+      review: activeFlows.has('auto_review'),
+      assign: activeFlows.has('auto_assign'),
+      followup: activeFlows.has('bd_followup'),
+    });
+    if (activeFlows.has('auto_invite')) recordAgentRun('auto_invite', 'scheduled', 'success', { result: `生成邀约队列 ${queued.invite_count} 条`, invite_count: queued.invite_count });
+    if (activeFlows.has('auto_review')) recordAgentRun('auto_review', 'scheduled', 'success', { result: `生成审核任务 ${queued.sample_count} 条`, sample_count: queued.sample_count });
+    if (activeFlows.has('auto_assign')) recordAgentRun('auto_assign', 'scheduled', 'success', { result: `执行分配 ${executed.assigned_samples} 条`, assigned_samples: executed.assigned_samples });
+    if (activeFlows.has('bd_followup')) recordAgentRun('bd_followup', 'scheduled', 'success', { result: '完成跟进巡检', inbox_replies: executed.inbox_reply_results.length });
     writeSyncLog(null, 'schedule-agent', 'success', `Agent巡检完成：邀约队列 ${queued.invite_count}，审核报告 ${queued.sample_count}，执行邀约 ${executed.invite_results.length}`);
   } catch (error) {
     writeSyncLog(null, 'schedule-agent', 'failed', error.message || 'Agent定时任务失败');
@@ -2611,6 +2944,76 @@ app.get('/api/agent/settings', (req, res) => {
   res.json(getAgentSettings());
 });
 
+app.get('/api/agent/overview', (req, res) => {
+  res.json(agentOverviewData());
+});
+
+app.put('/api/agent/runtime', (req, res) => {
+  const paused = Boolean(req.body?.paused);
+  db.prepare('UPDATE agent_runtime_state SET paused = ?, updated_at = ? WHERE id = 1').run(paused ? 1 : 0, nowText());
+  res.json(agentOverviewData());
+});
+
+app.get('/api/agent/flows', (req, res) => {
+  res.json({ flows: getAgentFlowStates() });
+});
+
+app.put('/api/agent/flows/:flowKey', (req, res) => {
+  const flowKey = String(req.params.flowKey || '');
+  if (!Object.prototype.hasOwnProperty.call(AGENT_FLOW_LABELS, flowKey)) return res.status(404).json({ error: 'Agent任务流不存在' });
+  const active = req.body?.active !== false;
+  db.prepare('UPDATE agent_flow_states SET active = ?, updated_at = ? WHERE flow_key = ?').run(active ? 1 : 0, nowText(), flowKey);
+  res.json({ success: true, flow: getAgentFlowStates().find((item) => item.key === flowKey) });
+});
+
+app.get('/api/agent/run-logs', (req, res) => {
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 10)));
+  const rows = db.prepare('SELECT * FROM agent_run_logs ORDER BY id DESC LIMIT ?').all(limit);
+  res.json(rows.map((row) => ({ ...row, flow_label: AGENT_FLOW_LABELS[row.flow_key] || row.flow_key, summary: parseJsonObject(row.summary_json, {}) })));
+});
+
+app.post('/api/agent/flows/:flowKey/trial', (req, res) => {
+  try {
+    const flowKey = String(req.params.flowKey || '');
+    if (!Object.prototype.hasOwnProperty.call(AGENT_FLOW_LABELS, flowKey)) return res.status(404).json({ error: 'Agent任务流不存在' });
+    const workflow = getWorkflow();
+    const config = workflow.config;
+    let summary;
+    if (flowKey === 'auto_invite') {
+      const candidates = listInviteCandidates({ source: config.source, shop: config.shop, min_star: config.min_star, min_fans: config.min_fans, min_fulfillment: config.min_fulfillment, min_avg_view: config.min_avg_view, min_orders: config.min_orders, category: config.category });
+      summary = { result: '试运行完成，未创建任务、未发送邀约', candidate_count: candidates.length };
+    } else if (flowKey === 'auto_review') {
+      const pending = db.prepare("SELECT COUNT(*) AS c FROM samples WHERE status IN ('pending','approved') AND library_added_at IS NULL").get();
+      summary = { result: '试运行完成，未修改样品状态', pending_samples: Number(pending?.c || 0) };
+    } else if (flowKey === 'auto_assign') {
+      const pending = db.prepare("SELECT COUNT(*) AS c FROM agent_workflow_tasks WHERE task_type = 'sample_audit' AND status = 'admin_approved'").get();
+      summary = { result: '试运行完成，未分配 BD', assignable_tasks: Number(pending?.c || 0) };
+    } else {
+      const pending = db.prepare("SELECT COUNT(*) AS c FROM samples WHERE status IN ('shipped','approved','assigned')").get();
+      summary = { result: '试运行完成，未发送跟进消息', followup_candidates: Number(pending?.c || 0) };
+    }
+    recordAgentRun(flowKey, 'trial', 'success', summary);
+    res.json({ success: true, flow_key: flowKey, mode: 'trial', summary, overview: agentOverviewData() });
+  } catch (error) {
+    res.status(400).json({ error: error.message || 'Agent试运行失败' });
+  }
+});
+
+app.get('/api/agent/review-standards', (req, res) => {
+  res.json({
+    standard: getReviewStandard(),
+    versions: db.prepare('SELECT version, created_at FROM review_standards ORDER BY version DESC LIMIT 50').all(),
+  });
+});
+
+app.put('/api/agent/review-standards', (req, res) => {
+  try {
+    res.json({ success: true, standard: saveReviewStandard(req.body || {}) });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '保存审核标准失败' });
+  }
+});
+
 app.get('/api/agent/product-audit-profiles', (req, res) => {
   const productIds = String(req.query.product_ids || '')
     .split(',').map(Number).filter(Boolean);
@@ -2646,6 +3049,16 @@ app.put('/api/agent/settings', (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error.message || '保存 Agent 配置失败' });
   }
+});
+
+app.post('/api/agent/settings/test-ai', (req, res) => {
+  const settings = getAgentSettings();
+  res.json({ success: Boolean(settings.ai_api_key), tested: true, message: settings.ai_api_key ? 'AI 接口配置已保存（本次仅校验配置，未调用外部 AI）' : '尚未配置 API Key，未发起请求' });
+});
+
+app.post('/api/agent/settings/test-notify', (req, res) => {
+  const settings = getAgentSettings();
+  res.json({ success: Boolean(settings.notify_webhook), tested: true, message: settings.notify_webhook ? '通知地址格式已保存（本次为模拟测试，未向外部发送）' : '尚未配置通知地址，未发起请求' });
 });
 
 app.get('/api/agent/workflow', (req, res) => {
@@ -2717,6 +3130,8 @@ app.get('/api/agent/sample-applications', (req, res) => {
         task_status: task?.status || 'pending',
         task_type: task?.task_type || 'sample_message',
         task_id: task?.id || null,
+        review_standard_version: task?.review_standard_version || null,
+        score_details: parseJsonObject(task?.score_details_json, audit.checks || []),
         report: payload.report || null,
         is_new: row.applied_at && Date.now() - new Date(String(row.applied_at).replace(' ', 'T')).getTime() <= 86400000,
       };
@@ -2974,12 +3389,17 @@ app.get('/api/agent/reports', (req, res) => {
   const workflowId = Number(req.query.workflow_id || getWorkflow().id);
   const rows = db.prepare(`
     SELECT id, workflow_id, task_type, status, uid, creator_name, creator_handle, sample_id,
-      score, recommendation, reason, payload_json, created_at, updated_at
+      score, recommendation, reason, payload_json, review_standard_version, score_details_json,
+      created_at, updated_at
     FROM agent_workflow_tasks
     WHERE workflow_id = ? AND task_type = 'sample_audit'
     ORDER BY updated_at DESC, id DESC LIMIT 200
   `).all(workflowId);
-  res.json(rows.map((row) => ({ ...row, payload: parseJsonObject(row.payload_json, {}) })));
+  res.json(rows.map((row) => ({
+    ...row,
+    payload: parseJsonObject(row.payload_json, {}),
+    score_details: parseJsonObject(row.score_details_json, []),
+  })));
 });
 
 app.get('/api/agent/inbox', (req, res) => {
@@ -3048,7 +3468,14 @@ app.get('/api/agent/optimization', (req, res) => {
     SELECT * FROM agent_optimization_suggestions
     WHERE workflow_id = ? ORDER BY id DESC LIMIT 100
   `).all(workflowId).map((row) => ({ ...row, proposal: parseJsonObject(row.proposal_json, {}) }));
-  res.json({ ...report, suggestions });
+  const experiments = db.prepare('SELECT * FROM agent_experiments ORDER BY id DESC LIMIT 20').all().map((row) => ({ ...row, report: experimentReport(row.id) }));
+  res.json({ ...report, suggestions, experiments });
+});
+
+app.get('/api/agent/optimization/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM agent_optimization_suggestions WHERE id = ?').get(Number(req.params.id || 0));
+  if (!row) return res.status(404).json({ error: '优化建议不存在' });
+  res.json({ ...row, proposal: parseJsonObject(row.proposal_json, {}), before: parseJsonObject(row.before_json, {}), after: parseJsonObject(row.after_json, {}), operations: db.prepare('SELECT * FROM agent_suggestion_operations WHERE suggestion_id = ? ORDER BY id DESC').all(row.id) });
 });
 
 app.post('/api/agent/optimization/generate', (req, res) => {
@@ -3069,9 +3496,13 @@ app.post('/api/agent/optimization/:id/decision', (req, res) => {
   if (!suggestion) return res.status(404).json({ error: '优化建议不存在' });
   if (suggestion.status !== 'pending') return res.status(400).json({ error: '该优化建议已经处理过' });
   let application = { applied: false, reason: '建议已记录，等待人工实施' };
+  const before = suggestion.workflow_id ? getWorkflow(suggestion.workflow_id)?.config || {} : {};
   if (decision === 'approved') application = applyOptimizationProposal(suggestion);
-  db.prepare('UPDATE agent_optimization_suggestions SET status = ?, applied_at = CASE WHEN ? = \'approved\' THEN ? ELSE applied_at END WHERE id = ?')
-    .run(decision, decision, nowText(), id);
+  const after = application.workflow?.config || before;
+  db.prepare('UPDATE agent_optimization_suggestions SET status = ?, before_json = ?, after_json = ?, decision_at = ?, applied_at = CASE WHEN ? = \'approved\' THEN ? ELSE applied_at END WHERE id = ?')
+    .run(decision, JSON.stringify(before), JSON.stringify(after), nowText(), decision, nowText(), id);
+  db.prepare('INSERT INTO agent_suggestion_operations (suggestion_id, operation, before_json, after_json, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(id, decision === 'approved' ? 'enable' : 'reject', JSON.stringify(before), JSON.stringify(after), nowText());
   recordLearningEvent({
     workflowId: suggestion.workflow_id,
     eventType: 'optimization_decision',
@@ -3080,6 +3511,21 @@ app.post('/api/agent/optimization/:id/decision', (req, res) => {
     lesson: application.applied ? `优化建议已应用：${JSON.stringify(application.changes)}` : (decision === 'approved' ? application.reason : '优化建议被忽略，保留现有工作流'),
   });
   res.json({ success: true, id, status: decision, application });
+});
+
+app.post('/api/agent/optimization/:id/rollback', (req, res) => {
+  const id = Number(req.params.id || 0);
+  const suggestion = db.prepare('SELECT * FROM agent_optimization_suggestions WHERE id = ?').get(id);
+  if (!suggestion) return res.status(404).json({ error: '优化建议不存在' });
+  if (suggestion.status !== 'approved') return res.status(400).json({ error: '只有已启用的建议可以回退' });
+  const before = parseJsonObject(suggestion.before_json, {});
+  const workflow = getWorkflow(suggestion.workflow_id);
+  if (!workflow || !Object.keys(before).length) return res.status(400).json({ error: '找不到启用前的版本快照' });
+  const restored = saveWorkflow({ id: workflow.id, config: before });
+  db.prepare('UPDATE agent_optimization_suggestions SET status = \'rolled_back\', decision_at = ? WHERE id = ?').run(nowText(), id);
+  db.prepare('INSERT INTO agent_suggestion_operations (suggestion_id, operation, before_json, after_json, created_at) VALUES (?, ?, ?, ?, ?)').run(id, 'rollback', JSON.stringify(workflow.config || {}), JSON.stringify(restored.config || before), nowText());
+  recordLearningEvent({ workflowId: workflow.id, eventType: 'optimization_rollback', input: { suggestion_id: id }, outcome: 'rolled_back', lesson: '优化建议已回退到启用前版本' });
+  res.json({ success: true, status: 'rolled_back', workflow: restored });
 });
 
 app.get('/api/agent/experiments', (req, res) => {
@@ -3123,57 +3569,125 @@ app.get('/api/agent/experiments/:id/report', (req, res) => {
   res.json(report);
 });
 
+const TEMPLATE_SCENES = new Set(['first_invite', 'reinvite', 'sample_followup', 'inquiry', 'shipping_followup', 'publish_followup']);
+const TEMPLATE_LANGUAGES = new Set(['zh', 'en', 'ja']);
+
+function normalizeTemplateInput(body = {}) {
+  const scene = TEMPLATE_SCENES.has(String(body.scene || 'first_invite')) ? String(body.scene || 'first_invite') : 'first_invite';
+  const language = TEMPLATE_LANGUAGES.has(String(body.language || 'zh')) ? String(body.language || 'zh') : 'zh';
+  const shopIds = Array.isArray(body.shop_ids) ? body.shop_ids.map(String).filter(Boolean) : [];
+  const commissionRate = body.commission_rate === '' || body.commission_rate === undefined || body.commission_rate === null ? null : Number(body.commission_rate);
+  return {
+    name: String(body.name || '').trim(),
+    content: String(body.content || '').trim(),
+    channel: String(body.channel || 'im').trim() || 'im',
+    type: ['dm', 'collab', 'confirmation'].includes(String(body.type || 'dm')) ? String(body.type || 'dm') : 'dm',
+    scene,
+    language,
+    shopIds,
+    productId: body.product_id ? Number(body.product_id) : null,
+    commissionRate,
+  };
+}
+
+function validateTemplateInput(input) {
+  if (!input.name || !input.content) throw new Error('缺少模板名称或内容');
+  if (input.language === 'zh' && !/[\u3400-\u9fff]/.test(input.content)) throw new Error('中文模板必须包含中文内容');
+  if (input.commissionRate !== null && (!Number.isFinite(input.commissionRate) || input.commissionRate < 0 || input.commissionRate > 100)) throw new Error('佣金比例需填写 0-100 之间的数字');
+}
+
+function templateStats() {
+  return db.prepare(`
+    SELECT t.id,
+      COUNT(r.id) AS sent_count,
+      SUM(CASE WHEN r.status = 'sent' THEN 1 ELSE 0 END) AS delivered_count,
+      COUNT(DISTINCT CASE WHEN r.status = 'sent' AND EXISTS (SELECT 1 FROM agent_inbox_messages m WHERE m.uid = r.uid AND m.direction = 'inbound' AND datetime(m.received_at) >= datetime(r.created_at)) THEN r.uid END) AS reply_count,
+      COUNT(DISTINCT CASE WHEN s.status IN ('approved','assigned','shipped','published') THEN s.uid END) AS accepted_count
+    FROM invitation_templates t
+    LEFT JOIN invitation_records r ON r.template_id = t.id
+    LEFT JOIN samples s ON s.uid = r.uid AND s.applied_at >= r.created_at
+    GROUP BY t.id
+  `).all().map((row) => {
+    const sent = Number(row.sent_count || 0);
+    const replies = Number(row.reply_count || 0);
+    const accepted = Number(row.accepted_count || 0);
+    return { ...row, sent_count: sent, delivered_count: Number(row.delivered_count || 0), reply_count: replies, accepted_count: accepted, reply_rate: sent ? replies / sent : 0, accept_rate: sent ? accepted / sent : 0 };
+  });
+}
+
 app.get('/api/invitations/templates', (req, res) => {
   ensureInvitationTemplates();
+  const stats = new Map(templateStats().map((row) => [Number(row.id), row]));
   const rows = db.prepare(`
-    SELECT t.id, t.name, t.channel, t.type, t.product_id, t.content, COALESCE(a.commission_rate, 0) AS commission_rate
+    SELECT t.id, t.name, t.channel, t.type, t.scene, t.shop_ids, t.language, t.version, t.product_id, t.content, t.active, COALESCE(a.commission_rate, 0) AS commission_rate
     FROM invitation_templates
     t LEFT JOIN agent_template_terms a ON a.template_id = t.id
     WHERE active = 1
     ORDER BY type, id
   `).all();
-  res.json(rows);
+  res.json(rows.map((row) => ({ ...row, shop_ids: parseJsonObject(row.shop_ids, []), stats: stats.get(Number(row.id)) || { sent_count: 0, delivered_count: 0, reply_count: 0, accepted_count: 0, reply_rate: 0, accept_rate: 0 } })));
 });
 
 app.post('/api/invitations/templates', (req, res) => {
-  const name = String(req.body?.name || '').trim();
-  const content = String(req.body?.content || '').trim();
-  const channel = String(req.body?.channel || 'im').trim() || 'im';
-  const type = ['dm', 'collab', 'confirmation'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
-  const productId = req.body?.product_id ? Number(req.body.product_id) : null;
-  const commissionRate = req.body?.commission_rate === '' || req.body?.commission_rate === undefined ? null : Number(req.body.commission_rate);
-  if (!name || !content) return res.status(400).json({ error: '缺少模板名称或内容' });
+  const input = normalizeTemplateInput(req.body || {});
+  try { validateTemplateInput(input); } catch (error) { return res.status(400).json({ error: error.message }); }
   const now = nowText();
   const result = db.prepare(`
-    INSERT INTO invitation_templates (name, channel, type, product_id, content, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-  `).run(name, channel, type, productId, content, now, now);
+    INSERT INTO invitation_templates (name, channel, type, scene, shop_ids, language, version, product_id, content, active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?, ?)
+  `).run(input.name, input.channel, input.type, input.scene, JSON.stringify(input.shopIds), input.language, input.productId, input.content, now, now);
   const templateId = Number(result.lastInsertRowid);
-  if (commissionRate !== null && Number.isFinite(commissionRate) && commissionRate >= 0 && commissionRate <= 100) {
-    db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(templateId, commissionRate, nowText());
-  }
-  res.json({ id: templateId, name, channel, type, product_id: productId, content, commission_rate: commissionRate });
+  if (input.commissionRate !== null) db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(templateId, input.commissionRate, now);
+  db.prepare('INSERT INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(templateId, input.name, input.scene, JSON.stringify(input.shopIds), input.language, input.type, input.productId, input.content, input.commissionRate, now);
+  res.json({ id: templateId, ...input, version: 1, shop_ids: input.shopIds, commission_rate: input.commissionRate });
 });
 
 app.put('/api/invitations/templates/:id', (req, res) => {
   const id = Number(req.params.id || 0);
-  const name = String(req.body?.name || '').trim();
-  const content = String(req.body?.content || '').trim();
-  const channel = String(req.body?.channel || 'im').trim() || 'im';
-  const type = ['dm', 'collab', 'confirmation'].includes(String(req.body?.type || 'dm')) ? String(req.body.type || 'dm') : 'dm';
-  const productId = req.body?.product_id ? Number(req.body.product_id) : null;
-  const commissionRate = req.body?.commission_rate === '' || req.body?.commission_rate === undefined ? null : Number(req.body.commission_rate);
   if (!id) return res.status(400).json({ error: '模板 ID 不正确' });
-  if (!name || !content) return res.status(400).json({ error: '缺少模板名称或内容' });
+  const input = normalizeTemplateInput(req.body || {});
+  try { validateTemplateInput(input); } catch (error) { return res.status(400).json({ error: error.message }); }
+  const current = db.prepare('SELECT * FROM invitation_templates WHERE id = ?').get(id);
+  if (!current) return res.status(404).json({ error: '模板不存在' });
+  const nextVersion = Number(current.version || 1) + 1;
+  const oldCommission = db.prepare('SELECT commission_rate FROM agent_template_terms WHERE template_id = ?').get(id)?.commission_rate ?? null;
+  db.prepare('INSERT OR IGNORE INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, current.version || 1, current.name, current.scene || 'first_invite', current.shop_ids || '[]', current.language || 'zh', current.type || 'dm', current.product_id, current.content, oldCommission, current.updated_at || nowText());
   db.prepare(`
     UPDATE invitation_templates
-    SET name = ?, channel = ?, type = ?, product_id = ?, content = ?, updated_at = ?
+    SET name = ?, channel = ?, type = ?, scene = ?, shop_ids = ?, language = ?, version = ?, product_id = ?, content = ?, updated_at = ?
     WHERE id = ?
-  `).run(name, channel, type, productId, content, nowText(), id);
-  if (commissionRate !== null && Number.isFinite(commissionRate) && commissionRate >= 0 && commissionRate <= 100) {
-    db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(id, commissionRate, nowText());
-  }
-  res.json({ success: true });
+  `).run(input.name, input.channel, input.type, input.scene, JSON.stringify(input.shopIds), input.language, nextVersion, input.productId, input.content, nowText(), id);
+  db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(id, input.commissionRate ?? 0, nowText());
+  db.prepare('INSERT INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, nextVersion, input.name, input.scene, JSON.stringify(input.shopIds), input.language, input.type, input.productId, input.content, input.commissionRate, nowText());
+  res.json({ success: true, version: nextVersion });
+});
+
+app.get('/api/invitations/templates/:id/versions', (req, res) => {
+  res.json(db.prepare('SELECT * FROM invitation_template_versions WHERE template_id = ? ORDER BY version DESC').all(Number(req.params.id || 0)).map((row) => ({ ...row, shop_ids: parseJsonObject(row.shop_ids, []) })));
+});
+
+app.post('/api/invitations/templates/:id/rollback', (req, res) => {
+  const id = Number(req.params.id || 0);
+  const version = Number(req.body?.version || 0);
+  const current = db.prepare('SELECT * FROM invitation_templates WHERE id = ?').get(id);
+  const source = db.prepare('SELECT * FROM invitation_template_versions WHERE template_id = ? AND version = ?').get(id, version);
+  if (!current || !source) return res.status(404).json({ error: '模板版本不存在' });
+  const nextVersion = Number(current.version || 1) + 1;
+  const now = nowText();
+  const commission = source.commission_rate === null || source.commission_rate === undefined ? null : Number(source.commission_rate);
+  db.prepare('INSERT OR IGNORE INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, current.version || 1, current.name, current.scene || 'first_invite', current.shop_ids || '[]', current.language || 'zh', current.type || 'dm', current.product_id, current.content, db.prepare('SELECT commission_rate FROM agent_template_terms WHERE template_id = ?').get(id)?.commission_rate ?? null, current.updated_at || now);
+  db.prepare('UPDATE invitation_templates SET name = ?, type = ?, scene = ?, shop_ids = ?, language = ?, version = ?, product_id = ?, content = ?, updated_at = ? WHERE id = ?').run(source.name, source.type, source.scene, source.shop_ids || '[]', source.language, nextVersion, source.product_id, source.content, now, id);
+  db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(id, commission ?? 0, now);
+  db.prepare('INSERT INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, nextVersion, source.name, source.scene, source.shop_ids || '[]', source.language, source.type, source.product_id, source.content, commission, now);
+  res.json({ success: true, version: nextVersion });
+});
+
+app.post('/api/invitations/templates/:id/preview', (req, res) => {
+  const row = db.prepare('SELECT * FROM invitation_templates WHERE id = ?').get(Number(req.params.id || 0));
+  if (!row) return res.status(404).json({ error: '模板不存在' });
+  const body = req.body || {};
+  const message = renderInvitationMessage(row, { uid: body.uid || 'creator-demo', creator_name: body.creator_name || '达人示例', creator_handle: body.creator_handle || '@creator_demo' }, { name: body.shop_name || '店铺示例' }, { id: body.product_id, name: body.product_name || '商品示例', sku: body.product_sku || 'SKU-DEMO', product_url: body.product_link || '' }, null, { commission_rate: body.commission ?? 15 });
+  res.json({ message });
 });
 
 app.delete('/api/invitations/templates/:id', (req, res) => {
@@ -3410,7 +3924,7 @@ app.post('/api/invitations/records/:id/retry', async (req, res) => {
 
 app.get('/api/tiktok/auth/status', (req, res) => {
   const shops = db.prepare(`
-    SELECT id, name, color, access_token, refresh_token, shop_cipher, last_sync_at, last_sync_status, last_sync_message
+    SELECT id, name, color, access_token, refresh_token, shop_cipher, token_expires_at, last_sync_at, last_sync_status, last_sync_message
     FROM shops
     ORDER BY id
   `).all().map((shop) => ({
@@ -3424,6 +3938,8 @@ app.get('/api/tiktok/auth/status', (req, res) => {
     has_refresh_token: Boolean(shop.refresh_token),
     has_shop_cipher: Boolean(shop.shop_cipher),
     auto_refresh_enabled: Boolean(shop.refresh_token),
+    token_expires_at: shop.token_expires_at || null,
+    token_expiring: shop.token_expires_at ? new Date(shop.token_expires_at).getTime() - Date.now() < 7 * 86400000 : false,
     last_sync_at: shop.last_sync_at,
     last_sync_status: shop.last_sync_status,
     last_sync_message: shop.last_sync_message,
@@ -3606,7 +4122,7 @@ app.post('/api/bd', (req, res) => {
 
 app.patch('/api/bd/:id', (req, res) => {
   const { id } = req.params;
-  const allowed = ['name', 'email', 'wecom_userid', 'active'];
+  const allowed = ['name', 'email', 'wecom_userid', 'active', 'max_load'];
   const updates = [];
   const params = [];
   for (const key of allowed) {
@@ -4585,9 +5101,9 @@ async function handleTikTokOAuthCallback(req, res) {
 
     db.prepare(`
       UPDATE shops
-      SET access_token = ?, refresh_token = ?, shop_cipher = ?
+      SET access_token = ?, refresh_token = ?, shop_cipher = ?, token_expires_at = ?
       WHERE id = ?
-    `).run(tokenData.access_token, tokenData.refresh_token || '', shopCipher, shopId);
+    `).run(tokenData.access_token, tokenData.refresh_token || '', shopCipher, tokenData.expires_in ? new Date(Date.now() + Number(tokenData.expires_in) * 1000).toISOString() : null, shopId);
     writeSyncLog(shopId, 'oauth', 'success', `${localShop.name} 店铺授权完成`);
     return res.send(`${localShop.name} 店铺授权完成，Token 和 shop_cipher 已保存，可以返回系统执行同步。`);
   } catch (err) {

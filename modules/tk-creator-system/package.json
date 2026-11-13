@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node start.js",
-    "check": "node --check server.js && node --check start.js"
+    "check": "node --check server.js && node --check start.js && node --check scripts/smoke-agent.js",
+    "test:agent-smoke": "node scripts/smoke-agent.js"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

@@ -163,6 +163,34 @@ function normalizeAffiliateCreator(raw) {
     profile.username
   );
   const gmv = raw.gmv_30d || raw.gmv || raw.sales_amount_30d || creator.gmv_30d || creator.gmv || {};
+  const videos30d = firstText(
+    raw.videos_30d,
+    raw.video_count_last_30_days,
+    raw.published_video_count_30d,
+    raw.video_count_30d,
+    raw.ec_video_count,
+    raw.published_videos_30d,
+    raw.video_count,
+    raw.monthly_videos,
+    creator.videos_30d,
+    creator.video_count_last_30_days,
+    creator.published_video_count_30d,
+    creator.video_count_30d,
+    creator.ec_video_count,
+    creator.published_videos_30d,
+    creator.video_count,
+    creator.monthly_videos,
+    profile.videos_30d,
+    profile.video_count_last_30_days,
+    profile.published_video_count_30d,
+    profile.video_count_30d,
+    profile.ec_video_count,
+    profile.published_videos_30d,
+    profile.video_count,
+    profile.monthly_videos,
+    profile.videos,
+    profile.published_videos
+  );
   return {
     uid: uid || handle,
     creatorOpenId: firstText(raw.creator_open_id, creator.creator_open_id, uid),
@@ -173,7 +201,8 @@ function normalizeAffiliateCreator(raw) {
     fans: Number(firstText(raw.follower_count, raw.followers, creator.follower_count, creator.followers, profile.follower_count, 0)) || 0,
     category: firstText(raw.category, raw.category_name, raw.primary_category, creator.category, creator.category_name, profile.category),
     fulfillmentRate: normalizeNumber(firstText(raw.fulfillment_rate, raw.fulfillment_percentage, creator.fulfillment_rate, creator.fulfillment_percentage)),
-    avgView: normalizeNumber(firstText(raw.avg_view, raw.average_view, raw.ec_video_view, creator.avg_view, creator.average_view, creator.ec_video_view)),
+    avgView: normalizeNumber(firstText(raw.avg_view_30d, raw.average_view_30d, raw.ec_video_view_30d, raw.avg_video_views_30d, raw.average_video_views_30d, raw.avg_ec_video_view_count, raw.avg_ec_video_play_count, raw.avg_view, raw.average_view, raw.ec_video_view, creator.avg_view_30d, creator.average_view_30d, creator.ec_video_view_30d, creator.avg_video_views_30d, creator.average_video_views_30d, creator.avg_ec_video_view_count, creator.avg_ec_video_play_count, creator.avg_view, creator.average_view, creator.ec_video_view, profile.avg_view_30d, profile.average_view_30d, profile.ec_video_view_30d, profile.avg_video_views_30d, profile.average_video_views_30d, profile.avg_ec_video_view_count, profile.avg_ec_video_play_count, profile.avg_view)),
+    videos30d: normalizeNumber(videos30d),
     salesCount30d: normalizeNumber(firstText(
       raw.sales_count_30d,
       raw.order_count_30d,
@@ -468,6 +497,8 @@ function ensureSyncSchema(db) {
       avg_view REAL,
       sales_count_30d INTEGER,
       sales_amount_30d REAL,
+      gmv_30d REAL,
+      videos_30d INTEGER,
       sales_currency TEXT,
       profile_json TEXT,
       synced_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -476,6 +507,9 @@ function ensureSyncSchema(db) {
   `);
   try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_count_30d INTEGER'); } catch (_) {}
   try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_amount_30d REAL'); } catch (_) {}
+  try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN gmv_30d REAL'); } catch (_) {}
+  try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN videos_30d INTEGER'); } catch (_) {}
+  try { db.exec('UPDATE affiliate_creators SET gmv_30d = sales_amount_30d WHERE gmv_30d IS NULL AND sales_amount_30d IS NOT NULL'); } catch (_) {}
   try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_currency TEXT'); } catch (_) {}
   try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN normalized_handle TEXT'); } catch (_) {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_affiliate_creators_shop_sales ON affiliate_creators(shop_id, sales_count_30d)'); } catch (_) {}
@@ -534,9 +568,9 @@ function upsertAffiliateCreator(db, shopId, item) {
     INSERT INTO affiliate_creators (
       shop_id, uid, creator_open_id, creator_name, creator_handle, normalized_handle,
       avatar_url, fans, category, fulfillment_rate, avg_view, sales_count_30d,
-      sales_amount_30d, sales_currency, profile_json, synced_at
+      sales_amount_30d, gmv_30d, videos_30d, sales_currency, profile_json, synced_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(shop_id, uid) DO UPDATE SET
       creator_open_id = COALESCE(NULLIF(excluded.creator_open_id, ''), affiliate_creators.creator_open_id),
       creator_name = COALESCE(NULLIF(excluded.creator_name, ''), affiliate_creators.creator_name),
@@ -549,6 +583,8 @@ function upsertAffiliateCreator(db, shopId, item) {
       avg_view = excluded.avg_view,
       sales_count_30d = excluded.sales_count_30d,
       sales_amount_30d = excluded.sales_amount_30d,
+      gmv_30d = excluded.gmv_30d,
+      videos_30d = excluded.videos_30d,
       sales_currency = COALESCE(NULLIF(excluded.sales_currency, ''), affiliate_creators.sales_currency),
       profile_json = excluded.profile_json,
       synced_at = datetime('now')
@@ -566,6 +602,8 @@ function upsertAffiliateCreator(db, shopId, item) {
     item.avgView,
     item.salesCount30d,
     item.salesAmount30d,
+    item.salesAmount30d,
+    item.videos30d,
     item.salesCurrency,
     item.rawJson
   );
@@ -1071,6 +1109,8 @@ async function syncAffiliateCreators(db, shop) {
       upserted: 0,
       skipped: 0,
       with_sales_30d: 0,
+      with_gmv_30d: 0,
+      with_videos_30d: 0,
       message: '未配置 TK_AFFILIATE_CREATOR_POOL_PATH，暂未同步联盟中心达人池',
     };
   }
@@ -1088,9 +1128,12 @@ async function syncAffiliateCreators(db, shop) {
   let upserted = 0;
   let skipped = 0;
   let withSales30d = 0;
+  let withGmv30d = 0;
+  let withVideos30d = 0;
   let performanceFetched = 0;
   let performanceFailed = 0;
-  const detailLimit = Number(process.env.TK_AFFILIATE_CREATOR_PERFORMANCE_LIMIT || rows.length);
+  const configuredDetailLimit = Number(process.env.TK_AFFILIATE_CREATOR_PERFORMANCE_LIMIT || 0);
+  const detailLimit = configuredDetailLimit > 0 ? configuredDetailLimit : rows.length;
   const detailDelayMs = Number(process.env.TK_AFFILIATE_CREATOR_PERFORMANCE_DELAY_MS || 500);
   for (const raw of rows) {
     let merged = raw;
@@ -1108,12 +1151,14 @@ async function syncAffiliateCreators(db, shop) {
     }
     const item = normalizeAffiliateCreator(merged);
     if (item.salesCount30d !== null && item.salesCount30d !== undefined) withSales30d += 1;
+    if (item.salesAmount30d !== null && item.salesAmount30d !== undefined) withGmv30d += 1;
+    if (item.videos30d !== null && item.videos30d !== undefined) withVideos30d += 1;
     const result = upsertAffiliateCreator(db, shop.id, item);
     if (result === 'upserted') upserted += 1;
     if (result === 'skipped') skipped += 1;
   }
 
-  return { status: 'success', total: rows.length, upserted, skipped, with_sales_30d: withSales30d, performance_fetched: performanceFetched, performance_failed: performanceFailed };
+  return { status: 'success', total: rows.length, upserted, skipped, with_sales_30d: withSales30d, with_gmv_30d: withGmv30d, with_videos_30d: withVideos30d, performance_fetched: performanceFetched, performance_failed: performanceFailed };
 }
 
 async function syncAffiliateOrders(db, shop) {
