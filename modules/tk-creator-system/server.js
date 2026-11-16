@@ -1682,6 +1682,44 @@ function agentScoreSample(sample, config) {
   }, getReviewStandard(), 'sample');
 }
 
+function successfulWorkflowInviteCount(workflowId) {
+  return Number(db.prepare(`
+    SELECT COUNT(DISTINCT uid) AS c
+    FROM invitation_records
+    WHERE source = ? AND status = 'sent'
+  `).get(`workflow:${workflowId}`)?.c || 0);
+}
+
+function queueInviteTasks(workflow, limit) {
+  const config = workflow.config;
+  const candidates = listInviteCandidates({ source: config.source, shop: config.shop });
+  const existing = new Set();
+  db.prepare(`
+    SELECT uid FROM agent_workflow_tasks WHERE workflow_id = ? AND task_type = 'invite'
+    UNION
+    SELECT uid FROM invitation_records WHERE source = ?
+  `).all(workflow.id, `workflow:${workflow.id}`).forEach((row) => existing.add(String(row.uid || '')));
+
+  let queued = 0;
+  for (const candidate of candidates) {
+    if (queued >= limit) break;
+    const uid = String(candidate.uid || '');
+    if (!uid || existing.has(uid)) continue;
+    if (Number(candidate.invited_count || 0) >= Math.max(1, Number(config.invite_max_per_creator || 1))) continue;
+    const audit = agentScoreCandidate(candidate, config);
+    if (audit.recommendation !== 'auto_pass') continue;
+    const profile = getProductAuditProfile(candidate.product_id || config.product_ids?.[0]);
+    insertWorkflowTask(workflow.id, 'invite', 'admin_approved', candidate, audit, {
+      candidate,
+      config_snapshot: config,
+      audit_profile: profile,
+    });
+    existing.add(uid);
+    queued += 1;
+  }
+  return queued;
+}
+
 function scoreByReviewStandard(item, standard, thresholdType) {
   const ordersValue = item.monthly_orders ?? item.total_orders ?? item.sales_count_30d ?? item.sales_count;
   const viewsValue = item.monthly_avg_view ?? item.avg_view;
@@ -1948,7 +1986,6 @@ function generateWorkflowQueue(workflowId = null) {
     source: config.source,
     shop: config.shop,
   };
-  const candidates = listInviteCandidates(candidateQuery);
   const diagnostics = inviteCandidateDiagnostics(candidateQuery);
   const inviteSettings = getAgentSettings();
   // Keep the per-run target separate from the daily cap. A scheduled run may
@@ -1959,29 +1996,16 @@ function generateWorkflowQueue(workflowId = null) {
     Number(inviteSettings.invite_daily_limit || runTarget),
     Number(config.invite_daily_limit || runTarget)
   ));
-  const maxPerCreator = Math.max(1, Number(config.invite_max_per_creator || 1));
   const today = nowText().slice(0, 10);
   const todayCreated = db.prepare(`
     SELECT COUNT(*) AS c
-    FROM agent_workflow_tasks
-    WHERE workflow_id = ?
-      AND task_type = 'invite'
-      AND date(created_at) = ?
-  `).get(workflow.id, today).c;
+    FROM invitation_records
+    WHERE status = 'sent'
+      AND substr(COALESCE(sent_at, created_at), 1, 10) = ?
+  `).get(today).c;
   const remainingToday = Math.max(0, dailyLimit - Number(todayCreated || 0));
   const inviteLimit = Math.min(runTarget, remainingToday);
-  let remainingInviteSlots = inviteLimit;
-  let inviteCount = 0;
-  for (const candidate of candidates) {
-    if (remainingInviteSlots <= 0) break;
-    if (Number(candidate.invited_count || 0) >= maxPerCreator) continue;
-    const audit = agentScoreCandidate(candidate, config);
-    if (audit.recommendation !== 'auto_pass') continue;
-    const profile = getProductAuditProfile(candidate.product_id || config.product_ids?.[0]);
-    insertWorkflowTask(workflow.id, 'invite', 'admin_approved', candidate, audit, { candidate, config_snapshot: config, audit_profile: profile });
-    inviteCount += 1;
-    remainingInviteSlots -= 1;
-  }
+  const inviteCount = queueInviteTasks(workflow, inviteLimit);
 
   const sampleRows = db.prepare(`
     SELECT
@@ -2033,9 +2057,10 @@ function generateWorkflowQueue(workflowId = null) {
   return {
     workflow,
     invite_count: inviteCount,
-    invite_target: inviteLimit,
+    invite_target: runTarget,
+    invite_sent_count: successfulWorkflowInviteCount(workflow.id),
     invite_daily_limit: dailyLimit,
-    invite_shortfall: Math.max(0, inviteLimit - inviteCount),
+    invite_shortfall: Math.max(0, runTarget - successfulWorkflowInviteCount(workflow.id) - inviteCount),
     sample_count: sampleCount,
     diagnostics,
   };
@@ -2260,8 +2285,23 @@ async function executeWorkflow(workflowId = null, options = {}) {
   const runKey = String(workflow.id);
   if (workflowRuns.has(runKey)) return workflowRuns.get(runKey);
   const run = (async () => {
-    const inviteTasks = options.invite === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
-    const inviteResults = await sendWorkflowInvitations(inviteTasks, workflow);
+    let inviteTasks = options.invite === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+    const inviteResults = [];
+    const inviteTarget = Math.max(1, Number(workflow.config.invite_target_count || getAgentSettings().invite_target_count || 50));
+    let inviteSentCount = successfulWorkflowInviteCount(workflow.id);
+    if (options.invite !== false && inviteSentCount < inviteTarget && !inviteTasks.length) {
+      queueInviteTasks(workflow, inviteTarget - inviteSentCount);
+      inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+    }
+    while (inviteTasks.length && inviteSentCount < inviteTarget) {
+      const results = await sendWorkflowInvitations(inviteTasks, workflow);
+      inviteResults.push(...results);
+      inviteSentCount = successfulWorkflowInviteCount(workflow.id);
+      if (inviteSentCount >= inviteTarget) break;
+      const queued = queueInviteTasks(workflow, inviteTarget - inviteSentCount);
+      if (!queued) break;
+      inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+    }
     const inboxTasks = options.followup === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
     const inbox_reply_results = await sendWorkflowInboxReplies(inboxTasks, workflow);
     const messageTasks = options.review === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'sample_message' && task.status === 'admin_approved');
@@ -2285,7 +2325,7 @@ async function executeWorkflow(workflowId = null, options = {}) {
         .run('executed', bdId || null, nowText(), nowText(), task.id);
       assigned += 1;
     }
-    return { invite_results: inviteResults, inbox_reply_results, sample_message_results, assigned_samples: assigned };
+    return { invite_results: inviteResults, invite_sent_count: inviteSentCount, inbox_reply_results, sample_message_results, assigned_samples: assigned };
   })();
   workflowRuns.set(runKey, run);
   try { return await run; } finally { workflowRuns.delete(runKey); }
