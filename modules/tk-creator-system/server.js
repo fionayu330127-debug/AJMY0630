@@ -1357,13 +1357,13 @@ function listInviteCandidates(query = {}) {
       WHERE 1 = 1
         ${shop !== 'all' ? 'AND (ac.shop_id = ? OR COALESCE(ac.shop_id, \'\') = \'\')' : ''}
       ORDER BY COALESCE(ac.sales_count_30d, -1) DESC, ac.synced_at DESC
-      LIMIT 1000
+      LIMIT 10000
     `).all(...(shop !== 'all' ? [shop] : []));
     list = rows.map((row) => ({ ...row, ...(inviteStats[row.uid] || {}) }));
   }
 
   const candidates = dedupeCandidates(list.map((row) => buildCreatorCandidate(row, source, shopMap)));
-  return applyCandidateFilters(candidates, query).slice(0, 200);
+  return applyCandidateFilters(candidates, query).slice(0, source === 'shop_pool' ? 10000 : 200);
 }
 
 function parseJsonObject(value, fallback = {}) {
