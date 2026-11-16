@@ -1121,7 +1121,8 @@ async function syncAffiliateCreators(db, shop) {
     body: parseJsonEnv('TK_AFFILIATE_CREATOR_POOL_BODY', {}),
     listKeys: listKeysFromEnv('TK_AFFILIATE_CREATOR_POOL_LIST_KEYS', 'creators,creator_list,influencers,influencer_list,users,list,data'),
     pageSize: Number(process.env.TK_AFFILIATE_CREATOR_POOL_PAGE_SIZE || 20),
-    maxPages: Number(process.env.TK_AFFILIATE_CREATOR_POOL_MAX_PAGES || 100),
+    // Follow TikTok's next_page_token until the API has no more creators.
+    maxPages: 0,
     pageDelayMs: Number(process.env.TK_AFFILIATE_CREATOR_POOL_PAGE_DELAY_MS || 800),
   });
 
