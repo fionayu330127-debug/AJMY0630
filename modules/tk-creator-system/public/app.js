@@ -1943,6 +1943,44 @@ function workflowProductIcons(workflow) {
   return products.map(product => productThumbHtml(product, 30)).join('') || '<span class="module-meta">-</span>';
 }
 
+function workflowSummaryCount(workflow, kind) {
+  if (kind === 'sent') return Number(workflow.sent_invite_count || 0);
+  if (kind === 'pending') return Number(workflow.sample_pending_count || 0);
+  return Number(workflow.sample_recommended_count || 0);
+}
+
+function workflowSummaryRows(workflowId, kind, creators) {
+  if (!creators.length) return '<div class="empty-state">暂无达人</div>';
+  const rows = creators.map(row => {
+    const action = row.task_id && row.status === 'agent_review'
+      ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${row.task_id}, 'approve')">通过样品审核</button><button class="abtn ng" onclick="confirmWorkflowTask(${row.task_id}, 'reject')">拒绝</button></div>`
+      : '-';
+    const status = row.task_id
+      ? `${workflowRecommendationLabel(row.recommendation)} · ${workflowTaskStatusLabel(row.status)}`
+      : '已发送';
+    return `<tr><td><div class="cn">${esc(row.creator_name || '-')}</div><div class="cm">${esc(row.uid || row.creator_handle || '-')}</div></td><td>${esc(row.creator_handle || '-')}</td><td>${esc(row.product_name || '-')}</td><td>${esc(row.applied_at || row.sent_at || row.created_at || '-')}</td><td>${row.score == null ? '-' : `${Number(row.score)} 分`}</td><td>${esc(status)}</td><td>${action}</td></tr>`;
+  }).join('');
+  return `<div class="table-wrap"><table><thead><tr><th>达人</th><th>账号</th><th>样品</th><th>时间</th><th>Agent评分</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+async function toggleWorkflowSummary(workflowId, kind) {
+  const target = document.getElementById(`workflow-summary-${workflowId}-${kind}`);
+  if (!target) return;
+  if (target.dataset.open === 'true') {
+    target.dataset.open = 'false';
+    target.innerHTML = '';
+    return;
+  }
+  target.innerHTML = '<div class="module-meta">正在加载达人明细...</div>';
+  try {
+    const result = await api(`/api/agent/workflows/${workflowId}/creator-summary?kind=${kind}`);
+    target.innerHTML = workflowSummaryRows(workflowId, kind, result.creators || []);
+    target.dataset.open = 'true';
+  } catch (error) {
+    target.innerHTML = `<div class="empty-state">${esc(error.message || '加载失败')}</div>`;
+  }
+}
+
 function workflowListPanel() {
   const meta = paginate(AGENT_WORKFLOWS, workflowListPage, workflowListPageSize);
   workflowListPage = meta.page;
@@ -1952,14 +1990,15 @@ function workflowListPanel() {
       <td><button class="btn btn-ghost" onclick="selectWorkflow(${workflow.id})">${esc(workflow.name)}</button></td>
       <td><div class="product-icon-list">${workflowProductIcons(workflow)}</div></td>
       <td>${workflow.task_count || 0}<div class="module-meta">已发邀约 ${workflow.sent_invite_count || 0} · 已申请样品 ${workflow.sample_applicant_count || 0}</div></td>
-      <td>${workflow.review_count || 0}</td>
-      <td>${workflow.approved_count || 0}</td>
-      <td>${workflow.executed_count || 0}</td>
+      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'sent')">${workflowSummaryCount(workflow, 'sent')}</button></td>
+      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'pending')">${workflowSummaryCount(workflow, 'pending')}</button></td>
+      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'recommended')">${workflowSummaryCount(workflow, 'recommended')}</button></td>
       <td><div class="abtns"><button class="btn btn-outline" onclick="openEditWorkflowModal(${workflow.id})">编辑</button><button class="btn btn-outline" onclick="generateWorkflowQueueFor(${workflow.id})">刷新</button></div></td>
-    </tr>`).join('');
+    </tr>
+    <tr><td colspan="8" style="padding:0"><div id="workflow-summary-${workflow.id}-sent" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-pending" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-recommended" class="workflow-summary"></div></td></tr>`).join('');
   return `<div class="module-panel" style="margin-bottom:12px">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>工作流清单</h3><div class="module-meta">最新任务优先，Agent 自动邀约；样品审核在下方统一处理。</div></div><button class="btn btn-primary" onclick="openWorkflowModal()">新增自动化工作流任务</button></div>
-    <div class="table-wrap"><table><thead><tr><th>任务时间</th><th>工作流</th><th>产品</th><th>任务数量</th><th>待确认</th><th>已确认</th><th>已执行</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty-state">暂无工作流</div></td></tr>'}</tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>任务时间</th><th>工作流</th><th>产品</th><th>任务数量</th><th>已发送</th><th>已申请（待确认）</th><th>已确认（Agent建议审核通过）</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty-state">暂无工作流</div></td></tr>'}</tbody></table></div>
     ${pagerHtml('workflow-list', meta)}
   </div>`;
 }

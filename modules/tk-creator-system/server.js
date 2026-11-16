@@ -2280,11 +2280,13 @@ function workflowList() {
     SELECT
       w.*,
       COUNT(t.id) AS task_count,
-      SUM(CASE WHEN t.status = 'agent_review' THEN 1 ELSE 0 END) AS review_count,
-      SUM(CASE WHEN t.status = 'admin_approved' THEN 1 ELSE 0 END) AS approved_count,
-      SUM(CASE WHEN t.status = 'executed' THEN 1 ELSE 0 END) AS executed_count,
       SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
       (SELECT COUNT(DISTINCT r.uid) FROM invitation_records r WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS sent_invite_count,
+      (SELECT COUNT(DISTINCT t2.uid) FROM agent_workflow_tasks t2
+        WHERE t2.workflow_id = w.id AND t2.task_type = 'sample_audit' AND t2.status = 'agent_review') AS sample_pending_count,
+      (SELECT COUNT(DISTINCT t3.uid) FROM agent_workflow_tasks t3
+        WHERE t3.workflow_id = w.id AND t3.task_type = 'sample_audit' AND t3.status = 'agent_review'
+          AND t3.recommendation IN ('auto_pass', 'review_pass')) AS sample_recommended_count,
       (SELECT COUNT(DISTINCT s.uid) FROM samples s JOIN invitation_records r ON r.uid = s.uid AND r.source = 'workflow:' || w.id WHERE s.applied_at IS NOT NULL) AS sample_applicant_count
     FROM agent_workflows w
     LEFT JOIN agent_workflow_tasks t ON t.workflow_id = w.id
@@ -2292,6 +2294,32 @@ function workflowList() {
     GROUP BY w.id
     ORDER BY w.id DESC
   `).all().map((row) => ({ ...row, config: parseJsonObject(row.config_json, {}) }));
+}
+
+function workflowCreatorSummary(workflowId, kind) {
+  const workflow = getWorkflow(workflowId);
+  if (!workflow || !['sent', 'pending', 'recommended'].includes(kind)) return [];
+  if (kind === 'sent') {
+    return db.prepare(`
+      SELECT r.uid, r.creator_name, r.creator_handle, r.shop_id, r.status, r.sent_at, r.created_at
+      FROM invitation_records r
+      WHERE r.source = ? AND r.status = 'sent'
+      GROUP BY r.uid
+      ORDER BY datetime(COALESCE(r.sent_at, r.created_at)) DESC, r.id DESC
+    `).all(`workflow:${workflowId}`);
+  }
+  const recommendationFilter = kind === 'recommended' ? "AND t.recommendation IN ('auto_pass', 'review_pass')" : '';
+  return db.prepare(`
+    SELECT t.id AS task_id, t.uid, t.creator_name, t.creator_handle, t.shop_id,
+      t.sample_id, t.score, t.recommendation, t.reason, t.status, t.updated_at,
+      s.status AS sample_status, s.applied_at, p.name AS product_name
+    FROM agent_workflow_tasks t
+    LEFT JOIN samples s ON CAST(s.id AS TEXT) = CAST(t.sample_id AS TEXT)
+    LEFT JOIN products p ON p.id = s.product_id
+    WHERE t.workflow_id = ? AND t.task_type = 'sample_audit'
+      AND t.status = 'agent_review' ${recommendationFilter}
+    ORDER BY datetime(t.updated_at) DESC, t.id DESC
+  `).all(workflowId);
 }
 
 function sampleApplyLink(recordId) {
@@ -3169,6 +3197,18 @@ app.get('/api/agent/sample-applications', (req, res) => {
 
 app.get('/api/agent/workflows', (req, res) => {
   res.json({ workflows: workflowList() });
+});
+
+app.get('/api/agent/workflows/:id/creator-summary', (req, res) => {
+  try {
+    const kind = String(req.query.kind || '');
+    if (!['sent', 'pending', 'recommended'].includes(kind)) {
+      return res.status(400).json({ error: '无效的达人统计类型' });
+    }
+    res.json({ kind, creators: workflowCreatorSummary(Number(req.params.id || 0), kind) });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '读取批次达人明细失败' });
+  }
 });
 
 app.get('/api/agent/workflows/:id/preview', (req, res) => {
