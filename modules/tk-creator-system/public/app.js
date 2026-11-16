@@ -1502,13 +1502,32 @@ function selectedWorkflowBdIds() {
 function workflowPayloadFromForm() {
   const bdIds = selectedWorkflowBdIds();
   const selectedProductIds = selectedWorkflowProductIds();
+  let productAuditRules = {};
+  try {
+    const rules = JSON.parse(document.getElementById('workflow-product-rules')?.value || '[]');
+    const productId = selectedProductIds[0];
+    if (productId && Array.isArray(rules)) productAuditRules[String(productId)] = rules;
+  } catch (_) {
+    toast('商品审核指标模板 JSON 格式不正确');
+  }
   return {
-    name: AGENT_WORKFLOW?.workflow?.name || `自动邀约任务 ${new Date().toLocaleString()}`,
+    name: document.getElementById('workflow-name')?.value?.trim() || AGENT_WORKFLOW?.workflow?.name || `自动邀约任务 ${new Date().toLocaleString()}`,
     config: {
       shop: document.getElementById('workflow-shop')?.value || curStore,
       template_id: Number(document.getElementById('workflow-template')?.value || 0),
       confirmation_template_id: Number(document.getElementById('workflow-confirmation-template')?.value || 0) || null,
       product_ids: selectedProductIds,
+      commission_rate: Number(document.getElementById('workflow-commission')?.value || 15),
+      invite_target_count: Number(document.getElementById('workflow-invite-target')?.value || 50),
+      invite_daily_limit: Number(document.getElementById('workflow-invite-daily-limit')?.value || 50),
+      invite_max_per_creator: Number(document.getElementById('workflow-invite-max-per-creator')?.value || 1),
+      audit_min_score: Number(document.getElementById('workflow-audit-min-score')?.value || 70),
+      bd_ids: bdIds,
+      assign_mode: document.getElementById('workflow-assign-mode')?.value || 'round_robin',
+      auto_reply_template: document.getElementById('workflow-reply-template')?.value || '',
+      product_audit_rules: productAuditRules,
+      send_mode: 'auto',
+      sample_approval_mode: 'manual',
       score_model: 'creator_table_v1',
     },
   };
@@ -1613,10 +1632,15 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
   const templateOptions = INVITE_TEMPLATES.filter(t => t.type === 'collab').map(t => `<option value="${t.id}" ${Number(config.template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   const confirmationTemplateOptions = INVITE_TEMPLATES.filter(t => t.type === 'confirmation').map(t => `<option value="${t.id}" ${Number(config.confirmation_template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   return `
+    <div class="form-row"><label class="form-label">任务名称</label><input class="form-input" id="workflow-name" value="${esc(name)}"></div>
     <div class="form-row"><label class="form-label">选择店铺</label><select class="form-input" id="workflow-shop" onchange="onWorkflowShopChange(this.value)">${shopOptions}</select></div>
     <div class="form-row"><label class="form-label">选择产品</label><div class="workflow-product-pick"><button class="btn btn-outline" type="button" id="workflow-product-button" onclick="openWorkflowProductModal()">选择产品</button><span class="invite-product-summary" id="workflow-product-summary"></span></div></div>
     <div class="form-row"><label class="form-label">选择邀约模板</label><select class="form-input" id="workflow-template">${templateOptions || '<option value="">暂无合作邀约模板</option>'}</select><div class="module-meta">佣金比例和邀约话术由模板决定，任务创建时不再单独设置。</div></div>
-    <div class="form-row"><label class="form-label">选择确认拍摄与发布模板</label><select class="form-input" id="workflow-confirmation-template">${confirmationTemplateOptions || '<option value="">使用系统默认话术</option>'}</select><div class="module-meta">达人申请样品后，Agent 使用此模板确认是否能拍摄与发布。</div></div>
+    <div class="form-row"><label class="form-label">选择确认拍摄与发布模板</label><select class="form-input" id="workflow-confirmation-template">${confirmationTemplateOptions || '<option value="">使用系统默认话术</option>'}</select><div class="module-meta">管理员确认样品申请通过后，Agent 使用此模板确认是否能拍摄与发布。</div></div>
+    <div class="form-row-2"><div class="form-row"><label class="form-label">本次邀约人数</label><input class="form-input" id="workflow-invite-target" type="number" min="1" value="${esc(config.invite_target_count ?? 50)}"></div><div class="form-row"><label class="form-label">自动审核通过分数</label><input class="form-input" id="workflow-audit-min-score" type="number" min="0" max="100" value="${esc(config.audit_min_score ?? 70)}"></div></div>
+    <div class="form-row-2"><div class="form-row"><label class="form-label">每日邀约上限</label><input class="form-input" id="workflow-invite-daily-limit" type="number" min="1" value="${esc(config.invite_daily_limit ?? 50)}"></div><div class="form-row"><label class="form-label">每位达人最多邀约次数</label><input class="form-input" id="workflow-invite-max-per-creator" type="number" min="1" value="${esc(config.invite_max_per_creator ?? 1)}"></div></div>
+    <div class="form-row-2"><div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="workflow-commission" type="number" min="0" max="100" value="${esc(config.commission_rate ?? 15)}"></div><div class="form-row"><label class="form-label">BD 分配方式</label><select class="form-input" id="workflow-assign-mode"><option value="round_robin" ${config.assign_mode !== 'least_load' ? 'selected' : ''}>按顺序轮流分配</option><option value="least_load" ${config.assign_mode === 'least_load' ? 'selected' : ''}>按当前负载最少分配</option></select></div></div>
+    <div class="form-row"><label class="form-label">参与分配 BD</label><div class="workflow-bd-select"><button class="form-input workflow-bd-trigger" type="button" onclick="toggleWorkflowBdDropdown()"><span id="workflow-bd-summary">请选择负责 BD</span><span>▾</span></button><div class="workflow-bd-menu" id="workflow-bd-menu">${BD_LIST.map(b => `<label class="workflow-bd-option"><input type="checkbox" class="workflow-bd-cb" value="${b.id}" ${new Set((config.bd_ids || []).map(Number)).has(Number(b.id)) ? 'checked' : ''} onchange="updateWorkflowBdSelection()"><span>${esc(b.name)}</span><em>当前 ${b.load || 0} 个</em></label>`).join('') || '<div class="empty-state">暂无 BD 成员</div>'}</div></div></div>
     <button class="btn btn-primary" style="width:100%" onclick="saveWorkflowFromModal()">${mode === 'edit' ? '保存并重新运行工作流' : '保存并创建工作流'}</button>`;
 }
 
@@ -1927,7 +1951,7 @@ function workflowListPanel() {
       <td>${esc(workflow.updated_at || workflow.created_at || '-')}</td>
       <td><button class="btn btn-ghost" onclick="selectWorkflow(${workflow.id})">${esc(workflow.name)}</button></td>
       <td><div class="product-icon-list">${workflowProductIcons(workflow)}</div></td>
-      <td>${workflow.task_count || 0}</td>
+      <td>${workflow.task_count || 0}<div class="module-meta">已发邀约 ${workflow.sent_invite_count || 0} · 已申请样品 ${workflow.sample_applicant_count || 0}</div></td>
       <td>${workflow.review_count || 0}</td>
       <td>${workflow.approved_count || 0}</td>
       <td>${workflow.executed_count || 0}</td>

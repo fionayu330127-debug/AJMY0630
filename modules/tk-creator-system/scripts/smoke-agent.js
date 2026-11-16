@@ -69,6 +69,23 @@ async function main() {
       body: JSON.stringify({ reset: true }),
     });
     if (queue.success !== true || !Array.isArray(queue.tasks)) throw new Error('工作流队列生成失败');
+    const sampleGates = queue.tasks.filter((task) => task.task_type === 'sample_audit' && task.payload?.phase === 'sample_application_review');
+    const prematureMessages = queue.tasks.filter((task) => task.task_type === 'sample_message');
+    if (!sampleGates.length || prematureMessages.length) throw new Error('样品申请未先进入管理员复核闸门');
+    const approvedGate = await request(`/api/agent/workflow/tasks/${sampleGates[0].id}/confirm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'approve' }),
+    });
+    const confirmation = (approvedGate.tasks || []).find((task) => task.task_type === 'sample_message' && String(task.sample_id) === String(sampleGates[0].sample_id));
+    if (!confirmation || !['awaiting_reply', 'executed', 'failed'].includes(confirmation.status)) throw new Error('管理员确认后未生成达人拍摄确认消息任务');
+    const webhook = await request('/api/webhooks/tiktok/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ data: { shop_id: confirmation.shop_id, conversation_id: 'smoke-conversation', messages: [{ id: `smoke-reply-${confirmation.id}`, direction: 'inbound', uid: confirmation.uid, creator_name: confirmation.creator_name, text: '可以拍摄并发布' }] } }),
+    });
+    const finalReview = (webhook.results || []).length && (await request(`/api/agent/workflow?id=${workflowId}`)).tasks.find((task) => task.task_type === 'sample_audit' && task.payload?.phase === 'final_sample_review' && String(task.sample_id) === String(confirmation.sample_id));
+    if (!finalReview || finalReview.status !== 'agent_review') throw new Error('达人肯定回复未生成最终审核任务');
     const overview = await request('/api/agent/overview');
     if (!Array.isArray(overview.flows) || overview.flows.length !== 4) throw new Error('Agent任务流状态不完整');
     const trial = await request('/api/agent/flows/auto_invite/trial', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });

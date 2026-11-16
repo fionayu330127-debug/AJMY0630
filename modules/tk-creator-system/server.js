@@ -2003,20 +2003,17 @@ function generateWorkflowQueue(workflowId = null) {
   for (const sample of sampleRows) {
     const item = { ...sample, sample_id: sample.id };
     const conditionAudit = agentScoreSample(item, config);
-    const messageAudit = {
-      score: conditionAudit.score,
-      recommendation: 'pending_reply',
-      reason: '已收到样品申请，Agent 自动确认达人是否能拍摄并发布',
-    };
-    insertWorkflowTask(workflow.id, 'sample_message', 'admin_approved', item, messageAudit, {
-      phase: 'creator_content_confirmation',
+    // The sample list is an admin gate. Sending the confirmation message only
+    // happens after the administrator approves this review task.
+    insertWorkflowTask(workflow.id, 'sample_audit', 'agent_review', item, conditionAudit, {
+      phase: 'sample_application_review',
       sample: item,
       config_snapshot: config,
       condition_audit: conditionAudit,
       audit_profile: getProductAuditProfile(item.product_id),
       report: {
         basic_data: { uid: item.uid, name: item.creator_name, handle: item.creator_handle, fans: item.fans, category: item.category, avg_view: item.avg_view, monthly_videos: item.monthly_videos, orders_30d: item.total_orders, star: item.star },
-        decision: conditionAudit.recommendation === 'auto_pass' ? '回复后建议通过' : '回复后建议人工复核',
+        decision: conditionAudit.recommendation === 'auto_pass' ? '建议通过，等待管理员确认' : '建议人工复核',
         reason: conditionAudit.reason,
         checks: conditionAudit.checks || [],
         score: conditionAudit.score,
@@ -2286,7 +2283,9 @@ function workflowList() {
       SUM(CASE WHEN t.status = 'agent_review' THEN 1 ELSE 0 END) AS review_count,
       SUM(CASE WHEN t.status = 'admin_approved' THEN 1 ELSE 0 END) AS approved_count,
       SUM(CASE WHEN t.status = 'executed' THEN 1 ELSE 0 END) AS executed_count,
-      SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+      SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+      (SELECT COUNT(DISTINCT r.uid) FROM invitation_records r WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS sent_invite_count,
+      (SELECT COUNT(DISTINCT s.uid) FROM samples s JOIN invitation_records r ON r.uid = s.uid AND r.source = 'workflow:' || w.id WHERE s.applied_at IS NOT NULL) AS sample_applicant_count
     FROM agent_workflows w
     LEFT JOIN agent_workflow_tasks t ON t.workflow_id = w.id
     WHERE w.active = 1
@@ -2590,16 +2589,43 @@ function inboxReplyText(workflow, message) {
     .replace(/\{\{reply_text\}\}/g, message.message_text || '');
 }
 
+function processSampleConfirmationReply(row, workflow) {
+  const task = db.prepare(`
+    SELECT * FROM agent_workflow_tasks
+    WHERE workflow_id = ? AND task_type = 'sample_message'
+      AND (uid = ? OR uid = ?) AND status = 'awaiting_reply'
+    ORDER BY id DESC LIMIT 1
+  `).get(workflow.id, row.uid || '', row.creator_open_id || '');
+  if (!task) return false;
+  const payload = parseJsonObject(task.payload_json, {});
+  const sample = payload.sample || payload || {};
+  const audit = judgeSampleReply(row.message_text, sample, workflow.config);
+  const nextPayload = { ...payload, creator_reply: row.message_text, creator_replied_at: nowText(), reply_audit: audit };
+  const positive = ['auto_pass', 'review_pass'].includes(audit.recommendation);
+  db.prepare(`UPDATE agent_workflow_tasks SET status = ?, recommendation = ?, score = ?, reason = ?, payload_json = ?, updated_at = ?, executed_at = ? WHERE id = ?`)
+    .run(positive ? 'executed' : 'failed', audit.recommendation, audit.score, audit.reason, JSON.stringify(nextPayload), nowText(), nowText(), task.id);
+  if (positive) {
+    insertWorkflowTask(workflow.id, 'sample_audit', 'agent_review', { ...sample, sample_id: task.sample_id }, audit, {
+      phase: 'final_sample_review', sample, creator_reply: row.message_text, config_snapshot: workflow.config,
+      report: { basic_data: { uid: sample.uid, name: sample.creator_name, handle: sample.creator_handle, fans: sample.fans, avg_view: sample.avg_view, monthly_videos: sample.monthly_videos ?? sample.videos, orders_30d: sample.total_orders ?? sample.sales_count, star: sample.star }, decision: audit.recommendation === 'auto_pass' ? '建议通过' : '建议人工复核', reason: audit.reason, checks: audit.checks || [], score: audit.score, rule_source: audit.rule_source || 'creator_score_table_v1', creator_reply: row.message_text },
+    });
+  }
+  db.prepare('UPDATE agent_inbox_messages SET classification = ?, processed_at = ? WHERE id = ?').run(positive ? 'sample_confirmation_positive' : 'sample_confirmation_negative', nowText(), row.id);
+  recordLearningEvent({ workflowId: workflow.id, eventType: 'creator_reply', uid: task.uid, sampleId: task.sample_id, input: { reply_text: row.message_text, audit, source: 'inbox' }, outcome: audit.recommendation, lesson: audit.reason });
+  return true;
+}
+
 async function processInboxMessage(row, workflow) {
+  const matchedSampleReply = processSampleConfirmationReply(row, workflow);
   const sample = row.uid
     ? db.prepare(`SELECT s.*, COALESCE(l.star, 0) AS star, COALESCE(s.sales_count, 0) AS total_orders FROM samples s LEFT JOIN creator_library l ON l.uid = s.uid WHERE s.uid = ? ORDER BY s.applied_at DESC LIMIT 1`).get(row.uid)
     : null;
   const audit = classifyInboxMessage(row.message_text, sample);
-  db.prepare('UPDATE agent_inbox_messages SET uid = COALESCE(NULLIF(?, \'\'), uid), classification = ?, processed_at = ? WHERE id = ?')
-    .run(row.uid || '', audit.classification, nowText(), row.id);
-  if (audit.recommendation === 'auto_reply_candidate') {
+  db.prepare('UPDATE agent_inbox_messages SET uid = COALESCE(NULLIF(?, \'\'), uid), classification = CASE WHEN ? THEN classification ELSE ? END, processed_at = ? WHERE id = ?')
+    .run(row.uid || '', matchedSampleReply ? 1 : 0, audit.classification, nowText(), row.id);
+  if (!matchedSampleReply && audit.recommendation === 'auto_reply_candidate') {
     insertWorkflowTask(workflow.id, 'inbox_message', String(process.env.TK_AGENT_AUTO_REPLY || '').toLowerCase() === 'true' ? 'admin_approved' : 'agent_review', { ...row, sample_id: row.external_message_id }, audit, { inbox_message: row, audit, sample, config_snapshot: workflow.config });
-  } else {
+  } else if (!matchedSampleReply) {
     insertWorkflowTask(workflow.id, 'inbox_message', 'agent_review', { ...row, sample_id: row.external_message_id }, audit, { inbox_message: row, audit, sample, config_snapshot: workflow.config });
   }
   return audit;
