@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS samples (
   status        TEXT DEFAULT 'pending',
   bd_id         INTEGER,
   product_id    INTEGER,
+  invitation_record_id INTEGER,
   applied_at    TEXT,
   videos        INTEGER DEFAULT 0,
   avg_view      TEXT,

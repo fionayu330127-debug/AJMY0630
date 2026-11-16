@@ -857,6 +857,7 @@ try { db.exec('ALTER TABLE agent_optimization_suggestions ADD COLUMN decision_at
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_agent_inbox_shop_received ON agent_inbox_messages(shop_id, received_at)'); } catch (_) {}
 try { db.exec('ALTER TABLE products ADD COLUMN product_url TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN commission_rate REAL'); } catch (_) {}
+try { db.exec('ALTER TABLE samples ADD COLUMN invitation_record_id INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN sample_received_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN published_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE samples ADD COLUMN wecom_overdue_notified_at TEXT'); } catch (_) {}
@@ -1995,10 +1996,17 @@ function generateWorkflowQueue(workflowId = null) {
     WHERE s.library_added_at IS NULL
       AND s.status IN ('pending','approved')
       AND (s.bd_id IS NULL OR s.status = 'pending')
+      AND EXISTS (
+        SELECT 1 FROM invitation_records wr
+        WHERE wr.source = 'workflow:' || ?
+          AND wr.template_type = 'collab'
+          AND wr.uid = s.uid
+          AND (wr.product_id = s.product_id OR instr(COALESCE(wr.product_ids, ''), '"' || s.product_id || '"') > 0)
+      )
       ${config.shop && config.shop !== 'all' ? 'AND s.shop_id = ?' : ''}
     ORDER BY s.applied_at DESC
     LIMIT 200
-  `).all(...(config.shop && config.shop !== 'all' ? [config.shop] : []));
+  `).all(workflow.id, ...(config.shop && config.shop !== 'all' ? [config.shop] : []));
   let sampleCount = 0;
   for (const sample of sampleRows) {
     const item = { ...sample, sample_id: sample.id };
@@ -2042,6 +2050,14 @@ function workflowTasks(workflowId, limit = 120) {
     LEFT JOIN bd_members b ON b.id = t.assigned_bd_id
     LEFT JOIN samples s ON CAST(s.id AS TEXT) = CAST(t.sample_id AS TEXT)
     WHERE t.workflow_id = ?
+      AND (t.task_type <> 'sample_audit' OR EXISTS (
+        SELECT 1 FROM samples ws
+        JOIN invitation_records wr ON wr.source = 'workflow:' || t.workflow_id
+          AND wr.template_type = 'collab'
+          AND wr.uid = ws.uid
+          AND (wr.product_id = ws.product_id OR instr(COALESCE(wr.product_ids, ''), '"' || ws.product_id || '"') > 0)
+        WHERE CAST(ws.id AS TEXT) = CAST(t.sample_id AS TEXT)
+      ))
     ORDER BY
       CASE t.status WHEN 'agent_review' THEN 1 WHEN 'admin_approved' THEN 2 WHEN 'failed' THEN 3 WHEN 'executed' THEN 4 ELSE 5 END,
       t.updated_at DESC,
@@ -2283,11 +2299,29 @@ function workflowList() {
       SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
       (SELECT COUNT(DISTINCT r.uid) FROM invitation_records r WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS sent_invite_count,
       (SELECT COUNT(DISTINCT t2.uid) FROM agent_workflow_tasks t2
-        WHERE t2.workflow_id = w.id AND t2.task_type = 'sample_audit' AND t2.status = 'agent_review') AS sample_pending_count,
+        JOIN samples s2 ON CAST(s2.id AS TEXT) = CAST(t2.sample_id AS TEXT)
+        WHERE t2.workflow_id = w.id AND t2.task_type = 'sample_audit' AND t2.status = 'agent_review'
+          AND EXISTS (
+            SELECT 1 FROM invitation_records wr2
+            WHERE wr2.source = 'workflow:' || w.id AND wr2.template_type = 'collab'
+              AND wr2.uid = s2.uid
+              AND (wr2.product_id = s2.product_id OR instr(COALESCE(wr2.product_ids, ''), '"' || s2.product_id || '"') > 0)
+          )) AS sample_pending_count,
       (SELECT COUNT(DISTINCT t3.uid) FROM agent_workflow_tasks t3
+        JOIN samples s3 ON CAST(s3.id AS TEXT) = CAST(t3.sample_id AS TEXT)
         WHERE t3.workflow_id = w.id AND t3.task_type = 'sample_audit' AND t3.status = 'agent_review'
-          AND t3.recommendation IN ('auto_pass', 'review_pass')) AS sample_recommended_count,
-      (SELECT COUNT(DISTINCT s.uid) FROM samples s JOIN invitation_records r ON r.uid = s.uid AND r.source = 'workflow:' || w.id WHERE s.applied_at IS NOT NULL) AS sample_applicant_count
+          AND t3.recommendation IN ('auto_pass', 'review_pass')
+          AND EXISTS (
+            SELECT 1 FROM invitation_records wr3
+            WHERE wr3.source = 'workflow:' || w.id AND wr3.template_type = 'collab'
+              AND wr3.uid = s3.uid
+              AND (wr3.product_id = s3.product_id OR instr(COALESCE(wr3.product_ids, ''), '"' || s3.product_id || '"') > 0)
+          )) AS sample_recommended_count,
+      (SELECT COUNT(DISTINCT s.uid) FROM samples s
+        JOIN invitation_records r ON r.source = 'workflow:' || w.id AND r.template_type = 'collab'
+          AND r.uid = s.uid
+          AND (r.product_id = s.product_id OR instr(COALESCE(r.product_ids, ''), '"' || s.product_id || '"') > 0)
+        WHERE s.applied_at IS NOT NULL) AS sample_applicant_count
     FROM agent_workflows w
     LEFT JOIN agent_workflow_tasks t ON t.workflow_id = w.id
     WHERE w.active = 1
@@ -2318,6 +2352,12 @@ function workflowCreatorSummary(workflowId, kind) {
     LEFT JOIN products p ON p.id = s.product_id
     WHERE t.workflow_id = ? AND t.task_type = 'sample_audit'
       AND t.status = 'agent_review' ${recommendationFilter}
+      AND EXISTS (
+        SELECT 1 FROM invitation_records wr
+        WHERE wr.source = 'workflow:' || t.workflow_id AND wr.template_type = 'collab'
+          AND wr.uid = t.uid
+          AND (wr.product_id = s.product_id OR instr(COALESCE(wr.product_ids, ''), '"' || s.product_id || '"') > 0)
+      )
     ORDER BY datetime(t.updated_at) DESC, t.id DESC
   `).all(workflowId);
 }
@@ -4259,11 +4299,14 @@ function handleSampleApplySubmit(req, res) {
   if (!allowedProducts.has(selectedProductId)) return res.status(400).send('选择的样品不在邀约范围内');
   const existing = db.prepare('SELECT id FROM samples WHERE uid = ? AND product_id = ? AND shop_id = ? AND status = ?')
     .get(invite.uid, selectedProductId, invite.shop_id, 'pending');
-  if (!existing) {
+  if (existing) {
+    db.prepare('UPDATE samples SET invitation_record_id = COALESCE(invitation_record_id, ?) WHERE id = ?')
+      .run(invite.id, existing.id);
+  } else {
     const sampleStatus = invite.sample_approval_mode === 'auto' ? 'approved' : 'pending';
     db.prepare(`
-      INSERT INTO samples (id, uid, shop_id, creator_name, creator_handle, fans, category, collab_type, status, product_id, commission_rate, applied_at, note)
-      VALUES (?, ?, ?, ?, ?, 0, '', 'targeted', ?, ?, ?, ?, ?)
+      INSERT INTO samples (id, uid, shop_id, creator_name, creator_handle, fans, category, collab_type, status, product_id, commission_rate, applied_at, note, invitation_record_id)
+      VALUES (?, ?, ?, ?, ?, 0, '', 'targeted', ?, ?, ?, ?, ?, ?)
     `).run(
       genId(),
       invite.uid,
@@ -4274,7 +4317,8 @@ function handleSampleApplySubmit(req, res) {
       selectedProductId || null,
       invite.commission_rate || null,
       nowText(),
-      `合作邀约ID: ${invite.id}\n样品审批: ${invite.sample_approval_mode === 'auto' ? '自动审批' : '手动审批'}\n联系方式: ${req.body.contact || ''}\n收件地址: ${req.body.address || ''}\n备注: ${req.body.note || ''}`
+      `合作邀约ID: ${invite.id}\n样品审批: ${invite.sample_approval_mode === 'auto' ? '自动审批' : '手动审批'}\n联系方式: ${req.body.contact || ''}\n收件地址: ${req.body.address || ''}\n备注: ${req.body.note || ''}`,
+      invite.id
     );
   }
   res.send('<!doctype html><meta charset="utf-8"><style>body{font-family:-apple-system,BlinkMacSystemFont,"Microsoft YaHei",sans-serif;background:#eef2f5;padding:40px;color:#172033}.card{max-width:480px;margin:auto;background:#fff;border:1px solid #dfe6ee;border-radius:10px;padding:24px;text-align:center}</style><div class="card"><h2>申请已提交</h2><p>我们会尽快审核并安排样品寄送。</p></div>');
