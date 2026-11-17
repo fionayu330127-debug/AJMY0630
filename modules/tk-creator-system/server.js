@@ -2091,6 +2091,21 @@ function workflowTasks(workflowId, limit = 120) {
   `).all(workflowId, limit).map((row) => ({ ...row, payload: parseJsonObject(row.payload_json, {}) }));
 }
 
+const workflowInviteIntervalMs = Math.max(1000, Number(process.env.TK_INVITE_SEND_INTERVAL_MS || 10000));
+let workflowInviteSendChain = Promise.resolve();
+let workflowInviteLastStartedAt = 0;
+
+function waitForWorkflowInviteSlot(send) {
+  const run = workflowInviteSendChain.then(async () => {
+    const waitMs = Math.max(0, workflowInviteIntervalMs - (Date.now() - workflowInviteLastStartedAt));
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    workflowInviteLastStartedAt = Date.now();
+    return send();
+  });
+  workflowInviteSendChain = run.catch(() => {});
+  return run;
+}
+
 async function sendWorkflowInvitations(tasks, workflow) {
   const config = workflow.config;
   const templateId = Number(config.template_id || 0);
@@ -2130,26 +2145,30 @@ async function sendWorkflowInvitations(tasks, workflow) {
     let targetCollaborationId = null;
     if (config.send_mode === 'auto') {
       try {
-        let cards = [];
-        if (selectedTemplate.type === 'collab') {
-          const target = await createTargetCollaboration({
-            shop,
-            creator,
-            products,
-            message,
-            commissionRate: templateCommission,
-            sampleApprovalMode: config.sample_approval_mode,
-          });
-          if (target.pending) {
-            sendResult = { status: 'pending', provider_message: target.pending };
+        sendResult = await waitForWorkflowInviteSlot(async () => {
+          let result = { status: 'pending', provider_message: '邀约尚未发送' };
+          let cards = [];
+          if (selectedTemplate.type === 'collab') {
+            const target = await createTargetCollaboration({
+              shop,
+              creator,
+              products,
+              message,
+              commissionRate: templateCommission,
+              sampleApprovalMode: config.sample_approval_mode,
+            });
+            if (target.pending) {
+              result = { status: 'pending', provider_message: target.pending };
+            } else {
+              targetCollaborationId = target.targetCollaborationId;
+              cards = [{ msg_type: 'TARGET_COLLABORATION_CARD', content: { target_collaboration_id: targetCollaborationId } }];
+              result = await sendTikTokInvitation({ shop, creator, message, cards });
+            }
           } else {
-            targetCollaborationId = target.targetCollaborationId;
-            cards = [{ msg_type: 'TARGET_COLLABORATION_CARD', content: { target_collaboration_id: targetCollaborationId } }];
-            sendResult = await sendTikTokInvitation({ shop, creator, message, cards });
+            result = await sendTikTokInvitation({ shop, creator, message, cards });
           }
-        } else {
-          sendResult = await sendTikTokInvitation({ shop, creator, message, cards });
-        }
+          return result;
+        });
       } catch (error) {
         sendResult = { status: 'failed', provider_message: error.message || 'TikTok 私信发送失败' };
       }
