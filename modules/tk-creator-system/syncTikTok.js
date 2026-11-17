@@ -1134,13 +1134,15 @@ async function syncAffiliateCreators(db, shop) {
   let performanceFetched = 0;
   let performanceFailed = 0;
   const configuredDetailLimit = Number(process.env.TK_AFFILIATE_CREATOR_PERFORMANCE_LIMIT || 0);
-  const detailLimit = configuredDetailLimit > 0 ? configuredDetailLimit : rows.length;
+  // The pool is the source of truth; optional per-creator performance calls must
+  // not block importing the complete pool when no explicit limit is configured.
+  const detailLimit = configuredDetailLimit > 0 ? configuredDetailLimit : 0;
   const detailDelayMs = Number(process.env.TK_AFFILIATE_CREATOR_PERFORMANCE_DELAY_MS || 500);
   for (const raw of rows) {
     let merged = raw;
     const base = normalizeAffiliateCreator(raw);
     const creatorUserId = firstText(raw.creator_user_id, raw.creator_open_id, raw.creator_id, base.creatorOpenId, base.uid);
-    if (process.env.TK_AFFILIATE_CREATOR_PERFORMANCE_PATH && performanceFetched < detailLimit && creatorUserId) {
+    if (process.env.TK_AFFILIATE_CREATOR_PERFORMANCE_PATH && detailLimit > 0 && performanceFetched < detailLimit && creatorUserId) {
       try {
         const detail = await fetchMarketplaceCreatorPerformance(shop, creatorUserId);
         performanceFetched += 1;
