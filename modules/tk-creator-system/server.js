@@ -8,8 +8,10 @@ const querystring = require('querystring');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Pool } = require('pg');
-const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncSampleApplications, syncTikTokShop } = require('./syncTikTok');
+const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncSampleApplications, syncTikTokShop, normalizeAffiliateCreator } = require('./syncTikTok');
 const { tiktokRequest } = require('./tiktokApi');
+const { createMarketplaceSearchInvite, usesMarketplaceInviteSource, shanghaiDayRange } = require('./marketplaceSearchInvite');
+let marketplaceInvite;
 const { getAppConfig, getAppSecretStatus } = require('./tiktokSecrets');
 
 const app = express();
@@ -886,8 +888,15 @@ const DEFAULT_AGENT_SETTINGS = {
   sample_sync_hour: 7,
   agent_daily_hour: 8,
   agent_daily_minute: 30,
-  invite_target_count: 50,
-  invite_daily_limit: 50,
+  invite_target_count: 1000,
+  invite_daily_limit: 1000,
+  marketplace_search_invite_autorun: 1,
+  marketplace_search_interval_ms: 90000,
+  marketplace_invite_send_interval_ms: 20000,
+  marketplace_quota_cache_ms: 600000,
+  invite_daily_limit_by_shop: '{"oku":1000,"mir":1000}',
+  marketplace_search_filters: '',
+  marketplace_search_base_body: '{"affiliate_data":{"not_invited_l90_days":true}}',
   audit_min_followers: 1000,
   audit_min_fulfillment: 80,
   assign_strategy: '按店铺、达人类型、BD负载和历史合作经验自动分配',
@@ -933,9 +942,10 @@ function agentPendingCount() {
 
 function agentOverviewData() {
   const settings = getAgentSettings();
-  const today = nowText().slice(0, 10);
+  const todayRange = shanghaiDayRange();
+  const today = todayRange.day;
   const month = today.slice(0, 7);
-  const sentToday = Number(db.prepare("SELECT COUNT(*) AS c FROM invitation_records WHERE status = 'sent' AND substr(COALESCE(sent_at, created_at), 1, 10) = ?").get(today)?.c || 0);
+  const sentToday = Number(db.prepare("SELECT COUNT(*) AS c FROM invitation_records WHERE status = 'sent' AND COALESCE(sent_at, created_at) >= ? AND COALESCE(sent_at, created_at) < ?").get(todayRange.startText, todayRange.endText)?.c || 0);
   const monthCost = Number(db.prepare("SELECT COALESCE(SUM(CASE WHEN status = 'sent' THEN 0 ELSE 0 END), 0) AS c FROM invitation_records WHERE substr(created_at, 1, 7) = ?").get(month)?.c || 0);
   const pendingItems = db.prepare("SELECT id, task_type, creator_name, uid, reason, updated_at FROM agent_workflow_tasks WHERE status = 'agent_review' ORDER BY updated_at DESC, id DESC LIMIT 10").all();
   return {
@@ -947,6 +957,7 @@ function agentOverviewData() {
     month_ai_cost: monthCost,
     month_ai_cost_limit: Number(settings.monthly_ai_cost_limit || 0),
     standard: getReviewStandard(),
+    marketplace_invite: marketplaceInvite ? marketplaceInvite.status() : null,
   };
 }
 
@@ -1098,7 +1109,7 @@ function getAgentSettings() {
   for (const row of rows) {
     if (Object.prototype.hasOwnProperty.call(data, row.key)) data[row.key] = row.value;
   }
-  for (const key of ['sample_sync_hour', 'agent_daily_hour', 'agent_daily_minute', 'invite_target_count', 'invite_daily_limit', 'audit_min_followers', 'audit_min_fulfillment', 'followup_interval_days']) {
+  for (const key of ['sample_sync_hour', 'agent_daily_hour', 'agent_daily_minute', 'invite_target_count', 'invite_daily_limit', 'audit_min_followers', 'audit_min_fulfillment', 'followup_interval_days', 'marketplace_search_invite_autorun', 'marketplace_search_interval_ms', 'marketplace_invite_send_interval_ms', 'marketplace_quota_cache_ms']) {
     const value = Number(data[key]);
     data[key] = Number.isFinite(value) ? value : DEFAULT_AGENT_SETTINGS[key];
   }
@@ -1119,8 +1130,15 @@ function saveAgentSettings(input = {}) {
   next.sample_sync_hour = Math.max(0, Math.min(23, settingNumber(next.sample_sync_hour, 7)));
   next.agent_daily_hour = Math.max(0, Math.min(23, settingNumber(next.agent_daily_hour, 8)));
   next.agent_daily_minute = Math.max(0, Math.min(59, settingNumber(next.agent_daily_minute, 30)));
-  next.invite_target_count = Math.max(1, settingNumber(next.invite_target_count, 50));
-  next.invite_daily_limit = Math.max(1, settingNumber(next.invite_daily_limit, next.invite_target_count || 50));
+  next.invite_target_count = Math.max(1, settingNumber(next.invite_target_count, 1000));
+  next.invite_daily_limit = Math.max(1, settingNumber(next.invite_daily_limit, next.invite_target_count || 1000));
+  next.marketplace_search_invite_autorun = settingNumber(next.marketplace_search_invite_autorun, 1) ? 1 : 0;
+  next.marketplace_search_interval_ms = Math.max(60000, Math.min(120000, settingNumber(next.marketplace_search_interval_ms, 90000)));
+  next.marketplace_invite_send_interval_ms = Math.max(1000, settingNumber(next.marketplace_invite_send_interval_ms, 20000));
+  next.marketplace_quota_cache_ms = Math.max(5 * 60 * 1000, Math.min(15 * 60 * 1000, settingNumber(next.marketplace_quota_cache_ms, 10 * 60 * 1000)));
+  if (typeof next.invite_daily_limit_by_shop === 'object') next.invite_daily_limit_by_shop = JSON.stringify(next.invite_daily_limit_by_shop || {});
+  if (typeof next.marketplace_search_filters === 'object') next.marketplace_search_filters = JSON.stringify(next.marketplace_search_filters || []);
+  if (typeof next.marketplace_search_base_body === 'object') next.marketplace_search_base_body = JSON.stringify(next.marketplace_search_base_body || {});
   next.audit_min_followers = Math.max(0, settingNumber(next.audit_min_followers, 0));
   next.audit_min_fulfillment = Math.max(0, Math.min(100, settingNumber(next.audit_min_fulfillment, 0)));
   next.followup_interval_days = Math.max(1, settingNumber(next.followup_interval_days, 3));
@@ -1280,7 +1298,16 @@ function affiliateCreatorPoolStats(query = {}) {
 }
 
 function inviteCandidateDiagnostics(query = {}) {
-  const source = String(query.source || 'shop_pool');
+  const source = String(query.source || 'marketplace_search');
+  if (usesMarketplaceInviteSource(source)) {
+    return {
+      source: 'marketplace_search',
+      sales_metric_label: '店铺后台查找达人（官方搜索）',
+      includes_other_sellers: true,
+      marketplace: marketplaceInvite ? marketplaceInvite.status() : null,
+      warning: '自动邀约从官方「查找达人」边搜边邀，不再依赖全量联盟池同步。本地联盟池和样品名单只用于去重已邀约达人。',
+    };
+  }
   if (source !== 'shop_pool') return null;
   const pool = affiliateCreatorPoolStats(query);
   const minOrders = parseNumberFilter(query.min_orders, 0);
@@ -1380,7 +1407,7 @@ function defaultWorkflowConfig() {
   const firstProduct = db.prepare('SELECT id, shop_id FROM products ORDER BY id LIMIT 1').get();
   const bdRows = db.prepare('SELECT id FROM bd_members WHERE active = 1 ORDER BY id LIMIT 3').all();
   return {
-    source: 'shop_pool',
+    source: 'marketplace_search',
     shop: firstProduct?.shop_id || 'all',
     min_star: 0,
     min_fans: 0,
@@ -1394,7 +1421,8 @@ function defaultWorkflowConfig() {
     commission_rate: 15,
     send_mode: 'manual',
     invite_max_per_creator: 1,
-    invite_daily_limit: 50,
+    invite_daily_limit: 1000,
+    invite_target_count: 1000,
     sample_approval_mode: 'manual',
     audit_min_score: 70,
     score_model: 'creator_table_v1',
@@ -1437,8 +1465,9 @@ function saveWorkflow(input = {}, createNew = false) {
   config.min_orders = Number(config.min_orders || 0);
   config.commission_rate = Number(config.commission_rate || 0);
   config.invite_max_per_creator = Math.max(1, Number(config.invite_max_per_creator || 1));
-  config.invite_daily_limit = Math.max(1, Number(config.invite_daily_limit || 50));
-  config.invite_target_count = Math.max(1, Number(config.invite_target_count || config.invite_daily_limit || 50));
+  config.invite_daily_limit = Math.max(1, Number(config.invite_daily_limit || 1000));
+  config.invite_target_count = Math.max(1, Number(config.invite_target_count || config.invite_daily_limit || 1000));
+  if (config.source === 'shop_pool' || !config.source) config.source = 'marketplace_search';
   config.audit_min_score = Number(config.audit_min_score || 70);
   config.score_model = config.score_model === 'creator_table_v1' ? 'creator_table_v1' : 'creator_table_v1';
   if (config.score_model === 'creator_table_v1') {
@@ -1692,6 +1721,7 @@ function successfulWorkflowInviteCount(workflowId) {
 
 function queueInviteTasks(workflow, limit) {
   const config = workflow.config;
+  if (usesMarketplaceInviteSource(config.source)) return 0;
   const candidates = listInviteCandidates({ source: config.source, shop: config.shop });
   const existing = new Set();
   db.prepare(`
@@ -1991,19 +2021,22 @@ function generateWorkflowQueue(workflowId = null) {
   // Keep the per-run target separate from the daily cap. A scheduled run may
   // happen more than once (or be triggered manually), so both limits must be
   // applied before creating new invite tasks.
-  const runTarget = Math.max(1, Number(inviteSettings.invite_target_count || config.invite_target_count || 50));
+  const runTarget = Math.max(1, Number(inviteSettings.invite_target_count || config.invite_target_count || 1000));
   const dailyLimit = Math.max(1, Math.min(
     Number(inviteSettings.invite_daily_limit || runTarget),
     Number(config.invite_daily_limit || runTarget)
   ));
-  const today = nowText().slice(0, 10);
+  const todayRange = shanghaiDayRange();
   const todayCreated = db.prepare(`
     SELECT COUNT(*) AS c
     FROM invitation_records
     WHERE status = 'sent'
-      AND substr(COALESCE(sent_at, created_at), 1, 10) = ?
-  `).get(today).c;
-  const remainingToday = Math.max(0, dailyLimit - Number(todayCreated || 0));
+      AND COALESCE(sent_at, created_at) >= ?
+      AND COALESCE(sent_at, created_at) < ?
+  `).get(todayRange.startText, todayRange.endText).c;
+  const remainingToday = marketplaceInvite && usesMarketplaceInviteSource(config.source)
+    ? marketplaceInvite.totalDailyRemaining(workflow)
+    : Math.max(0, dailyLimit - Number(todayCreated || 0));
   const inviteLimit = Math.min(runTarget, remainingToday);
   const inviteCount = queueInviteTasks(workflow, inviteLimit);
 
@@ -2091,13 +2124,16 @@ function workflowTasks(workflowId, limit = 120) {
   `).all(workflowId, limit).map((row) => ({ ...row, payload: parseJsonObject(row.payload_json, {}) }));
 }
 
-const workflowInviteIntervalMs = Math.max(1000, Number(process.env.TK_INVITE_SEND_INTERVAL_MS || 10000));
+function workflowInviteIntervalMsValue() {
+  if (marketplaceInvite) return marketplaceInvite.sendIntervalMs();
+  return Math.max(1000, Number(process.env.TK_INVITE_SEND_INTERVAL_MS || 20000));
+}
 let workflowInviteSendChain = Promise.resolve();
 let workflowInviteLastStartedAt = 0;
 
 function waitForWorkflowInviteSlot(send) {
   const run = workflowInviteSendChain.then(async () => {
-    const waitMs = Math.max(0, workflowInviteIntervalMs - (Date.now() - workflowInviteLastStartedAt));
+    const waitMs = Math.max(0, workflowInviteIntervalMsValue() - (Date.now() - workflowInviteLastStartedAt));
     if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
     workflowInviteLastStartedAt = Date.now();
     return send();
@@ -2210,6 +2246,55 @@ async function sendWorkflowInvitations(tasks, workflow) {
   return results;
 }
 
+function migrateMarketplaceInviteDefaults() {
+  const now = nowText();
+  for (const key of ['invite_target_count', 'invite_daily_limit']) {
+    const row = db.prepare('SELECT value FROM agent_settings WHERE key = ?').get(key);
+    if (!row || String(row.value) === '50') {
+      db.prepare(`
+        INSERT INTO agent_settings (key, value, updated_at)
+        VALUES (?, '1000', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+      `).run(key, now);
+    }
+  }
+  if (!db.prepare("SELECT value FROM agent_settings WHERE key = 'invite_daily_limit_by_shop'").get()) {
+    db.prepare('INSERT INTO agent_settings (key, value, updated_at) VALUES (?, ?, ?)').run('invite_daily_limit_by_shop', JSON.stringify({ oku: 1000, mir: 1000 }), now);
+  }
+  const workflows = db.prepare('SELECT id, config_json FROM agent_workflows').all();
+  for (const row of workflows) {
+    const config = parseJsonObject(row.config_json, {});
+    let changed = false;
+    if (Number(config.invite_daily_limit || 0) === 50) { config.invite_daily_limit = 1000; changed = true; }
+    if (Number(config.invite_target_count || 0) === 50) { config.invite_target_count = 1000; changed = true; }
+    if (!config.source || config.source === 'shop_pool') { config.source = 'marketplace_search'; changed = true; }
+    if (changed) {
+      db.prepare('UPDATE agent_workflows SET config_json = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(config), now, row.id);
+    }
+  }
+}
+
+function initMarketplaceInvite() {
+  if (marketplaceInvite) return marketplaceInvite;
+  migrateMarketplaceInviteDefaults();
+  marketplaceInvite = createMarketplaceSearchInvite({
+    db,
+    tiktokRequest,
+    nowText,
+    normalizeAffiliateCreator,
+    insertWorkflowTask,
+    sendWorkflowInvitations,
+    getWorkflow,
+    getAgentSettings,
+    getAgentRuntime,
+    getAgentFlowStates,
+    getReviewStandard,
+    writeSyncLog,
+  });
+  marketplaceInvite.ensureSchema();
+  return marketplaceInvite;
+}
+
 function sampleConfirmationMessage(config, sample, template = null, shop = null, product = null) {
   if (template) return renderInvitationMessage(template, sample, shop, product);
   return String(config.auto_reply_template || '').trim() ||
@@ -2306,20 +2391,26 @@ async function executeWorkflow(workflowId = null, options = {}) {
   const run = (async () => {
     let inviteTasks = options.invite === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
     const inviteResults = [];
-    const inviteTarget = Math.max(1, Number(workflow.config.invite_target_count || getAgentSettings().invite_target_count || 50));
+    const inviteTarget = Math.max(1, Number(workflow.config.invite_target_count || getAgentSettings().invite_target_count || 1000));
     let inviteSentCount = successfulWorkflowInviteCount(workflow.id);
-    if (options.invite !== false && inviteSentCount < inviteTarget && !inviteTasks.length) {
-      queueInviteTasks(workflow, inviteTarget - inviteSentCount);
-      inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
-    }
-    while (inviteTasks.length && inviteSentCount < inviteTarget) {
-      const results = await sendWorkflowInvitations(inviteTasks, workflow);
-      inviteResults.push(...results);
-      inviteSentCount = successfulWorkflowInviteCount(workflow.id);
-      if (inviteSentCount >= inviteTarget) break;
-      const queued = queueInviteTasks(workflow, inviteTarget - inviteSentCount);
-      if (!queued) break;
-      inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+    if (usesMarketplaceInviteSource(workflow.config.source)) {
+      initMarketplaceInvite().startPacer();
+      inviteSentCount = (marketplaceInvite.status(workflow).shops || []).reduce((sum, shop) => sum + Number(shop.sent_today || 0), 0);
+      inviteResults.push({ status: 'paced', provider_message: '查找达人边搜边邀已交由全天匀速任务发送，避免在一次请求里连发' });
+    } else {
+      if (options.invite !== false && inviteSentCount < inviteTarget && !inviteTasks.length) {
+        queueInviteTasks(workflow, inviteTarget - inviteSentCount);
+        inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+      }
+      while (inviteTasks.length && inviteSentCount < inviteTarget) {
+        const results = await sendWorkflowInvitations(inviteTasks, workflow);
+        inviteResults.push(...results);
+        inviteSentCount = successfulWorkflowInviteCount(workflow.id);
+        if (inviteSentCount >= inviteTarget) break;
+        const queued = queueInviteTasks(workflow, inviteTarget - inviteSentCount);
+        if (!queued) break;
+        inviteTasks = workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'invite' && task.status === 'admin_approved');
+      }
     }
     const inboxTasks = options.followup === false ? [] : workflowTasks(workflow.id, 300).filter((task) => task.task_type === 'inbox_message' && task.status === 'admin_approved');
     const inbox_reply_results = await sendWorkflowInboxReplies(inboxTasks, workflow);
@@ -3024,16 +3115,19 @@ async function runScheduledAgent() {
       try { await syncInboxForShop(shop, workflow); }
       catch (error) { writeSyncLog(shop.id, 'schedule-agent-inbox', 'failed', error.message || '收件箱同步失败'); }
     }
-    const queued = activeFlows.has('auto_invite') || activeFlows.has('auto_review') || activeFlows.has('auto_assign')
+    if (activeFlows.has('auto_invite') && usesMarketplaceInviteSource(config.source)) {
+      initMarketplaceInvite().startPacer();
+    }
+    const queued = activeFlows.has('auto_review') || activeFlows.has('auto_assign') || (activeFlows.has('auto_invite') && !usesMarketplaceInviteSource(config.source))
       ? generateWorkflowQueue(workflow.id)
       : { invite_count: 0, sample_count: 0 };
     const executed = await executeWorkflow(workflow.id, {
-      invite: activeFlows.has('auto_invite'),
+      invite: activeFlows.has('auto_invite') && !usesMarketplaceInviteSource(config.source),
       review: activeFlows.has('auto_review'),
       assign: activeFlows.has('auto_assign'),
       followup: activeFlows.has('bd_followup'),
     });
-    if (activeFlows.has('auto_invite')) recordAgentRun('auto_invite', 'scheduled', 'success', { result: `生成邀约队列 ${queued.invite_count} 条`, invite_count: queued.invite_count });
+    if (activeFlows.has('auto_invite')) recordAgentRun('auto_invite', 'scheduled', 'success', { result: usesMarketplaceInviteSource(config.source) ? '查找达人边搜边邀全天匀速任务已在运行' : `生成邀约队列 ${queued.invite_count} 条`, invite_count: queued.invite_count, marketplace: marketplaceInvite && usesMarketplaceInviteSource(config.source) ? marketplaceInvite.status(workflow) : null });
     if (activeFlows.has('auto_review')) recordAgentRun('auto_review', 'scheduled', 'success', { result: `生成审核任务 ${queued.sample_count} 条`, sample_count: queued.sample_count });
     if (activeFlows.has('auto_assign')) recordAgentRun('auto_assign', 'scheduled', 'success', { result: `执行分配 ${executed.assigned_samples} 条`, assigned_samples: executed.assigned_samples });
     if (activeFlows.has('bd_followup')) recordAgentRun('bd_followup', 'scheduled', 'success', { result: '完成跟进巡检', inbox_replies: executed.inbox_reply_results.length });
@@ -3045,6 +3139,7 @@ async function runScheduledAgent() {
 }
 
 function startAgentScheduler() {
+  initMarketplaceInvite().startPacer();
   if (agentTimer) return;
   const schedule = () => {
     const { next, ms } = agentScheduleDelay();
@@ -3133,8 +3228,12 @@ app.post('/api/agent/flows/:flowKey/trial', (req, res) => {
     const config = workflow.config;
     let summary;
     if (flowKey === 'auto_invite') {
-      const candidates = listInviteCandidates({ source: config.source, shop: config.shop, min_star: config.min_star, min_fans: config.min_fans, min_fulfillment: config.min_fulfillment, min_avg_view: config.min_avg_view, min_orders: config.min_orders, category: config.category });
-      summary = { result: '试运行完成，未创建任务、未发送邀约', candidate_count: candidates.length };
+      if (usesMarketplaceInviteSource(config.source)) {
+        summary = { result: '试运行完成：将从官方查找达人边搜边邀，本次未实际搜索或发送', marketplace: initMarketplaceInvite().status(workflow) };
+      } else {
+        const candidates = listInviteCandidates({ source: config.source, shop: config.shop, min_star: config.min_star, min_fans: config.min_fans, min_fulfillment: config.min_fulfillment, min_avg_view: config.min_avg_view, min_orders: config.min_orders, category: config.category });
+        summary = { result: '试运行完成，未创建任务、未发送邀约', candidate_count: candidates.length };
+      }
     } else if (flowKey === 'auto_review') {
       const pending = db.prepare("SELECT COUNT(*) AS c FROM samples WHERE status IN ('pending','approved') AND library_added_at IS NULL").get();
       summary = { result: '试运行完成，未修改样品状态', pending_samples: Number(pending?.c || 0) };
@@ -3198,6 +3297,7 @@ app.put('/api/agent/settings', (req, res) => {
     }
     startShopSyncScheduler();
     startAgentScheduler();
+    initMarketplaceInvite().startPacer();
     res.json(settings);
   } catch (error) {
     res.status(400).json({ error: error.message || '保存 Agent 配置失败' });
@@ -3335,14 +3435,14 @@ app.get('/api/agent/workflows/:id/preview', (req, res) => {
     if (!template) missing.push('未配置有效邀约模板');
     if (!config.shop || config.shop === 'all') missing.push('建议将工作流绑定到具体店铺');
     if (!config.bd_ids?.length) missing.push('未配置参与分配的 BD');
-    if (config.source === 'shop_pool' && inviteCandidateDiagnostics(candidateQuery).pool.requires_sync) missing.push('联盟中心达人池或近30天销量尚未同步');
+    if (!usesMarketplaceInviteSource(config.source) && config.source === 'shop_pool' && inviteCandidateDiagnostics(candidateQuery).pool?.requires_sync) missing.push('联盟中心达人池或近30天销量尚未同步');
     res.json({
       workflow: { id: workflow.id, name: workflow.name, config },
       safe_mode: config.send_mode !== 'auto' && config.sample_approval_mode !== 'auto',
       template,
       stages: [
-        { key: 'sync', name: '数据同步', action: '先执行店铺/联盟达人同步', ready: true },
-        { key: 'invite_candidates', name: '筛选邀约达人', count: candidates.length, ready: candidates.length > 0 },
+        { key: 'sync', name: '数据同步', action: usesMarketplaceInviteSource(config.source) ? '自动邀约不再要求全量联盟池同步' : '先执行店铺/联盟达人同步', ready: true },
+        { key: 'invite_candidates', name: '筛选邀约达人', count: usesMarketplaceInviteSource(config.source) ? (initMarketplaceInvite().status(workflow).shops || []).reduce((sum, shop) => sum + Number(shop.stats?.queued || 0), 0) : candidates.length, ready: usesMarketplaceInviteSource(config.source) ? true : candidates.length > 0 },
         { key: 'invite_review', name: '邀约任务确认', action: '生成队列后确认任务', ready: true },
         { key: 'invite_execute', name: '执行邀约', action: config.send_mode === 'auto' ? '将调用 TikTok API' : '仅生成待发送记录，不外发消息', ready: true },
         { key: 'sample_audit', name: '样品申请审核', count: Number(sampleRows?.total || 0), ready: true },
@@ -3373,13 +3473,19 @@ app.put('/api/agent/workflow', (req, res) => {
   }
 });
 
-app.post('/api/agent/workflow/queue', (req, res) => {
+app.post('/api/agent/workflow/queue', async (req, res) => {
   try {
     if (req.body && Object.keys(req.body).length) saveWorkflow(req.body);
     const result = generateWorkflowQueue();
+    if (usesMarketplaceInviteSource(result.workflow.config.source)) {
+      result.marketplace_replenish = await initMarketplaceInvite().replenishWorkflow(result.workflow, { force: true });
+      result.invite_count = (result.marketplace_replenish || []).reduce((sum, item) => sum + Number(item.queued || 0), 0);
+      initMarketplaceInvite().startPacer();
+    }
     res.json({
       success: true,
       ...result,
+      marketplace_invite: marketplaceInvite ? marketplaceInvite.status(result.workflow) : null,
       tasks: workflowTasks(result.workflow.id),
     });
   } catch (error) {
@@ -3387,7 +3493,7 @@ app.post('/api/agent/workflow/queue', (req, res) => {
   }
 });
 
-app.post('/api/agent/workflows/:id/queue', (req, res) => {
+app.post('/api/agent/workflows/:id/queue', async (req, res) => {
   try {
     const workflowId = Number(req.params.id || 0);
     if (req.body?.name || req.body?.config) saveWorkflow({ id: workflowId, ...(req.body || {}) });
@@ -3399,9 +3505,15 @@ app.post('/api/agent/workflows/:id/queue', (req, res) => {
       `).run(workflowId);
     }
     const result = generateWorkflowQueue(workflowId);
+    if (usesMarketplaceInviteSource(result.workflow.config.source)) {
+      result.marketplace_replenish = await initMarketplaceInvite().replenishWorkflow(result.workflow, { force: true });
+      result.invite_count = (result.marketplace_replenish || []).reduce((sum, item) => sum + Number(item.queued || 0), 0);
+      initMarketplaceInvite().startPacer();
+    }
     res.json({
       success: true,
       ...result,
+      marketplace_invite: marketplaceInvite ? marketplaceInvite.status(result.workflow) : null,
       tasks: workflowTasks(result.workflow.id),
       workflows: workflowList(),
     });
@@ -3538,6 +3650,29 @@ app.post('/api/agent/workflows/:id/execute', async (req, res) => {
     res.json({ success: true, ...result, tasks: workflowTasks(workflow.id), workflows: workflowList() });
   } catch (error) {
     res.status(400).json({ error: error.message || '执行工作流失败' });
+  }
+});
+
+app.get('/api/agent/marketplace-invite/status', (req, res) => {
+  try {
+    const workflow = getWorkflow();
+    res.json(initMarketplaceInvite().status(workflow));
+  } catch (error) {
+    res.status(400).json({ error: error.message || '读取查找达人邀约状态失败' });
+  }
+});
+
+app.post('/api/agent/marketplace-invite/replenish', async (req, res) => {
+  try {
+    const workflow = getWorkflow();
+    if (!usesMarketplaceInviteSource(workflow.config.source)) {
+      return res.status(400).json({ error: '当前工作流不是查找达人来源' });
+    }
+    const results = await initMarketplaceInvite().replenishWorkflow(workflow, { force: true });
+    initMarketplaceInvite().startPacer();
+    res.json({ success: true, results, status: marketplaceInvite.status(workflow) });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '查找达人补货失败' });
   }
 });
 
@@ -5286,6 +5421,7 @@ app.get('/api/tiktok/oauth/callback', handleTikTokOAuthCallback);
 app.get('/tk/api/tiktok/oauth/callback', handleTikTokOAuthCallback);
 app.startShopSyncScheduler = startShopSyncScheduler;
 app.startAgentScheduler = startAgentScheduler;
+app.startMarketplaceInvitePacer = () => initMarketplaceInvite().startPacer();
 
 module.exports = app;
 

@@ -1262,4 +1262,5 @@ module.exports = {
   syncProducts,
   syncSampleApplications,
   syncTikTokShop,
+  normalizeAffiliateCreator,
 };
