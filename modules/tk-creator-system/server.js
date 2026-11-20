@@ -11,7 +11,7 @@ const { Pool } = require('pg');
 const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncSampleApplications, syncTikTokShop, normalizeAffiliateCreator } = require('./syncTikTok');
 const { tiktokRequest } = require('./tiktokApi');
 const { createMarketplaceSearchInvite, usesMarketplaceInviteSource, shanghaiDayRange } = require('./marketplaceSearchInvite');
-const { listWorkflowTasks, workflowCreatorSummaryQuery } = require('./workflowTaskList');
+const { listWorkflowTasks, workflowCreatorSummaryQuery, listWorkflowCreatorSummary, ensureWorkflowRunStateColumn, pauseWorkflowTask, resumeWorkflowTask, getRunningMarketplaceWorkflow, liveInviteTargetWorkflow, invitePacerSummary, parseWorkflowConfig, WORKFLOW_RUN_RUNNING } = require('./workflowTaskList');
 let marketplaceInvite;
 const { getAppConfig, getAppSecretStatus } = require('./tiktokSecrets');
 
@@ -686,6 +686,7 @@ CREATE TABLE IF NOT EXISTS agent_workflows (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
+  run_state TEXT NOT NULL DEFAULT 'paused',
   config_json TEXT NOT NULL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -881,6 +882,8 @@ try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_currency TEXT'); 
 try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN normalized_handle TEXT'); } catch (_) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_affiliate_creators_shop_sales ON affiliate_creators(shop_id, sales_count_30d)'); } catch (_) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_affiliate_creators_handle ON affiliate_creators(normalized_handle)'); } catch (_) {}
+try { db.exec("ALTER TABLE agent_workflows ADD COLUMN run_state TEXT NOT NULL DEFAULT 'paused'"); } catch (_) {}
+ensureWorkflowRunStateColumn(db);
 
 const DEFAULT_AGENT_SETTINGS = {
   invite_template: '您好，我们是店铺BD，看到您的内容风格和我们的商品很匹配，想邀请您参与样品合作。',
@@ -958,7 +961,8 @@ function agentOverviewData() {
     month_ai_cost: monthCost,
     month_ai_cost_limit: Number(settings.monthly_ai_cost_limit || 0),
     standard: getReviewStandard(),
-    marketplace_invite: marketplaceInvite ? marketplaceInvite.status() : null,
+    marketplace_invite: initMarketplaceInvite().status(getRunnableMarketplaceWorkflow()),
+    invite_pacer: invitePacerPayload(initMarketplaceInvite().status(getRunnableMarketplaceWorkflow()), { sent_today: sentToday }),
     workflow_tasks: workflowList(),
   };
 }
@@ -1436,6 +1440,23 @@ function defaultWorkflowConfig() {
   };
 }
 
+function hydrateWorkflow(row) {
+  if (!row) return null;
+  return { ...row, config: { ...defaultWorkflowConfig(), ...parseJsonObject(row.config_json, {}) } };
+}
+
+function getExplicitlyRunningWorkflow() {
+  ensureWorkflowRunStateColumn(db);
+  const row = db.prepare("SELECT * FROM agent_workflows WHERE active = 1 AND run_state = 'running' ORDER BY updated_at DESC, id DESC LIMIT 1").get();
+  return row ? hydrateWorkflow(row) : null;
+}
+
+function getRunnableMarketplaceWorkflow() {
+  ensureWorkflowRunStateColumn(db);
+  const row = getRunningMarketplaceWorkflow(db);
+  return row ? hydrateWorkflow(row) : null;
+}
+
 function getWorkflow(id = null) {
   let row = id
     ? db.prepare('SELECT * FROM agent_workflows WHERE id = ?').get(id)
@@ -1443,8 +1464,8 @@ function getWorkflow(id = null) {
   if (!row) {
     const now = nowText();
     const result = db.prepare(`
-      INSERT INTO agent_workflows (name, active, config_json, created_at, updated_at)
-      VALUES (?, 1, ?, ?, ?)
+      INSERT INTO agent_workflows (name, active, run_state, config_json, created_at, updated_at)
+      VALUES (?, 1, 'paused', ?, ?, ?)
     `).run('默认自动化工作流', JSON.stringify(defaultWorkflowConfig()), now, now);
     row = db.prepare('SELECT * FROM agent_workflows WHERE id = ?').get(result.lastInsertRowid);
   }
@@ -1494,8 +1515,8 @@ function saveWorkflow(input = {}, createNew = false) {
   if (createNew || !current) {
     const now = nowText();
     const result = db.prepare(`
-      INSERT INTO agent_workflows (name, active, config_json, created_at, updated_at)
-      VALUES (?, 1, ?, ?, ?)
+      INSERT INTO agent_workflows (name, active, run_state, config_json, created_at, updated_at)
+      VALUES (?, 1, 'paused', ?, ?, ?)
     `).run(name, JSON.stringify(config), now, now);
     const saved = getWorkflow(result.lastInsertRowid);
     for (const productId of saved.config.product_ids) {
@@ -2288,6 +2309,7 @@ function initMarketplaceInvite() {
     insertWorkflowTask,
     sendWorkflowInvitations,
     getWorkflow,
+    getRunningMarketplaceWorkflow: getRunnableMarketplaceWorkflow,
     getAgentSettings,
     getAgentRuntime,
     getAgentFlowStates,
@@ -2445,20 +2467,44 @@ async function executeWorkflow(workflowId = null, options = {}) {
   try { return await run; } finally { workflowRuns.delete(runKey); }
 }
 
+function invitePacerPayload(status = null, extras = {}) {
+  const runtime = getAgentRuntime();
+  const settings = getAgentSettings();
+  return invitePacerSummary(status || {}, {
+    sent_today: extras.sent_today,
+    daily_limit: Number(settings.invite_daily_limit || 1000),
+    agentPaused: Boolean(runtime.paused),
+  });
+}
+
 function workflowList() {
+  ensureWorkflowRunStateColumn(db);
   const runtime = getAgentRuntime();
   const autoInvite = getAgentFlowStates().find((flow) => flow.key === 'auto_invite');
-  return listWorkflowTasks(db, {
+  const rows = listWorkflowTasks(db, {
     agentPaused: Boolean(runtime.paused),
     autoInviteActive: autoInvite ? autoInvite.active !== false : true,
-  }).map((row) => ({ ...row, config: parseJsonObject(row.config_json, {}) }));
+  }).map((row) => ({ ...row, config: parseWorkflowConfig(row) }));
+  const liveEngine = initMarketplaceInvite();
+  const liveTarget = liveInviteTargetWorkflow(rows);
+  return rows.map((row) => {
+    if (liveTarget && Number(row.id) === Number(liveTarget.id) && row.is_marketplace_invite) {
+      return { ...row, live_invite: liveEngine.status(hydrateWorkflow(row)) };
+    }
+    return row;
+  });
+}
+
+function workflowListPayload() {
+  const rows = workflowList();
+  const live = rows.find((row) => row.live_invite)?.live_invite || initMarketplaceInvite().status(getRunnableMarketplaceWorkflow());
+  return { workflows: rows, invite_pacer: invitePacerPayload(live) };
 }
 
 function workflowCreatorSummary(workflowId, kind) {
   const exists = db.prepare('SELECT id FROM agent_workflows WHERE id = ?').get(Number(workflowId || 0));
-  if (!exists || !['sent', 'pending', 'recommended', 'applicants', 'confirmed'].includes(kind)) return [];
-  const query = workflowCreatorSummaryQuery(kind);
-  return db.prepare(query.sql).all(...query.params(Number(workflowId || 0)));
+  if (!exists || !['sent', 'pending', 'recommended', 'applicants', 'confirmed', 'agent'].includes(kind)) return [];
+  return listWorkflowCreatorSummary(db, Number(workflowId || 0), kind);
 }
 
 function sampleApplyLink(recordId) {
@@ -3046,7 +3092,8 @@ function agentScheduleDelay() {
 }
 
 async function runScheduledAgent() {
-  const workflow = getWorkflow();
+  const workflow = getExplicitlyRunningWorkflow();
+  if (!workflow) return;
   const config = workflow.config;
   // Auto-run is opt-in because it can send external TikTok messages.
   if (String(process.env.TK_AGENT_AUTORUN || '').toLowerCase() !== 'true') return;
@@ -3344,13 +3391,50 @@ app.get('/api/agent/sample-applications', (req, res) => {
 });
 
 app.get('/api/agent/workflows', (req, res) => {
-  res.json({ workflows: workflowList() });
+  res.json(workflowListPayload());
 });
+
+app.post('/api/agent/workflows/:id/pause', (req, res) => {
+  try {
+    ensureWorkflowRunStateColumn(db);
+    const result = pauseWorkflowTask(db, Number(req.params.id || 0), { nowText });
+    res.json({ success: true, ...result, workflows: workflowList(), invite_pacer: workflowListPayload().invite_pacer, runtime: getAgentRuntime() });
+  } catch (error) {
+    res.status(404).json({ error: error.message || '暂停任务失败' });
+  }
+});
+
+app.post('/api/agent/workflows/:id/resume', (req, res) => {
+  try {
+    ensureWorkflowRunStateColumn(db);
+    const globalPaused = Boolean(getAgentRuntime().paused);
+    const result = resumeWorkflowTask(db, Number(req.params.id || 0), { nowText, globalPaused });
+    if (result.cleared_global_pause) {
+      db.prepare('UPDATE agent_runtime_state SET paused = ?, updated_at = ? WHERE id = 1').run(0, nowText());
+    }
+    const workflow = getWorkflow(result.workflow.id);
+    if (usesMarketplaceInviteSource(workflow.config.source)) {
+      initMarketplaceInvite().startPacer();
+    }
+    res.json({
+      success: true,
+      ...result,
+      workflow: { ...result.workflow, config: workflow.config },
+      workflows: workflowList(),
+      invite_pacer: workflowListPayload().invite_pacer,
+      runtime: getAgentRuntime(),
+    });
+  } catch (error) {
+    const message = error.message || '重新启动任务失败';
+    res.status(message === '工作流不存在' ? 404 : 400).json({ error: message });
+  }
+});
+
 
 app.get('/api/agent/workflows/:id/creator-summary', (req, res) => {
   try {
     const kind = String(req.query.kind || '');
-    if (!['sent', 'pending', 'recommended', 'applicants', 'confirmed'].includes(kind)) {
+    if (!['sent', 'pending', 'recommended', 'applicants', 'confirmed', 'agent'].includes(kind)) {
       return res.status(400).json({ error: '无效的达人统计类型' });
     }
     res.json({ kind, creators: workflowCreatorSummary(Number(req.params.id || 0), kind) });
@@ -3604,7 +3688,7 @@ app.post('/api/agent/workflows/:id/execute', async (req, res) => {
 
 app.get('/api/agent/marketplace-invite/status', (req, res) => {
   try {
-    const workflow = getWorkflow();
+    const workflow = getRunnableMarketplaceWorkflow();
     res.json(initMarketplaceInvite().status(workflow));
   } catch (error) {
     res.status(400).json({ error: error.message || '读取查找达人邀约状态失败' });
@@ -3613,8 +3697,8 @@ app.get('/api/agent/marketplace-invite/status', (req, res) => {
 
 app.post('/api/agent/marketplace-invite/replenish', async (req, res) => {
   try {
-    const workflow = getWorkflow();
-    if (!usesMarketplaceInviteSource(workflow.config.source)) {
+    const workflow = getRunnableMarketplaceWorkflow() || getWorkflow();
+    if (!workflow || !usesMarketplaceInviteSource(workflow.config.source)) {
       return res.status(400).json({ error: '当前工作流不是查找达人来源' });
     }
     const results = await initMarketplaceInvite().replenishWorkflow(workflow, { force: true });

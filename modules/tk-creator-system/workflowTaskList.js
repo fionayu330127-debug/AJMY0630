@@ -1,8 +1,10 @@
 // workflowTaskList.js — unified automation-workflow task list helpers.
-// Extracted so offline tests can cover count aggregation and status labels
-// without starting the HTTP server or calling TikTok APIs.
+// Extracted so offline tests can cover count aggregation, status labels,
+// and per-task pause/resume without starting the HTTP server or calling TikTok APIs.
 
 const CONFIRMED_SAMPLE_AUDIT_STATUSES = ['application_confirmed', 'admin_approved', 'executed'];
+const WORKFLOW_RUN_RUNNING = 'running';
+const WORKFLOW_RUN_PAUSED = 'paused';
 
 function isUsableWorkflowName(name) {
   const trimmed = String(name || '').trim();
@@ -19,11 +21,54 @@ function workflowDisplayName(workflow) {
   return id != null && id !== '' ? `未命名工作流 #${id}` : '未命名工作流';
 }
 
-function workflowStatusLabel({ workflowActive = true, agentPaused = false, autoInviteActive = true } = {}) {
+function ensureWorkflowRunStateColumn(db) {
+  if (!db) return false;
+  try {
+    db.exec(`ALTER TABLE agent_workflows ADD COLUMN run_state TEXT NOT NULL DEFAULT '${WORKFLOW_RUN_PAUSED}'`);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function normalizeWorkflowRunState(value) {
+  return String(value || '').trim().toLowerCase() === WORKFLOW_RUN_RUNNING
+    ? WORKFLOW_RUN_RUNNING
+    : WORKFLOW_RUN_PAUSED;
+}
+
+function parseWorkflowConfig(row) {
+  if (row?.config && typeof row.config === 'object' && !Array.isArray(row.config)) return row.config;
+  const raw = row?.config_json;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function usesMarketplaceInviteSource(source) {
+  const value = String(source || 'marketplace_search');
+  return value === 'marketplace_search' || value === 'shop_pool' || value === '';
+}
+
+function workflowIsMarketplaceInvite(row) {
+  return usesMarketplaceInviteSource(parseWorkflowConfig(row).source);
+}
+
+function defaultNowText() {
+  return new Date().toISOString().slice(0, 19).replace('T', ' ');
+}
+
+// Status is the task's own state. A global Agent pause must not relabel every
+// historical active=1 workflow as 已暂停, and a running Agent must not make
+// every active=1 workflow look 进行中.
+function workflowStatusLabel({ workflowActive = true, runState = WORKFLOW_RUN_PAUSED } = {}) {
   if (!workflowActive) return '已结束';
-  // A globally paused Agent, or a turned-off auto_invite flow, must not look like it is still sending.
-  if (agentPaused || !autoInviteActive) return '已暂停';
-  return '进行中';
+  return normalizeWorkflowRunState(runState) === WORKFLOW_RUN_RUNNING ? '进行中' : '已暂停';
 }
 
 function workflowStatusRank(status) {
@@ -72,22 +117,27 @@ function laterText(left, right) {
 }
 
 function mapWorkflowTaskRow(row, context = {}) {
+  const active = Number(row.active) === 1;
+  const runState = normalizeWorkflowRunState(row.run_state);
   const status = workflowStatusLabel({
-    workflowActive: Number(row.active) === 1,
-    agentPaused: Boolean(context.agentPaused),
-    autoInviteActive: context.autoInviteActive !== false,
+    workflowActive: active,
+    runState,
   });
   const createdAt = row.created_at || '';
   const lastActivityAt = row.last_activity_at || row.updated_at || createdAt;
+  const isMarketplace = workflowIsMarketplaceInvite(row);
   return {
     ...row,
     display_name: workflowDisplayName(row),
+    run_state: active ? runState : WORKFLOW_RUN_PAUSED,
     status,
     status_label: status,
     invited_count: Number(row.invited_count || 0),
     sent_invite_count: Number(row.sent_invite_count ?? row.invited_count ?? 0),
     sample_applicant_count: Number(row.sample_applicant_count || 0),
     confirmed_review_count: Number(row.confirmed_review_count || 0),
+    admin_confirmed_review_count: Number(row.admin_confirmed_review_count ?? row.confirmed_review_count ?? 0),
+    agent_review_count: Number(row.agent_review_count || 0),
     sample_pending_count: Number(row.sample_pending_count || 0),
     sample_recommended_count: Number(row.sample_recommended_count || 0),
     task_count: Number(row.task_count || 0),
@@ -98,6 +148,11 @@ function mapWorkflowTaskRow(row, context = {}) {
     created_at_shanghai: formatShanghaiDateTime(createdAt),
     last_activity_shanghai: formatShanghaiDateTime(lastActivityAt),
     date_label: '创建日期（北京时间）',
+    is_marketplace_invite: isMarketplace,
+    can_pause: active && runState === WORKFLOW_RUN_RUNNING,
+    can_resume: !active || runState !== WORKFLOW_RUN_RUNNING,
+    agent_paused: Boolean(context.agentPaused),
+    auto_invite_active: context.autoInviteActive !== false,
   };
 }
 
@@ -114,6 +169,7 @@ function sortWorkflowTasks(rows) {
 }
 
 function listWorkflowTasks(db, options = {}) {
+  ensureWorkflowRunStateColumn(db);
   const rows = db.prepare(`
     SELECT
       w.*,
@@ -144,6 +200,22 @@ function listWorkflowTasks(db, options = {}) {
         WHERE t4.workflow_id = w.id
           AND t4.task_type = 'sample_audit'
           AND t4.status IN ('application_confirmed', 'admin_approved', 'executed')) AS confirmed_review_count,
+      (SELECT COUNT(DISTINCT t4.uid) FROM agent_workflow_tasks t4
+        WHERE t4.workflow_id = w.id
+          AND t4.task_type = 'sample_audit'
+          AND t4.status IN ('application_confirmed', 'admin_approved', 'executed')) AS admin_confirmed_review_count,
+      (SELECT COUNT(DISTINCT t5.uid) FROM agent_workflow_tasks t5
+        WHERE t5.workflow_id = w.id
+          AND t5.task_type = 'sample_audit'
+          AND IFNULL(t5.uid, '') <> ''
+          AND (
+            IFNULL(t5.recommendation, '') <> ''
+            OR t5.score IS NOT NULL
+            OR (
+              IFNULL(t5.score_details_json, '') <> ''
+              AND lower(trim(t5.score_details_json)) NOT IN ('[]', 'null')
+            )
+          )) AS agent_review_count,
       (SELECT COUNT(DISTINCT t2.uid) FROM agent_workflow_tasks t2
         JOIN samples s2 ON CAST(s2.id AS TEXT) = CAST(t2.sample_id AS TEXT)
         WHERE t2.workflow_id = w.id AND t2.task_type = 'sample_audit' AND t2.status = 'agent_review'
@@ -188,6 +260,265 @@ function listWorkflowTasks(db, options = {}) {
   return sortWorkflowTasks(mapped);
 }
 
+function listRunningWorkflows(db) {
+  ensureWorkflowRunStateColumn(db);
+  return db.prepare(`
+    SELECT * FROM agent_workflows
+    WHERE active = 1 AND run_state = ?
+    ORDER BY updated_at DESC, id DESC
+  `).all(WORKFLOW_RUN_RUNNING);
+}
+
+function getRunningMarketplaceWorkflow(db) {
+  return listRunningWorkflows(db).find((row) => workflowIsMarketplaceInvite(row)) || null;
+}
+
+function liveInviteTargetWorkflow(rows = []) {
+  const marketplace = (rows || []).filter((row) => row.is_marketplace_invite || workflowIsMarketplaceInvite(row));
+  if (!marketplace.length) return null;
+  return marketplace.find((row) => row.status === '进行中' || normalizeWorkflowRunState(row.run_state) === WORKFLOW_RUN_RUNNING)
+    || marketplace[0]
+    || null;
+}
+
+function invitePacerSummary(status = {}, extras = {}) {
+  const shops = Array.isArray(status.shops) ? status.shops : [];
+  const sentToday = extras.sent_today != null
+    ? Number(extras.sent_today || 0)
+    : shops.reduce((sum, shop) => sum + Number(shop.sent_today || 0), 0);
+  return {
+    send_interval_ms: Number(status.send_interval_ms || 20000),
+    search_interval_ms: Number(status.search_interval_ms || 90000),
+    day: status.day || '',
+    timezone: status.timezone || 'Asia/Shanghai',
+    pacer_running: Boolean(status.pacer_running),
+    enabled: Boolean(status.enabled),
+    sent_today: sentToday,
+    daily_limit: Number(extras.daily_limit ?? status.default_daily_limit ?? 1000),
+    agent_paused: Boolean(extras.agentPaused ?? extras.agent_paused),
+  };
+}
+
+function pauseWorkflowTask(db, workflowId, options = {}) {
+  ensureWorkflowRunStateColumn(db);
+  const id = Number(workflowId || 0);
+  const row = db.prepare('SELECT * FROM agent_workflows WHERE id = ?').get(id);
+  if (!row) throw new Error('工作流不存在');
+  const now = (options.nowText || defaultNowText)();
+  if (Number(row.active) !== 1) {
+    return { workflow: row, changed: false, paused_pending_kept: true };
+  }
+  if (normalizeWorkflowRunState(row.run_state) === WORKFLOW_RUN_PAUSED) {
+    return { workflow: row, changed: false, paused_pending_kept: true };
+  }
+  db.prepare('UPDATE agent_workflows SET run_state = ?, updated_at = ? WHERE id = ?')
+    .run(WORKFLOW_RUN_PAUSED, now, id);
+  return {
+    workflow: db.prepare('SELECT * FROM agent_workflows WHERE id = ?').get(id),
+    changed: true,
+    paused_pending_kept: true,
+  };
+}
+
+function resumeWorkflowTask(db, workflowId, options = {}) {
+  ensureWorkflowRunStateColumn(db);
+  const id = Number(workflowId || 0);
+  const row = db.prepare('SELECT * FROM agent_workflows WHERE id = ?').get(id);
+  if (!row) throw new Error('工作流不存在');
+  const now = (options.nowText || defaultNowText)();
+  const globalPaused = Boolean(options.globalPaused);
+  const pausedOthers = [];
+
+  // Never start every historical active=1 workflow. Only this task becomes running.
+  // If the global Agent was paused, first mark every other active workflow as
+  // individually paused so clearing the master switch cannot resume them.
+  const others = globalPaused
+    ? db.prepare('SELECT * FROM agent_workflows WHERE id != ? AND active = 1').all(id)
+    : db.prepare('SELECT * FROM agent_workflows WHERE id != ? AND active = 1 AND run_state = ?').all(id, WORKFLOW_RUN_RUNNING);
+
+  // Starting a marketplace search-invite task also pauses any other running
+  // search-invite task (shared official rate limits and the 1000/day cap).
+  const startingMarketplace = workflowIsMarketplaceInvite(row) || Number(row.active) === 0 && usesMarketplaceInviteSource(parseWorkflowConfig(row).source);
+  const exclusiveOthers = startingMarketplace
+    ? db.prepare('SELECT * FROM agent_workflows WHERE id != ? AND active = 1 AND run_state = ?').all(id, WORKFLOW_RUN_RUNNING)
+      .filter((item) => workflowIsMarketplaceInvite(item))
+    : [];
+
+  const byId = new Map();
+  for (const item of [...others, ...exclusiveOthers]) byId.set(Number(item.id), item);
+  for (const item of byId.values()) {
+    const wasRunning = normalizeWorkflowRunState(item.run_state) === WORKFLOW_RUN_RUNNING;
+    if (wasRunning || globalPaused) {
+      db.prepare('UPDATE agent_workflows SET run_state = ?, updated_at = ? WHERE id = ? AND active = 1')
+        .run(WORKFLOW_RUN_PAUSED, now, item.id);
+    }
+    if (wasRunning) {
+      pausedOthers.push({
+        id: Number(item.id),
+        name: workflowDisplayName(item),
+        was_running: true,
+      });
+    }
+  }
+
+  db.prepare('UPDATE agent_workflows SET active = 1, run_state = ?, updated_at = ? WHERE id = ?')
+    .run(WORKFLOW_RUN_RUNNING, now, id);
+
+  return {
+    workflow: db.prepare('SELECT * FROM agent_workflows WHERE id = ?').get(id),
+    paused_workflows: pausedOthers,
+    paused_workflow_ids: pausedOthers.map((item) => item.id),
+    cleared_global_pause: globalPaused,
+    started_only_this_task: true,
+  };
+}
+
+
+function parseJsonValue(value, fallback) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value.trim()) return fallback;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed === undefined ? fallback : parsed;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const number = Number(String(value).replace(/,/g, ''));
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function checkByMetric(checks, metric) {
+  return (Array.isArray(checks) ? checks : []).find((item) => String(item?.metric || '').toLowerCase() === metric) || null;
+}
+
+function creatorProfileUrl(row = {}) {
+  const explicit = String(row.profile_url || row.tiktok_url || row.creator_url || '').trim();
+  if (/^https?:\/\/(?:www\.)?tiktok\.com\//i.test(explicit)) return explicit;
+  const rawHandle = String(row.creator_handle || row.handle || '').trim();
+  if (/^https?:\/\/(?:www\.)?tiktok\.com\//i.test(rawHandle)) return rawHandle;
+  const handle = rawHandle.replace(/^@+/, '');
+  // Do not invent a handle from uid/open_id; only use a real username.
+  if (!handle || !/^[A-Za-z0-9._]+$/.test(handle)) return '';
+  return `https://www.tiktok.com/@${handle}`;
+}
+
+function creatorReviewChecks(row = {}) {
+  const fromColumn = parseJsonValue(row.score_details_json, null);
+  if (Array.isArray(fromColumn) && fromColumn.length) return fromColumn;
+  const payload = parseJsonValue(row.payload_json, {});
+  const nested = payload?.report?.checks || payload?.condition_audit?.checks || payload?.audit?.checks || payload?.score_details;
+  return Array.isArray(nested) ? nested : [];
+}
+
+function mapCreatorReviewRow(row = {}) {
+  const payload = parseJsonValue(row.payload_json, {});
+  const basic = payload?.report?.basic_data || payload?.sample || {};
+  const checks = creatorReviewChecks(row);
+  const fans = firstFiniteNumber(row.fans, basic.fans, checkByMetric(checks, 'fans')?.actual);
+  const orders30d = firstFiniteNumber(
+    row.orders_30d,
+    row.sales_count,
+    row.sales_count_30d,
+    basic.orders_30d,
+    basic.monthly_orders,
+    basic.total_orders,
+    checkByMetric(checks, 'orders')?.actual,
+  );
+  const avgView = firstFiniteNumber(row.avg_view, basic.avg_view, basic.monthly_avg_view, checkByMetric(checks, 'views')?.actual);
+  const monthlyVideos = firstFiniteNumber(
+    row.monthly_videos,
+    row.videos,
+    row.videos_30d,
+    basic.monthly_videos,
+    basic.videos_30d,
+    checkByMetric(checks, 'videos')?.actual,
+  );
+  const conversionCheck = checkByMetric(checks, 'conversion');
+  const conversion = firstFiniteNumber(row.conversion, conversionCheck?.actual, monthlyVideos > 0 ? orders30d / monthlyVideos : null);
+  const profileUrl = creatorProfileUrl(row);
+  return {
+    ...row,
+    display_name: String(row.creator_name || row.creator_handle || row.uid || '').trim() || '未命名达人',
+    profile_url: profileUrl,
+    fans,
+    orders_30d: orders30d,
+    avg_view: avgView,
+    monthly_videos: monthlyVideos,
+    conversion,
+    score: firstFiniteNumber(row.score),
+    recommendation: row.recommendation || '',
+    agent_result: row.recommendation || '',
+    checks,
+    metrics: {
+      fans,
+      orders_30d: orders30d,
+      avg_view: avgView,
+      monthly_videos: monthlyVideos,
+      conversion,
+      score: firstFiniteNumber(row.score),
+    },
+  };
+}
+
+function agentReviewTaskFilter(alias = 't') {
+  return `
+    IFNULL(${alias}.uid, '') <> ''
+    AND (
+      IFNULL(${alias}.recommendation, '') <> ''
+      OR ${alias}.score IS NOT NULL
+      OR (
+        IFNULL(${alias}.score_details_json, '') <> ''
+        AND lower(trim(${alias}.score_details_json)) NOT IN ('[]', 'null')
+      )
+    )
+  `;
+}
+
+function creatorReviewSelectSql(whereClause) {
+  return `
+    SELECT t.id AS task_id, t.uid, t.creator_name, t.creator_handle, t.shop_id,
+      t.sample_id, t.score, t.recommendation, t.reason, t.status, t.updated_at,
+      t.payload_json, t.score_details_json,
+      s.status AS sample_status, s.applied_at, s.fans, s.videos, s.avg_view,
+      p.name AS product_name
+    FROM agent_workflow_tasks t
+    LEFT JOIN samples s ON CAST(s.id AS TEXT) = CAST(t.sample_id AS TEXT)
+    LEFT JOIN products p ON p.id = s.product_id
+    WHERE ${whereClause}
+      AND t.id = (
+        SELECT t1.id FROM agent_workflow_tasks t1
+        WHERE t1.workflow_id = t.workflow_id
+          AND t1.task_type = t.task_type
+          AND t1.uid = t.uid
+          AND (${whereClause.replaceAll('t.', 't1.')})
+        ORDER BY datetime(COALESCE(t1.updated_at, t1.created_at)) DESC, t1.id DESC
+        LIMIT 1
+      )
+    ORDER BY datetime(COALESCE(t.updated_at, t.created_at)) DESC, t.id DESC
+  `;
+}
+
+function listWorkflowCreatorSummary(db, workflowId, kind) {
+  const query = workflowCreatorSummaryQuery(kind);
+  if (!query) return [];
+  const rows = db.prepare(query.sql).all(...query.params(Number(workflowId || 0)));
+  if (['agent', 'confirmed', 'pending', 'recommended'].includes(kind)) {
+    return rows.map(mapCreatorReviewRow);
+  }
+  return rows.map((row) => ({
+    ...row,
+    display_name: String(row.creator_name || row.creator_handle || row.uid || '').trim() || '未命名达人',
+    profile_url: creatorProfileUrl(row),
+  }));
+}
+
 function workflowCreatorSummaryQuery(kind) {
   if (kind === 'sent') {
     return {
@@ -229,21 +560,24 @@ function workflowCreatorSummaryQuery(kind) {
       params: (workflowId) => [`workflow:${workflowId}`, workflowId],
     };
   }
+  if (kind === 'agent') {
+    return {
+      sql: creatorReviewSelectSql(`
+        t.workflow_id = ?
+        AND t.task_type = 'sample_audit'
+        AND ${agentReviewTaskFilter('t')}
+      `),
+      params: (workflowId) => [workflowId, workflowId],
+    };
+  }
   if (kind === 'confirmed') {
     return {
-      sql: `
-        SELECT t.uid, t.creator_name, t.creator_handle, t.shop_id,
-          t.sample_id, t.score, t.recommendation, t.reason, t.status, t.updated_at,
-          s.status AS sample_status, s.applied_at, p.name AS product_name
-        FROM agent_workflow_tasks t
-        LEFT JOIN samples s ON CAST(s.id AS TEXT) = CAST(t.sample_id AS TEXT)
-        LEFT JOIN products p ON p.id = s.product_id
-        WHERE t.workflow_id = ? AND t.task_type = 'sample_audit'
-          AND t.status IN ('application_confirmed', 'admin_approved', 'executed')
-        GROUP BY t.uid
-        ORDER BY datetime(t.updated_at) DESC, t.id DESC
-      `,
-      params: (workflowId) => [workflowId],
+      sql: creatorReviewSelectSql(`
+        t.workflow_id = ?
+        AND t.task_type = 'sample_audit'
+        AND t.status IN ('application_confirmed', 'admin_approved', 'executed')
+      `),
+      params: (workflowId) => [workflowId, workflowId],
     };
   }
   const recommendationFilter = kind === 'recommended' ? "AND t.recommendation IN ('auto_pass', 'review_pass')" : '';
@@ -271,6 +605,8 @@ function workflowCreatorSummaryQuery(kind) {
 
 module.exports = {
   CONFIRMED_SAMPLE_AUDIT_STATUSES,
+  WORKFLOW_RUN_RUNNING,
+  WORKFLOW_RUN_PAUSED,
   workflowDisplayName,
   workflowStatusLabel,
   workflowStatusRank,
@@ -281,4 +617,18 @@ module.exports = {
   sortWorkflowTasks,
   listWorkflowTasks,
   workflowCreatorSummaryQuery,
+  listWorkflowCreatorSummary,
+  creatorProfileUrl,
+  mapCreatorReviewRow,
+  ensureWorkflowRunStateColumn,
+  normalizeWorkflowRunState,
+  parseWorkflowConfig,
+  usesMarketplaceInviteSource,
+  workflowIsMarketplaceInvite,
+  listRunningWorkflows,
+  getRunningMarketplaceWorkflow,
+  liveInviteTargetWorkflow,
+  invitePacerSummary,
+  pauseWorkflowTask,
+  resumeWorkflowTask,
 };

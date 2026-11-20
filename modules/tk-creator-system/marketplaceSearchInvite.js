@@ -208,6 +208,7 @@ function createMarketplaceSearchInvite(deps = {}) {
     insertWorkflowTask,
     sendWorkflowInvitations,
     getWorkflow,
+    getRunningMarketplaceWorkflow,
     getAgentSettings,
     getAgentRuntime,
     getAgentFlowStates,
@@ -896,8 +897,13 @@ function createMarketplaceSearchInvite(deps = {}) {
       if (!autorunEnabled() || !autoInviteActive()) {
         return { skipped: true, reason: !autorunEnabled() ? '未开启自动发送' : '自动邀约任务流已暂停' };
       }
-      const workflow = getWorkflow();
-      if (!usesMarketplaceInviteSource(workflow.config.source)) {
+      const workflow = (typeof getRunningMarketplaceWorkflow === 'function' && getRunningMarketplaceWorkflow)
+        ? getRunningMarketplaceWorkflow()
+        : null;
+      if (!workflow) {
+        return { skipped: true, reason: '没有进行中的查找达人任务' };
+      }
+      if (!usesMarketplaceInviteSource(workflow.config?.source)) {
         return { skipped: true, reason: '当前工作流不是查找达人来源' };
       }
       const shops = workflowShops(workflow);
@@ -945,8 +951,14 @@ function createMarketplaceSearchInvite(deps = {}) {
     }, 0);
   }
 
-  function status(workflow = getWorkflow?.()) {
+  function status(workflow) {
     ensureSchema();
+    if (!workflow && typeof getRunningMarketplaceWorkflow === 'function' && getRunningMarketplaceWorkflow) {
+      workflow = getRunningMarketplaceWorkflow();
+    }
+    if (!workflow && typeof getWorkflow === 'function' && getWorkflow) {
+      workflow = getWorkflow();
+    }
     const { day } = shanghaiDayRange();
     const settings = settingsBundle();
     const shops = workflow ? workflowShops(workflow) : db.prepare('SELECT id, name FROM shops ORDER BY id').all();

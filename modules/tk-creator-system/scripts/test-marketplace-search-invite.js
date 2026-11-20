@@ -601,6 +601,49 @@ test('score gate queues creators missing videos if the numeric score passes', as
 });
 
 
+
+test('pacer tick does not send for historical active workflows unless one is individually running', async () => {
+  const previousExecute = process.env.TK_INVITE_EXECUTE;
+  const previousAutorun = process.env.TK_MARKETPLACE_INVITE_AUTORUN;
+  process.env.TK_INVITE_EXECUTE = '1';
+  delete process.env.TK_MARKETPLACE_INVITE_AUTORUN;
+  try {
+    const historical = { id: 99, config: { source: 'marketplace_search', shop: 'oku', invite_daily_limit: 1000 } };
+    const running = { id: 4, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000 } };
+    let selected = null;
+    const stubDb = {
+      exec() {},
+      prepare() {
+        return { get() { return null; }, all() { return []; }, run() { return {}; } };
+      },
+    };
+    const api = createMarketplaceSearchInvite({
+      db: stubDb,
+      getWorkflow: () => historical,
+      getRunningMarketplaceWorkflow: () => selected,
+      getAgentSettings: () => ({ marketplace_search_invite_autorun: 1, invite_daily_limit: 1000 }),
+      getAgentRuntime: () => ({ paused: false }),
+      getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
+      writeSyncLog: () => {},
+    });
+    const skipped = await api.tick();
+    assert.equal(skipped.skipped, true);
+    assert.equal(skipped.reason, '没有进行中的查找达人任务');
+
+    // A running workflow is selected instead of the latest active=1 row.
+    selected = running;
+    const started = await api.tick();
+    assert.equal(started.skipped, false);
+    assert.ok(Array.isArray(started.results));
+  } finally {
+    if (previousExecute === undefined) delete process.env.TK_INVITE_EXECUTE;
+    else process.env.TK_INVITE_EXECUTE = previousExecute;
+    if (previousAutorun === undefined) delete process.env.TK_MARKETPLACE_INVITE_AUTORUN;
+    else process.env.TK_MARKETPLACE_INVITE_AUTORUN = previousAutorun;
+  }
+});
+
+
 (async () => {
   let failed = 0;
   for (const item of tests) {

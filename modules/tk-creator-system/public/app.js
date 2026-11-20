@@ -34,6 +34,7 @@ let INVITE_PRODUCT_SELECTED = new Set();
 let INVITE_PRODUCT_SHOP = '';
 let AGENT_WORKFLOW = null;
 let AGENT_WORKFLOWS = [];
+let AGENT_INVITE_PACER = null;
 let automationPage = 1;
 let automationPageSize = 10;
 let workflowListPage = 1;
@@ -1790,6 +1791,39 @@ function marketplaceInvitePanel(status) {
   return `<div class="module-panel" style="margin:16px 0"><h3>查找达人边搜边邀</h3><div class="module-meta">发送间隔 ${esc(Math.round((status.send_interval_ms || 20000) / 1000))} 秒，搜索间隔 ${esc(Math.round((status.search_interval_ms || 90000) / 1000))} 秒，日期按上海时区 ${esc(status.day || '')}。匀速任务：${status.pacer_running && status.enabled ? '运行中' : '未运行'}</div><table><thead><tr><th>店铺</th><th>今日已发 / 日限</th><th>待发送</th><th>搜索页数</th><th>入队</th><th>成功 / 失败</th><th>官方周剩余</th><th>限流退避</th><th>最近说明</th></tr></thead><tbody>${rows || '<tr><td colspan="9"><div class="agent-empty">暂无店铺进度</div></td></tr>'}</tbody></table></div>`;
 }
 
+function invitePacerLineHtml(pacer) {
+  if (!pacer) return '';
+  const send = Math.round((Number(pacer.send_interval_ms || 20000) / 1000));
+  const search = Math.round((Number(pacer.search_interval_ms || 90000) / 1000));
+  const sent = pacer.sent_today ?? 0;
+  const limit = pacer.daily_limit ?? pacer.default_daily_limit ?? 1000;
+  const running = pacer.pacer_running && pacer.enabled ? '运行中' : '未运行';
+  const day = pacer.day ? `，日期按上海时区 ${esc(pacer.day)}` : '';
+  const global = pacer.agent_paused ? ' 全局 Agent 已暂停，不会实际发送。' : '';
+  return `<div class="module-meta task-pacer-line">发送间隔 ${esc(send)} 秒 / 搜索间隔 ${esc(search)} 秒 / 今日已发 ${esc(sent)} / 日限 ${esc(limit)}${day}。匀速任务：${running}。${global}</div>`;
+}
+
+function workflowLiveInviteHtml(workflow) {
+  const live = workflow?.live_invite;
+  const shops = live?.shops || [];
+  if (!shops.length) return '';
+  return shops.map((shop) => {
+    const sentOk = shop.stats?.sent_ok ?? shop.sent_ok ?? 0;
+    const sentFailed = shop.stats?.sent_failed ?? shop.sent_failed ?? 0;
+    return `<div class="task-live"><b>${esc(shop.shop_name || shop.shop_id)}</b><span>今日已发 ${esc(shop.sent_today || 0)} / ${esc(shop.daily_limit || 0)}</span><span>待发送 ${esc(shop.pending_queue || 0)}</span><span>成功 ${esc(sentOk)} / 失败 ${esc(sentFailed)}</span></div>`;
+  }).join('');
+}
+
+function workflowRunActionButtons(workflow) {
+  const id = Number(workflow.id);
+  const canPause = workflow.can_pause === true || (workflow.can_pause !== false && workflow.status === '进行中');
+  const canResume = workflow.can_resume === true || (workflow.can_resume !== false && workflow.status !== '进行中');
+  const buttons = [];
+  if (canPause) buttons.push(`<button class="btn btn-outline" onclick="pauseAgentWorkflow(${id})">暂停</button>`);
+  if (canResume) buttons.push(`<button class="btn btn-primary" onclick="resumeAgentWorkflow(${id})">重新启动</button>`);
+  return buttons.join('');
+}
+
 function workflowEmptyHint(workflow, config = {}, diagnostics = null) {
   if (!workflow) return '';
   if (diagnostics?.source === 'marketplace_search') {
@@ -1858,6 +1892,7 @@ async function renderAutomationCenter() {
     api(`/api/agent/sample-applications?shop=${curStore || 'all'}&limit=1000`).catch(() => []),
   ]);
   AGENT_WORKFLOWS = workflowList.workflows || [];
+  AGENT_INVITE_PACER = workflowList.invite_pacer || AGENT_INVITE_PACER || null;
   if (selectedWorkflowId && !AGENT_WORKFLOWS.some(w => Number(w.id) === Number(selectedWorkflowId))) {
     selectedWorkflowId = null;
   }
@@ -1961,9 +1996,34 @@ function workflowProductIcons(workflow) {
 function workflowSummaryCount(workflow, kind) {
   if (kind === 'sent') return Number(workflow.invited_count ?? workflow.sent_invite_count ?? 0);
   if (kind === 'applicants') return Number(workflow.sample_applicant_count || 0);
-  if (kind === 'confirmed') return Number(workflow.confirmed_review_count || 0);
+  if (kind === 'agent') return Number(workflow.agent_review_count || 0);
+  if (kind === 'confirmed') return Number(workflow.admin_confirmed_review_count ?? workflow.confirmed_review_count ?? 0);
   if (kind === 'pending') return Number(workflow.sample_pending_count || 0);
   return Number(workflow.sample_recommended_count || 0);
+}
+
+function workflowCountCell(workflow, kind) {
+  const count = workflowSummaryCount(workflow, kind);
+  if (!count) return `<span class="workflow-count is-zero">${count}</span>`;
+  return `<button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, '${kind}')">${count}</button>`;
+}
+
+function formatCreatorMetric(value) {
+  if (value == null || value === '') return '-';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return esc(String(value));
+  if (Number.isInteger(number) || Math.abs(number) >= 100) return String(Math.round(number));
+  return String(Math.round(number * 100) / 100);
+}
+
+function creatorNameCell(row) {
+  const name = row.display_name || row.creator_name || row.creator_handle || row.uid || '-';
+  const handle = row.creator_handle || '';
+  const url = row.profile_url || '';
+  const nameHtml = url
+    ? `<a class="cn creator-profile-link" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(name)}</a>`
+    : `<div class="cn">${esc(name)}</div>`;
+  return `${nameHtml}${handle ? `<div class="cm">${esc(handle)}</div>` : ''}`;
 }
 
 function workflowStatusBadge(status) {
@@ -1988,6 +2048,24 @@ function openWorkflowFromTaskList(id) {
 
 function workflowSummaryRows(workflowId, kind, creators) {
   if (!creators.length) return '<div class="empty-state">暂无达人</div>';
+  if (kind === 'agent' || kind === 'confirmed') {
+    const rows = creators.map(row => {
+      const result = kind === 'agent'
+        ? (workflowRecommendationLabel(row.recommendation) || '-')
+        : `${workflowRecommendationLabel(row.recommendation)} · ${workflowTaskStatusLabel(row.status)}`;
+      return `<tr>
+        <td>${creatorNameCell(row)}</td>
+        <td>${formatCreatorMetric(row.fans ?? row.metrics?.fans)}</td>
+        <td>${formatCreatorMetric(row.orders_30d ?? row.metrics?.orders_30d)}</td>
+        <td>${formatCreatorMetric(row.avg_view ?? row.metrics?.avg_view)}</td>
+        <td>${formatCreatorMetric(row.monthly_videos ?? row.metrics?.monthly_videos)}</td>
+        <td>${formatCreatorMetric(row.conversion ?? row.metrics?.conversion)}</td>
+        <td>${row.score == null && row.metrics?.score == null ? '-' : `${formatCreatorMetric(row.score ?? row.metrics?.score)} 分`}</td>
+        <td>${esc(result)}</td>
+      </tr>`;
+    }).join('');
+    return `<div class="table-wrap task-creator-table"><table><thead><tr><th>达人</th><th>粉丝</th><th>近30天销量</th><th>均播放</th><th>月发布视频</th><th>转化</th><th>Agent评分</th><th>${kind === 'agent' ? 'Agent审核结果' : '审核状态'}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
   const rows = creators.map(row => {
     const action = row.task_id && row.status === 'agent_review'
       ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${row.task_id}, 'approve')">通过样品审核</button><button class="abtn ng" onclick="confirmWorkflowTask(${row.task_id}, 'reject')">拒绝</button></div>`
@@ -1995,7 +2073,7 @@ function workflowSummaryRows(workflowId, kind, creators) {
     const status = row.task_id
       ? `${workflowRecommendationLabel(row.recommendation)} · ${workflowTaskStatusLabel(row.status)}`
       : '已发送';
-    return `<tr><td><div class="cn">${esc(row.creator_name || '-')}</div><div class="cm">${esc(row.uid || row.creator_handle || '-')}</div></td><td>${esc(row.creator_handle || '-')}</td><td>${esc(row.product_name || '-')}</td><td>${esc(row.applied_at || row.sent_at || row.created_at || '-')}</td><td>${row.score == null ? '-' : `${Number(row.score)} 分`}</td><td>${esc(status)}</td><td>${action}</td></tr>`;
+    return `<tr><td>${creatorNameCell(row)}</td><td>${esc(row.creator_handle || '-')}</td><td>${esc(row.product_name || '-')}</td><td>${esc(row.applied_at || row.sent_at || row.created_at || '-')}</td><td>${row.score == null ? '-' : `${Number(row.score)} 分`}</td><td>${esc(status)}</td><td>${action}</td></tr>`;
   }).join('');
   return `<div class="table-wrap"><table><thead><tr><th>达人</th><th>账号</th><th>样品</th><th>时间</th><th>Agent评分</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -2022,28 +2100,34 @@ function workflowListPanel(options = {}) {
   const showActions = options.showActions !== false;
   const nameHandler = options.nameHandler || 'selectWorkflow';
   const title = options.title || '任务列表';
-  const metaText = options.meta || '所有自动化工作流任务，含历史任务。进行中或新近活动优先。邀约人数为成功发出的去重达人数。';
-  const colCount = showActions ? 8 : 6;
+  const metaText = options.meta || '所有自动化工作流任务，含历史任务。进行中或新近活动优先。邀约人数为成功发出的去重达人数。可对单个任务暂停或重新启动。';
+  const colCount = showActions ? 9 : 8;
   const meta = paginate(AGENT_WORKFLOWS, workflowListPage, workflowListPageSize);
   workflowListPage = meta.page;
   const rows = meta.items.map(workflow => {
     const name = workflow.display_name || workflow.name || ('未命名工作流 #' + workflow.id);
+    const extraActions = showActions
+      ? `<button class="btn btn-outline" onclick="openEditWorkflowModal(${workflow.id})">编辑</button><button class="btn btn-outline" onclick="generateWorkflowQueueFor(${workflow.id})">刷新</button>`
+      : '';
     return `
     <tr class="${Number(workflow.id) === Number(selectedWorkflowId) ? 'active-row' : ''}">
-      <td><button class="btn btn-ghost" onclick="${nameHandler}(${workflow.id})">${esc(name)}</button></td>
+      <td><button class="btn btn-ghost" onclick="${nameHandler}(${workflow.id})">${esc(name)}</button>${workflowLiveInviteHtml(workflow)}</td>
       <td>${workflowDateCell(workflow)}</td>
       <td>${workflowStatusBadge(workflow.status || workflow.status_label)}</td>
-      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'sent')">${workflowSummaryCount(workflow, 'sent')}</button></td>
-      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'applicants')">${workflowSummaryCount(workflow, 'applicants')}</button></td>
-      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'confirmed')">${workflowSummaryCount(workflow, 'confirmed')}</button></td>
-      ${showActions ? `<td><div class="product-icon-list">${workflowProductIcons(workflow)}</div></td><td><div class="abtns"><button class="btn btn-outline" onclick="openEditWorkflowModal(${workflow.id})">编辑</button><button class="btn btn-outline" onclick="generateWorkflowQueueFor(${workflow.id})">刷新</button></div></td>` : ''}
+      <td>${workflowCountCell(workflow, 'sent')}</td>
+      <td>${workflowCountCell(workflow, 'applicants')}</td>
+      <td>${workflowCountCell(workflow, 'agent')}</td>
+      <td>${workflowCountCell(workflow, 'confirmed')}</td>
+      ${showActions ? `<td><div class="product-icon-list">${workflowProductIcons(workflow)}</div></td>` : ''}
+      <td><div class="abtns">${workflowRunActionButtons(workflow)}${extraActions}</div></td>
     </tr>
-    <tr><td colspan="${colCount}" style="padding:0"><div id="workflow-summary-${workflow.id}-sent" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-applicants" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-confirmed" class="workflow-summary"></div></td></tr>`;
+    <tr><td colspan="${colCount}" style="padding:0"><div id="workflow-summary-${workflow.id}-sent" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-applicants" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-agent" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-confirmed" class="workflow-summary"></div></td></tr>`;
   }).join('');
   const addButton = showActions ? '<button class="btn btn-primary" onclick="openWorkflowModal()">新增自动化工作流任务</button>' : '';
+  const pacer = invitePacerLineHtml(options.pacer || AGENT_INVITE_PACER);
   return `<div class="${options.panelClass || 'module-panel'}" style="margin-bottom:12px">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>${esc(title)}</h3><div class="module-meta">${esc(metaText)}</div></div>${addButton}</div>
-    <div class="table-wrap task-list-table"><table><thead><tr><th>名称</th><th>创建日期（北京时间）</th><th>状态</th><th>邀约人数</th><th>申请样品人数</th><th>已确认审核人数</th>${showActions ? '<th>产品</th><th>操作</th>' : ''}</tr></thead><tbody>${rows || `<tr><td colspan="${colCount}"><div class="empty-state">暂无任务。创建自动化工作流或开始边搜边邀后，会显示在这里。</div></td></tr>`}</tbody></table></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>${esc(title)}</h3><div class="module-meta">${esc(metaText)}</div>${pacer}</div>${addButton}</div>
+    <div class="table-wrap task-list-table"><table><thead><tr><th>名称</th><th>创建日期（北京时间）</th><th>状态</th><th>邀约人数</th><th>申请样品人数</th><th>Agent审核人数</th><th>管理员已确认审核人数</th>${showActions ? '<th>产品</th>' : ''}<th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="${colCount}"><div class="empty-state">暂无任务。创建自动化工作流或开始边搜边邀后，会显示在这里。</div></td></tr>`}</tbody></table></div>
     ${pagerHtml('workflow-list', meta)}
   </div>`;
 }
@@ -2332,13 +2416,14 @@ async function renderAgentCenter() {
     productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
   ]);
   AGENT_WORKFLOWS = overview.workflow_tasks || [];
+  AGENT_INVITE_PACER = overview.invite_pacer || invitePacerFromStatus(overview.marketplace_invite, overview) || AGENT_INVITE_PACER || null;
   const standard = reviewData.standard || { version: 1, sample_pass_line: 70, invite_pass_line: 50, orders_base: 200, views_base: 5000, conversion_base: 5, orders_weight: 30, views_weight: 30, conversion_weight: 30, fans_hard_limit: 1000, fans_score_1000: 3, fans_score_5000: 5, fans_score_50000: 8, fans_score_200000: 10, missing_data_action: '疑', zero_video_action: '第三项计0分，其余照常' };
   const tabs = [['overview', '概览'], ['templates', '模板与话术库'], ['review', '审核标准'], ['optimize', '优化建议'], ['settings', '设置']];
   const overviewHtml = () => {
     const flows = overview.flows || [];
     const flowCards = flows.map(flow => `<div class="agent-flow-card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><h3>${esc(flow.label)}</h3><button class="agent-switch ${flow.active ? 'on' : ''}" aria-label="${esc(flow.label)}启停" onclick="toggleAgentFlow('${flow.key}', ${!flow.active})"></button></div><div class="module-meta">按当前审核标准 v${esc(standard.version)} 执行</div><div class="agent-flow-meta">上次运行：${esc(flow.last_run_at || '-')}<br>上次结果：${esc(flow.last_result?.result || '-')}<br>下次运行：${esc(flow.next_run_at || '-')}</div><div class="agent-flow-actions"><button class="btn btn-outline" onclick="trialAgentFlow('${flow.key}')">试运行</button></div></div>`).join('');
     const pending = (overview.pending_items || []).map(row => `<tr onclick="showPage('automation')" style="cursor:pointer"><td>${esc(row.task_type)}</td><td>${esc(row.creator_name || row.uid || '-')}</td><td>${esc(row.reason || '待确认')}</td></tr>`).join('');
-    return `<div class="agent-overview-head"><div><h2 style="margin:0 0 4px">Agent 概览</h2><div class="module-meta">只展示运行状态、今日动作和待处理事项</div></div><div class="agent-runtime"><span class="agent-runtime-status">${overview.runtime?.paused ? '已暂停' : '运行中'}</span><button class="btn ${overview.runtime?.paused ? 'btn-primary' : 'btn-outline'}" onclick="toggleAllAgents(${!overview.runtime?.paused})">${overview.runtime?.paused ? '恢复全部 Agent' : '一键暂停全部 Agent'}</button></div></div><div class="module-grid"><div class="module-panel"><h3>今日已发邀约数</h3><div class="module-num">${overview.today?.sent_invites || 0} <span style="font-size:14px;color:#697586">/ ${overview.today?.invite_limit || 0}</span></div><div class="module-meta">对比每日上限</div></div><div class="module-panel" onclick="showPage('automation')" style="cursor:pointer"><h3>待我确认事项数</h3><div class="module-num">${overview.pending_confirmations || 0}</div><div class="module-meta">点击进入处理队列</div></div><div class="module-panel"><h3>本月 AI 费用</h3><div class="module-num">¥${overview.month_ai_cost || 0} <span style="font-size:14px;color:#697586">/ ¥${overview.month_ai_cost_limit || 0}</span></div><div class="module-meta">当前未接入 AI，费用暂为 0</div></div></div><div class="agent-flow-grid">${flowCards || '<div class="agent-empty">暂无任务流</div>'}</div>${marketplaceInvitePanel(overview.marketplace_invite)}${workflowListPanel({ showActions: false, nameHandler: 'openWorkflowFromTaskList', title: '任务列表', panelClass: 'agent-list-panel', meta: '所有自动化工作流任务，含历史任务。点击名称可进入工作流详情。' })}<div class="agent-config-grid"><div class="agent-list-panel"><h3>待我确认</h3><table><thead><tr><th>类型</th><th>达人</th><th>说明</th></tr></thead><tbody>${pending || '<tr><td colspan="3"><div class="agent-empty">暂无待确认事项</div></td></tr>'}</tbody></table></div></div>`;
+    return `<div class="agent-overview-head"><div><h2 style="margin:0 0 4px">Agent 概览</h2><div class="module-meta">只展示运行状态、今日动作和待处理事项</div></div><div class="agent-runtime"><span class="agent-runtime-status">${overview.runtime?.paused ? '已暂停' : '运行中'}</span><button class="btn ${overview.runtime?.paused ? 'btn-primary' : 'btn-outline'}" onclick="toggleAllAgents(${!overview.runtime?.paused})">${overview.runtime?.paused ? '恢复全部 Agent' : '一键暂停全部 Agent'}</button></div></div><div class="module-grid"><div class="module-panel"><h3>今日已发邀约数</h3><div class="module-num">${overview.today?.sent_invites || 0} <span style="font-size:14px;color:#697586">/ ${overview.today?.invite_limit || 0}</span></div><div class="module-meta">对比每日上限</div></div><div class="module-panel" onclick="showPage('automation')" style="cursor:pointer"><h3>待我确认事项数</h3><div class="module-num">${overview.pending_confirmations || 0}</div><div class="module-meta">点击进入处理队列</div></div><div class="module-panel"><h3>本月 AI 费用</h3><div class="module-num">¥${overview.month_ai_cost || 0} <span style="font-size:14px;color:#697586">/ ¥${overview.month_ai_cost_limit || 0}</span></div><div class="module-meta">当前未接入 AI，费用暂为 0</div></div></div><div class="agent-flow-grid">${flowCards || '<div class="agent-empty">暂无任务流</div>'}</div>${workflowListPanel({ showActions: false, nameHandler: 'openWorkflowFromTaskList', title: '任务列表', panelClass: 'agent-list-panel', meta: '所有自动化工作流任务，含历史任务。点击名称可进入工作流详情。可对单个任务暂停或重新启动。边搜边邀进度显示在对应任务下。', pacer: AGENT_INVITE_PACER })}<div class="agent-config-grid"><div class="agent-list-panel"><h3>待我确认</h3><table><thead><tr><th>类型</th><th>达人</th><th>说明</th></tr></thead><tbody>${pending || '<tr><td colspan="3"><div class="agent-empty">暂无待确认事项</div></td></tr>'}</tbody></table></div></div>`;
   };
   const settingsHtml = `<div class="agent-settings-section module-panel"><h3>TikTok Shop 授权</h3><div class="module-meta" style="margin-bottom:10px">Redirect URI：${esc(auth.redirect_uri || '')}</div><div class="agent-list">${(auth.shops || []).map(shop => `<div class="agent-row"><div><strong>${esc(shop.name)}</strong><div class="agent-load">Access Token：${shop.has_access_token ? '已保存' : '缺失'} · Refresh Token：${shop.has_refresh_token ? '已保存' : '缺失'} · shop_cipher：${shop.has_shop_cipher ? '已保存' : '缺失'}</div><div class="agent-load">上次同步：${esc(shop.last_sync_at || '-')} ${esc(shop.last_sync_message || '')}</div></div><button class="btn ${shop.authorized ? 'btn-outline' : 'btn-primary'}" onclick="openTikTokAuth('${shop.id}')">${shop.authorized ? '重新授权' : '去授权'}</button></div>`).join('') || '<div class="agent-empty">暂无店铺</div>'}</div></div><div class="agent-settings-section module-panel"><div style="display:flex;justify-content:space-between;align-items:center"><h3>BD 成员</h3><button class="btn btn-outline" onclick="syncBDMembers()">同步员工名单</button></div><div class="agent-list">${BD_LIST.map(b => `<div class="agent-row"><div><strong>${esc(b.name)}</strong><div class="agent-load">系统员工 · 负责 ${b.load || 0} 个达人 · 企微 ${esc(b.wecom_userid || '未配置')}</div></div></div>`).join('') || '<div class="agent-empty">暂无 BD 成员</div>'}</div></div>${agentTemplateManagerHtml()}<div class="agent-config-grid"><div class="module-panel"><h3>话术模板</h3><div class="form-row"><label class="form-label">自动邀约话术</label><textarea class="bd-note-ta" id="agent-invite-template">${esc(settings.invite_template || '')}</textarea></div><div class="form-row"><label class="form-label">BD 跟进话术</label><textarea class="bd-note-ta" id="agent-followup-template">${esc(settings.followup_template || '')}</textarea></div></div><div class="module-panel"><h3>Agent 配置</h3><div class="form-row"><label class="form-label">复盘口径</label><textarea class="bd-note-ta" id="agent-review-rules">${esc(settings.review_rules || '')}</textarea></div><div class="form-row-2"><div class="form-row"><label class="form-label">邀约每日上限</label><input class="form-input" id="agent-invite-limit" type="number" min="1" value="${esc(settings.invite_daily_limit ?? 1000)}"></div><div class="form-row"><label class="form-label">跟进间隔（天）</label><input class="form-input" id="agent-followup-days" type="number" min="1" value="${esc(settings.followup_interval_days ?? 3)}"></div></div><div class="form-row"><label class="form-label">Agent 每日自动运行时间</label><input class="form-input" id="agent-daily-run-time" type="time" value="${String(settings.agent_daily_hour ?? 8).padStart(2, '0')}:${String(settings.agent_daily_minute ?? 30).padStart(2, '0')}"></div><div class="form-row"><label class="form-label">自动分配策略</label><textarea class="bd-note-ta" id="agent-assign-strategy">${esc(settings.assign_strategy || '')}</textarea></div><button class="btn btn-primary" onclick="saveAgentSettings()">保存 Agent 配置</button></div></div>`;
   const settingsExtrasHtml = `<div class="module-panel" style="margin-top:12px"><h3>运行参数</h3><div class="form-row-2"><div class="form-row"><label class="form-label">每天成功发送邀约目标（oku 默认 1000）</label><input class="form-input" id="agent-invite-target-count" type="number" min="1" value="${esc(settings.invite_target_count ?? 1000)}"></div><div class="form-row"><label class="form-label">样品申请每日巡检时间</label><input class="form-input" id="agent-sample-sync-time" type="time" value="${String(settings.sample_sync_hour ?? 7).padStart(2, '0')}:00"></div></div><div class="form-row-2"><div class="form-row"><label class="form-label">查找达人搜索间隔（秒，60-120）</label><input class="form-input" id="agent-marketplace-search-interval" type="number" min="60" max="120" value="${esc(Math.round((Number(settings.marketplace_search_interval_ms || 90000) / 1000)))}"></div><div class="form-row"><label class="form-label">邀约发送间隔（秒，默认 20）</label><input class="form-input" id="agent-marketplace-send-interval" type="number" min="1" value="${esc(Math.round((Number(settings.marketplace_invite_send_interval_ms || 20000) / 1000)))}"></div></div><div class="form-row"><label class="form-label">分店每日上限 JSON（mir 会再被官方周剩余额度封顶）</label><input class="form-input" id="agent-invite-limit-by-shop" value="${esc(settings.invite_daily_limit_by_shop || '{\"oku\":1000,\"mir\":1000}')}"></div><div class="form-row"><label class="form-label">开启查找达人全天匀速自动邀约</label><select class="form-input" id="agent-marketplace-autorun"><option value="1" ${String(settings.marketplace_search_invite_autorun ?? 1) !== '0' ? 'selected' : ''}>开启</option><option value="0" ${String(settings.marketplace_search_invite_autorun ?? 1) === '0' ? 'selected' : ''}>关闭</option></select></div></div>`;
@@ -2354,6 +2439,56 @@ async function renderAgentCenter() {
 function setAgentCenterTab(tab) {
   agentCenterTab = tab;
   renderAgentCenter();
+}
+
+function invitePacerFromStatus(status, overview) {
+  if (!status && !overview) return null;
+  return {
+    send_interval_ms: status?.send_interval_ms || 20000,
+    search_interval_ms: status?.search_interval_ms || 90000,
+    day: status?.day || '',
+    pacer_running: Boolean(status?.pacer_running),
+    enabled: Boolean(status?.enabled),
+    sent_today: overview?.today?.sent_invites ?? (status?.shops || []).reduce((sum, shop) => sum + Number(shop.sent_today || 0), 0),
+    daily_limit: overview?.today?.invite_limit ?? status?.default_daily_limit ?? 1000,
+    agent_paused: Boolean(overview?.runtime?.paused),
+  };
+}
+
+function refreshWorkflowViews() {
+  if (curPage === 'automation') renderAutomationCenter();
+  else if (curPage === 'agent') renderAgentCenter();
+}
+
+async function pauseAgentWorkflow(id) {
+  const result = await api(`/api/agent/workflows/${id}/pause`, { method: 'POST', body: '{}' });
+  if (result.workflows) AGENT_WORKFLOWS = result.workflows;
+  if (result.invite_pacer) AGENT_INVITE_PACER = result.invite_pacer;
+  toast(result.changed === false ? '该任务已是暂停或已结束' : '任务已暂停，待发送队列仍会保留');
+  refreshWorkflowViews();
+}
+
+async function resumeAgentWorkflow(id) {
+  const workflow = (AGENT_WORKFLOWS || []).find(item => Number(item.id) === Number(id));
+  const name = workflow?.display_name || workflow?.name || ('工作流 #' + id);
+  const running = (AGENT_WORKFLOWS || []).filter(item => Number(item.id) !== Number(id) && (item.status === '进行中' || item.run_state === 'running'));
+  const globalPaused = Boolean(AGENT_INVITE_PACER?.agent_paused);
+  const notices = [];
+  if (running.length) {
+    notices.push(`将暂停当前进行中的任务：${running.map(item => item.display_name || item.name || ('#' + item.id)).join('、')}`);
+  }
+  if (globalPaused) {
+    notices.push('当前为全局暂停，将只恢复这一条任务，不会启动其他历史任务');
+  }
+  if (notices.length && !confirm(`重新启动「${name}」。${notices.join('。')}。是否继续？`)) return;
+  const result = await api(`/api/agent/workflows/${id}/resume`, { method: 'POST', body: '{}' });
+  if (result.workflows) AGENT_WORKFLOWS = result.workflows;
+  if (result.invite_pacer) AGENT_INVITE_PACER = result.invite_pacer;
+  const pausedNames = (result.paused_workflows || []).map(item => item.name).filter(Boolean);
+  toast(pausedNames.length
+    ? `已重新启动「${name}」，并暂停了 ${pausedNames.join('、')}`
+    : `已重新启动「${name}」`);
+  refreshWorkflowViews();
 }
 
 async function toggleAllAgents(paused) {
