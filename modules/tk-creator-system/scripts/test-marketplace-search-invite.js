@@ -20,6 +20,83 @@ function test(name, fn) {
   tests.push({ name, fn });
 }
 
+const DEFAULT_REVIEW_STANDARD = {
+  version: 1,
+  sample_pass_line: 70,
+  invite_pass_line: 50,
+  orders_base: 200,
+  views_base: 5000,
+  conversion_base: 5,
+  orders_weight: 30,
+  views_weight: 30,
+  conversion_weight: 30,
+  fans_hard_limit: 1000,
+  fans_score_1000: 3,
+  fans_score_5000: 5,
+  fans_score_50000: 8,
+  fans_score_200000: 10,
+  missing_data_action: '疑',
+};
+
+// Mirrors server.js scoreByReviewStandard / fansScoreForValue for offline tests.
+function fansScoreForValue(fans, standard) {
+  if (fans < standard.fans_hard_limit) return 0;
+  if (fans < 5000) return standard.fans_score_1000;
+  if (fans < 50000) return standard.fans_score_5000;
+  if (fans < 200000) return standard.fans_score_50000;
+  return standard.fans_score_200000;
+}
+
+function scoreByReviewStandard(item, standard, thresholdType) {
+  const ordersValue = item.monthly_orders ?? item.total_orders ?? item.sales_count_30d ?? item.sales_count;
+  const viewsValue = item.monthly_avg_view ?? item.avg_view;
+  const videosValue = item.monthly_videos ?? item.videos ?? item.published_videos;
+  const orders = Number(ordersValue || 0);
+  const views = Number(viewsValue || 0);
+  const videos = Number(videosValue || 0);
+  const conversion = videos > 0 ? orders / videos : 0;
+  // Missing or zero 30-day video count: conversion scores 0; this alone must not trigger missing-data / manual_review.
+  const missing = [ordersValue, viewsValue].some((value) => value === undefined || value === null || value === '');
+  const fanScore = fansScoreForValue(Number(item.fans || item.followers || 0), standard);
+  const checks = [
+    { name: '粉丝数', metric: 'fans', actual: Number(item.fans || item.followers || 0), base: standard.fans_hard_limit, weight: fanScore, score: fanScore },
+    { name: '30天成交件数', metric: 'orders', actual: orders, base: standard.orders_base, weight: standard.orders_weight, score: Math.min(orders / standard.orders_base, 1) * standard.orders_weight },
+    { name: '30天视频平均播放量', metric: 'views', actual: views, base: standard.views_base, weight: standard.views_weight, score: Math.min(views / standard.views_base, 1) * standard.views_weight },
+    { name: '成交件数 ÷ 发布视频数', metric: 'conversion', actual: conversion, base: standard.conversion_base, weight: standard.conversion_weight, score: Math.min(conversion / standard.conversion_base, 1) * standard.conversion_weight },
+  ].map((check) => ({
+    ...check,
+    score: Math.round(check.score * 100) / 100,
+  }));
+  const score = Math.round(checks.reduce((sum, check) => sum + check.score, 0) * 100) / 100;
+  const fans = Number(item.fans || item.followers || 0);
+  const threshold = thresholdType === 'invite' ? standard.invite_pass_line : standard.sample_pass_line;
+  let recommendation = 'auto_pass';
+  let reason = `总分 ${score}，达到${thresholdType === 'invite' ? '邀约筛选' : '样品审核'}通过线 ${threshold}`;
+  if (fans < standard.fans_hard_limit) {
+    recommendation = 'manual_review';
+    reason = `粉丝数 ${fans} 低于硬门槛 ${standard.fans_hard_limit}`;
+  } else if (missing) {
+    recommendation = 'manual_review';
+    reason = standard.missing_data_action === '不通过' ? '缺少30天数据，按当前标准不通过' : '缺少30天数据，需人工确认';
+  } else if (score < threshold) {
+    recommendation = 'manual_review';
+    reason = `总分 ${score} 未达到通过线 ${threshold}`;
+  }
+  return {
+    score,
+    recommendation,
+    reason,
+    checks: checks.map((check) => ({ ...check, pass: check.score > 0 })),
+    score_details: checks,
+    review_standard_version: standard.version,
+  };
+}
+
+function testScoreCandidate(item) {
+  return scoreByReviewStandard(item, DEFAULT_REVIEW_STANDARD, 'invite');
+}
+
+
 test('marketplace and shop_pool use official search path', () => {
   assert.equal(usesMarketplaceInviteSource('marketplace_search'), true);
   assert.equal(usesMarketplaceInviteSource('shop_pool'), true);
@@ -177,20 +254,21 @@ test('in-memory flow: one page enqueue, skip invited, stop when remain is 0', as
       fans: raw.follower_count,
       category: '',
       fulfillmentRate: 0,
-      avgView: 0,
-      videos30d: 1,
-      salesCount30d: 10,
-      salesAmount30d: 100,
+      avgView: raw.avgView ?? 5000,
+      videos30d: raw.videos30d ?? 100,
+      salesCount30d: raw.salesCount30d ?? 1000,
+      salesAmount30d: raw.salesAmount30d ?? 10000,
     }),
-    insertWorkflowTask: (_workflowId, _type, status, candidate) => {
-      tasks.push({ id: tasks.length + 1, shop_id: candidate.shop_id, uid: candidate.uid, status, payload: { candidate } });
+    insertWorkflowTask: (_workflowId, _type, status, candidate, audit) => {
+      tasks.push({ id: tasks.length + 1, shop_id: candidate.shop_id, uid: candidate.uid, status, audit, payload: { candidate } });
     },
     sendWorkflowInvitations: async () => [],
     getWorkflow: () => ({ id: 1, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000, invite_target_count: 1000, invite_max_per_creator: 1 } }),
     getAgentSettings: () => ({ invite_daily_limit: 1000, invite_target_count: 1000, invite_daily_limit_by_shop: '{"mir":1000}', marketplace_search_invite_autorun: 1 }),
     getAgentRuntime: () => ({ paused: false }),
     getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
-    getReviewStandard: () => ({ fans_hard_limit: 1000, version: 1 }),
+    getReviewStandard: () => DEFAULT_REVIEW_STANDARD,
+    agentScoreCandidate: testScoreCandidate,
     writeSyncLog: () => {},
   });
 
@@ -262,6 +340,266 @@ test('cursor advances and rotates after duplicate-only page', async () => {
   assert.equal(cursors.get('oku').filter_index, 1);
   assert.equal(cursors.get('oku').page_token, '');
 });
+
+
+test('score gate: below invite_pass_line is skipped, passing score is queued, hard gates still reject', async () => {
+  const shops = [{ id: 'mir', name: 'MIR HOME', access_token: 't', shop_cipher: 'c' }];
+  const tasks = [];
+  const cursors = new Map();
+  const stats = new Map();
+  const db = {
+    exec() {},
+    prepare(sql) {
+      return {
+        run(...args) {
+          if (/INSERT INTO marketplace_search_cursors/.test(sql)) {
+            cursors.set(args[0], {
+              shop_id: args[0], filter_index: args[1], filter_json: args[2], page_token: args[3],
+              search_key: args[4], page_count: args[5], empty_pages: args[6], cycle_count: args[7],
+            });
+          }
+          if (/INSERT INTO marketplace_invite_daily_stats/.test(sql)) {
+            stats.set(`${args[0]}:${args[1]}`, { shop_id: args[0], day: args[1] });
+          }
+        },
+        get(...args) {
+          if (/COUNT\(\*\)/.test(sql) && /invitation_records/.test(sql)) return { c: 0 };
+          if (/COUNT\(\*\)/.test(sql) && /agent_workflow_tasks/.test(sql)) return { c: 0 };
+          if (/marketplace_search_cursors/.test(sql)) return cursors.get(args[0]) || null;
+          if (/marketplace_invite_daily_stats/.test(sql)) return stats.get(`${args[0]}:${args[1]}`) || { shop_id: args[0], day: args[1] };
+          if (/FROM shops WHERE id/.test(sql)) return shops.find((item) => item.id === args[0]) || null;
+          return null;
+        },
+        all(...args) {
+          if (/FROM invitation_records/.test(sql)) return [];
+          if (/FROM agent_workflow_tasks/.test(sql)) return tasks.filter((item) => item.shop_id === args[0]);
+          if (/FROM shops/.test(sql)) return shops;
+          return [];
+        },
+      };
+    },
+  };
+
+  const api = createMarketplaceSearchInvite({
+    db,
+    tiktokRequest: async ({ path }) => {
+      if (path.includes('creator_outreach/quota')) return { unlimited: true, quota_use: 0 };
+      return {
+        creators: [
+          { username: 'no_id', nickname: 'No Id', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000 },
+          { creator_open_id: 'blocked-1', username: 'blocked', nickname: 'Blocked', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000, profile: { is_creator_blocked: true } },
+          { creator_open_id: 'low-1', username: 'low_score', nickname: 'Low Score', follower_count: 3000, avgView: 100, videos30d: 10, salesCount30d: 10 },
+          { creator_open_id: 'pass-1', username: 'pass_one', nickname: 'Pass One', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000 },
+        ],
+        next_page_token: 'page-2',
+        search_key: 'key-1',
+      };
+    },
+    normalizeAffiliateCreator: (raw) => ({
+      uid: raw.creator_open_id,
+      creatorOpenId: raw.creator_open_id,
+      creatorName: raw.nickname,
+      creatorHandle: raw.username,
+      fans: raw.follower_count,
+      category: '',
+      fulfillmentRate: 0,
+      avgView: raw.avgView,
+      videos30d: raw.videos30d,
+      salesCount30d: raw.salesCount30d,
+      salesAmount30d: raw.salesAmount30d || 0,
+    }),
+    insertWorkflowTask: (_workflowId, _type, status, candidate, audit) => {
+      tasks.push({ id: tasks.length + 1, shop_id: candidate.shop_id, uid: candidate.uid, status, audit, payload: { candidate } });
+    },
+    sendWorkflowInvitations: async () => [],
+    getWorkflow: () => ({ id: 1, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000, invite_target_count: 1000, invite_max_per_creator: 1 } }),
+    getAgentSettings: () => ({ invite_daily_limit: 1000, invite_target_count: 1000, invite_daily_limit_by_shop: '{"mir":1000}', marketplace_search_invite_autorun: 1 }),
+    getAgentRuntime: () => ({ paused: false }),
+    getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
+    getReviewStandard: () => DEFAULT_REVIEW_STANDARD,
+    agentScoreCandidate: testScoreCandidate,
+    writeSyncLog: () => {},
+  });
+
+  const workflow = { id: 1, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000, invite_target_count: 1000, invite_max_per_creator: 1 } };
+  const result = await api.replenishShop(shops[0], workflow, { force: true });
+  assert.equal(result.queued, 1);
+  assert.equal(result.skipped_invalid, 2);
+  assert.equal(result.skipped_score, 1);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].uid, 'pass-1');
+  assert.equal(tasks[0].audit.recommendation, 'auto_pass');
+  assert.notEqual(tasks[0].audit.score, 100);
+  assert.ok(tasks[0].audit.score >= DEFAULT_REVIEW_STANDARD.invite_pass_line);
+  assert.equal(tasks[0].audit.review_standard_version, DEFAULT_REVIEW_STANDARD.version);
+  assert.match(String(tasks[0].audit.reason), /邀约筛选通过线/);
+  assert.ok(Array.isArray(tasks[0].audit.checks) && tasks[0].audit.checks.length > 0);
+
+  const lowAudit = testScoreCandidate({
+    fans: 3000,
+    avg_view: 100,
+    monthly_avg_view: 100,
+    monthly_videos: 10,
+    total_orders: 10,
+    sales_count_30d: 10,
+  });
+  assert.equal(lowAudit.recommendation, 'manual_review');
+  assert.ok(lowAudit.score < DEFAULT_REVIEW_STANDARD.invite_pass_line);
+});
+
+
+test('missing 30-day videos scores conversion as 0 and can auto_pass', () => {
+  const audit = testScoreCandidate({
+    fans: 8000,
+    avg_view: 5000,
+    monthly_avg_view: 5000,
+    total_orders: 200,
+    sales_count_30d: 200,
+  });
+  const conversion = audit.checks.find((check) => check.metric === 'conversion');
+  assert.equal(conversion.actual, 0);
+  assert.equal(conversion.score, 0);
+  assert.equal(typeof audit.score, 'number');
+  assert.ok(Number.isFinite(audit.score));
+  assert.equal(audit.score, 65);
+  assert.ok(audit.score >= DEFAULT_REVIEW_STANDARD.invite_pass_line);
+  assert.equal(audit.recommendation, 'auto_pass');
+  assert.doesNotMatch(String(audit.reason), /缺少30天数据/);
+  assert.match(String(audit.reason), /邀约筛选通过线 50/);
+
+  const zeroVideos = testScoreCandidate({
+    fans: 8000,
+    avg_view: 5000,
+    monthly_avg_view: 5000,
+    monthly_videos: 0,
+    total_orders: 200,
+    sales_count_30d: 200,
+  });
+  assert.equal(zeroVideos.recommendation, 'auto_pass');
+  assert.equal(zeroVideos.score, 65);
+  assert.equal(zeroVideos.checks.find((check) => check.metric === 'conversion').score, 0);
+});
+
+test('missing orders or views still follows missing_data_action', () => {
+  const missingOrders = testScoreCandidate({
+    fans: 8000,
+    avg_view: 5000,
+    monthly_avg_view: 5000,
+    monthly_videos: 20,
+  });
+  assert.equal(typeof missingOrders.score, 'number');
+  assert.ok(Number.isFinite(missingOrders.score));
+  assert.equal(missingOrders.recommendation, 'manual_review');
+  assert.match(String(missingOrders.reason), /缺少30天数据，需人工确认/);
+
+  const missingViews = testScoreCandidate({
+    fans: 8000,
+    monthly_videos: 20,
+    total_orders: 200,
+    sales_count_30d: 200,
+  });
+  assert.equal(missingViews.recommendation, 'manual_review');
+  assert.match(String(missingViews.reason), /缺少30天数据，需人工确认/);
+
+  const failOnMissing = scoreByReviewStandard({
+    fans: 8000,
+    avg_view: 5000,
+    monthly_avg_view: 5000,
+    monthly_videos: 20,
+  }, { ...DEFAULT_REVIEW_STANDARD, missing_data_action: '不通过' }, 'invite');
+  assert.equal(failOnMissing.recommendation, 'manual_review');
+  assert.match(String(failOnMissing.reason), /缺少30天数据，按当前标准不通过/);
+});
+
+test('score gate queues creators missing videos if the numeric score passes', async () => {
+  const shops = [{ id: 'mir', name: 'MIR HOME', access_token: 't', shop_cipher: 'c' }];
+  const tasks = [];
+  const cursors = new Map();
+  const stats = new Map();
+  const db = {
+    exec() {},
+    prepare(sql) {
+      return {
+        run(...args) {
+          if (/INSERT INTO marketplace_search_cursors/.test(sql)) {
+            cursors.set(args[0], {
+              shop_id: args[0], filter_index: args[1], filter_json: args[2], page_token: args[3],
+              search_key: args[4], page_count: args[5], empty_pages: args[6], cycle_count: args[7],
+            });
+          }
+          if (/INSERT INTO marketplace_invite_daily_stats/.test(sql)) {
+            stats.set(`${args[0]}:${args[1]}`, { shop_id: args[0], day: args[1] });
+          }
+        },
+        get(...args) {
+          if (/COUNT\(\*\)/.test(sql) && /invitation_records/.test(sql)) return { c: 0 };
+          if (/COUNT\(\*\)/.test(sql) && /agent_workflow_tasks/.test(sql)) return { c: 0 };
+          if (/marketplace_search_cursors/.test(sql)) return cursors.get(args[0]) || null;
+          if (/marketplace_invite_daily_stats/.test(sql)) return stats.get(`${args[0]}:${args[1]}`) || { shop_id: args[0], day: args[1] };
+          if (/FROM shops WHERE id/.test(sql)) return shops.find((item) => item.id === args[0]) || null;
+          return null;
+        },
+        all(...args) {
+          if (/FROM invitation_records/.test(sql)) return [];
+          if (/FROM agent_workflow_tasks/.test(sql)) return tasks.filter((item) => item.shop_id === args[0]);
+          if (/FROM shops/.test(sql)) return shops;
+          return [];
+        },
+      };
+    },
+  };
+
+  const api = createMarketplaceSearchInvite({
+    db,
+    tiktokRequest: async ({ path }) => {
+      if (path.includes('creator_outreach/quota')) return { unlimited: true, quota_use: 0 };
+      return {
+        creators: [
+          { creator_open_id: 'novid-1', username: 'no_videos', nickname: 'No Videos', follower_count: 8000, avgView: 5000, salesCount30d: 200 },
+          { creator_open_id: 'low-1', username: 'low_score', nickname: 'Low Score', follower_count: 3000, avgView: 100, videos30d: 10, salesCount30d: 10 },
+        ],
+        next_page_token: '',
+        search_key: 'key-1',
+      };
+    },
+    normalizeAffiliateCreator: (raw) => ({
+      uid: raw.creator_open_id,
+      creatorOpenId: raw.creator_open_id,
+      creatorName: raw.nickname,
+      creatorHandle: raw.username,
+      fans: raw.follower_count,
+      category: '',
+      fulfillmentRate: 0,
+      avgView: raw.avgView,
+      videos30d: raw.videos30d,
+      salesCount30d: raw.salesCount30d,
+      salesAmount30d: raw.salesAmount30d || 0,
+    }),
+    insertWorkflowTask: (_workflowId, _type, status, candidate, audit) => {
+      tasks.push({ id: tasks.length + 1, shop_id: candidate.shop_id, uid: candidate.uid, status, audit, payload: { candidate } });
+    },
+    sendWorkflowInvitations: async () => [],
+    getWorkflow: () => ({ id: 1, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000, invite_target_count: 1000, invite_max_per_creator: 1 } }),
+    getAgentSettings: () => ({ invite_daily_limit: 1000, invite_target_count: 1000, invite_daily_limit_by_shop: '{"mir":1000}', marketplace_search_invite_autorun: 1 }),
+    getAgentRuntime: () => ({ paused: false }),
+    getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
+    getReviewStandard: () => DEFAULT_REVIEW_STANDARD,
+    agentScoreCandidate: testScoreCandidate,
+    writeSyncLog: () => {},
+  });
+
+  const workflow = { id: 1, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000, invite_target_count: 1000, invite_max_per_creator: 1 } };
+  const result = await api.replenishShop(shops[0], workflow, { force: true });
+  assert.equal(result.queued, 1);
+  assert.equal(result.skipped_score, 1);
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].uid, 'novid-1');
+  assert.equal(tasks[0].audit.recommendation, 'auto_pass');
+  assert.equal(tasks[0].audit.score, 65);
+  assert.equal(tasks[0].audit.checks.find((check) => check.metric === 'conversion').score, 0);
+  assert.equal(tasks[0].payload.candidate.monthly_videos, 0);
+});
+
 
 (async () => {
   let failed = 0;

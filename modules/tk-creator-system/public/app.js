@@ -2302,7 +2302,7 @@ async function renderAgentCenter() {
     api('/api/invitations/templates').catch(() => []),
     productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
   ]);
-  const standard = reviewData.standard || { version: 1, sample_pass_line: 70, invite_pass_line: 70, orders_base: 1000, views_base: 5000, conversion_base: 10, orders_weight: 30, views_weight: 30, conversion_weight: 30, fans_hard_limit: 1000, fans_score_1000: 3, fans_score_5000: 5, fans_score_50000: 8, fans_score_200000: 10, missing_data_action: '疑', zero_video_action: '第三项计0分，其余照常' };
+  const standard = reviewData.standard || { version: 1, sample_pass_line: 70, invite_pass_line: 50, orders_base: 200, views_base: 5000, conversion_base: 5, orders_weight: 30, views_weight: 30, conversion_weight: 30, fans_hard_limit: 1000, fans_score_1000: 3, fans_score_5000: 5, fans_score_50000: 8, fans_score_200000: 10, missing_data_action: '疑', zero_video_action: '第三项计0分，其余照常' };
   const tabs = [['overview', '概览'], ['templates', '模板与话术库'], ['review', '审核标准'], ['optimize', '优化建议'], ['settings', '设置']];
   const overviewHtml = () => {
     const flows = overview.flows || [];

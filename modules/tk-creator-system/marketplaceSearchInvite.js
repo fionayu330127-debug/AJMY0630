@@ -212,6 +212,7 @@ function createMarketplaceSearchInvite(deps = {}) {
     getAgentRuntime,
     getAgentFlowStates,
     getReviewStandard,
+    agentScoreCandidate,
     writeSyncLog,
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   } = deps;
@@ -250,6 +251,7 @@ function createMarketplaceSearchInvite(deps = {}) {
         queued INTEGER NOT NULL DEFAULT 0,
         skipped_invited INTEGER NOT NULL DEFAULT 0,
         skipped_invalid INTEGER NOT NULL DEFAULT 0,
+        skipped_score INTEGER NOT NULL DEFAULT 0,
         sent_ok INTEGER NOT NULL DEFAULT 0,
         sent_failed INTEGER NOT NULL DEFAULT 0,
         skipped_quota INTEGER NOT NULL DEFAULT 0,
@@ -262,6 +264,7 @@ function createMarketplaceSearchInvite(deps = {}) {
         PRIMARY KEY (shop_id, day)
       )
     `);
+    try { db.exec('ALTER TABLE marketplace_invite_daily_stats ADD COLUMN skipped_score INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
   }
 
   function settingsBundle() {
@@ -449,8 +452,8 @@ function createMarketplaceSearchInvite(deps = {}) {
       fulfillment_rate: item.fulfillmentRate || 0,
       avg_view: item.avgView || numberOr(raw.avg_ec_video_view_count, 0),
       monthly_avg_view: item.avgView || numberOr(raw.avg_ec_video_view_count, 0),
-      monthly_videos: item.videos30d,
-      videos_30d: item.videos30d,
+      monthly_videos: Number(item.videos30d || 0),
+      videos_30d: Number(item.videos30d || 0),
       star: 0,
       total_orders: unitsMin || item.salesCount30d || 0,
       sales_count_30d: unitsMin || item.salesCount30d,
@@ -479,7 +482,19 @@ function createMarketplaceSearchInvite(deps = {}) {
     if (fansLimit && Number(candidate.fans || 0) < fansLimit) {
       return { ok: false, reason: `粉丝数 ${candidate.fans} 低于硬门槛 ${fansLimit}` };
     }
-    return { ok: true, reason: '查找达人筛选通过' };
+    if (typeof agentScoreCandidate !== 'function') {
+      return { ok: false, reason: '缺少邀约评分函数' };
+    }
+    const audit = agentScoreCandidate(candidate, workflow?.config || {});
+    if (!audit || audit.recommendation !== 'auto_pass') {
+      return {
+        ok: false,
+        reason: audit?.reason || '未达到邀约筛选通过线',
+        audit,
+        skipped_score: true,
+      };
+    }
+    return { ok: true, reason: audit.reason || '查找达人筛选通过', audit };
   }
 
   function getCursor(shopId) {
@@ -663,14 +678,7 @@ function createMarketplaceSearchInvite(deps = {}) {
     return db.prepare('SELECT * FROM shops ORDER BY id').all();
   }
 
-  function enqueueCandidate(workflow, candidate) {
-    const audit = {
-      score: 100,
-      recommendation: 'auto_pass',
-      reason: '查找达人官方筛选通过，待发送',
-      review_standard_version: getReviewStandard?.()?.version || null,
-      score_details: [{ name: 'marketplace_search', pass: true, detail: '来自店铺后台查找达人搜索' }],
-    };
+  function enqueueCandidate(workflow, candidate, audit) {
     insertWorkflowTask(workflow.id, 'invite', 'admin_approved', candidate, audit, {
       candidate,
       config_snapshot: workflow.config,
@@ -734,6 +742,7 @@ function createMarketplaceSearchInvite(deps = {}) {
     let queued = 0;
     let skippedInvited = 0;
     let skippedInvalid = 0;
+    let skippedScore = 0;
     const room = Math.max(0, cap.remain - pending);
     for (const raw of page.creators) {
       if (queued >= room) break;
@@ -744,10 +753,11 @@ function createMarketplaceSearchInvite(deps = {}) {
       }
       const accept = candidateAcceptable(candidate, workflow);
       if (!accept.ok) {
-        skippedInvalid += 1;
+        if (accept.skipped_score) skippedScore += 1;
+        else skippedInvalid += 1;
         continue;
       }
-      enqueueCandidate(workflow, candidate);
+      enqueueCandidate(workflow, candidate, accept.audit);
       invited.add(candidate.uid);
       invited.add(candidate.creator_open_id);
       if (candidate.creator_handle) invited.add(candidate.creator_handle);
@@ -787,6 +797,7 @@ function createMarketplaceSearchInvite(deps = {}) {
       queued,
       skipped_invited: skippedInvited,
       skipped_invalid: skippedInvalid,
+      skipped_score: skippedScore,
       last_filter_json: filterKey(filter),
       last_error: '',
     });
@@ -796,6 +807,7 @@ function createMarketplaceSearchInvite(deps = {}) {
       queued,
       skipped_invited: skippedInvited,
       skipped_invalid: skippedInvalid,
+      skipped_score: skippedScore,
       result_count: page.creators.length,
       rotated: rotate,
       filter,
@@ -973,6 +985,8 @@ function createMarketplaceSearchInvite(deps = {}) {
             sent_ok: Number(row?.sent_ok || 0),
             sent_failed: Number(row?.sent_failed || 0),
             skipped_invited: Number(row?.skipped_invited || 0),
+            skipped_invalid: Number(row?.skipped_invalid || 0),
+            skipped_score: Number(row?.skipped_score || 0),
             skipped_quota: Number(row?.skipped_quota || 0),
             rate_limit_backoffs: Number(row?.rate_limit_backoffs || 0),
             last_error: row?.last_error || '',

@@ -716,10 +716,10 @@ CREATE TABLE IF NOT EXISTS review_standards (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   version INTEGER NOT NULL UNIQUE,
   sample_pass_line REAL NOT NULL DEFAULT 70,
-  invite_pass_line REAL NOT NULL DEFAULT 70,
-  orders_base REAL NOT NULL DEFAULT 1000,
+  invite_pass_line REAL NOT NULL DEFAULT 50,
+  orders_base REAL NOT NULL DEFAULT 200,
   views_base REAL NOT NULL DEFAULT 5000,
-  conversion_base REAL NOT NULL DEFAULT 10,
+  conversion_base REAL NOT NULL DEFAULT 5,
   orders_weight REAL NOT NULL DEFAULT 30,
   views_weight REAL NOT NULL DEFAULT 30,
   conversion_weight REAL NOT NULL DEFAULT 30,
@@ -965,10 +965,10 @@ function defaultReviewStandard() {
   return {
     version: 1,
     sample_pass_line: 70,
-    invite_pass_line: 70,
-    orders_base: 1000,
+    invite_pass_line: 50,
+    orders_base: 200,
     views_base: 5000,
-    conversion_base: 10,
+    conversion_base: 5,
     orders_weight: 30,
     views_weight: 30,
     conversion_weight: 30,
@@ -1758,7 +1758,8 @@ function scoreByReviewStandard(item, standard, thresholdType) {
   const views = rowMetricNumber(viewsValue);
   const videos = Number(videosValue || 0);
   const conversion = videos > 0 ? orders / videos : 0;
-  const missing = [ordersValue, viewsValue, videosValue].some((value) => value === undefined || value === null || value === '');
+  // Missing or zero 30-day video count: conversion scores 0; this alone must not trigger missing-data / manual_review.
+  const missing = [ordersValue, viewsValue].some((value) => value === undefined || value === null || value === '');
   const fanScore = fansScoreForValue(Number(item.fans || item.followers || 0), standard);
   const checks = [
     { name: '粉丝数', metric: 'fans', actual: Number(item.fans || item.followers || 0), base: standard.fans_hard_limit, weight: fanScore, score: fanScore },
@@ -1798,7 +1799,7 @@ function scoreByReviewStandard(item, standard, thresholdType) {
     score_details: checks,
     review_standard_version: standard.version,
     rule_source: 'review_standards',
-    score_formula: 'min(实际值÷基准值, 1)×权重；总分为三项之和；视频数为0时第三项计0分',
+    score_formula: 'min(实际值÷基准值, 1)×权重；总分为三项之和；视频数缺失或为0时第三项计0分',
   };
 }
 
@@ -2289,6 +2290,7 @@ function initMarketplaceInvite() {
     getAgentRuntime,
     getAgentFlowStates,
     getReviewStandard,
+    agentScoreCandidate,
     writeSyncLog,
   });
   marketplaceInvite.ensureSchema();
