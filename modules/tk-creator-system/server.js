@@ -11,7 +11,8 @@ const { Pool } = require('pg');
 const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncSampleApplications, syncTikTokShop, normalizeAffiliateCreator } = require('./syncTikTok');
 const { tiktokRequest } = require('./tiktokApi');
 const { createMarketplaceSearchInvite, usesMarketplaceInviteSource, shanghaiDayRange } = require('./marketplaceSearchInvite');
-const { listWorkflowTasks, workflowCreatorSummaryQuery, listWorkflowCreatorSummary, ensureWorkflowRunStateColumn, pauseWorkflowTask, resumeWorkflowTask, getRunningMarketplaceWorkflow, liveInviteTargetWorkflow, invitePacerSummary, parseWorkflowConfig, WORKFLOW_RUN_RUNNING } = require('./workflowTaskList');
+const { listWorkflowTasks, workflowCreatorSummaryQuery, listWorkflowCreatorSummary, attachSampleInviteSources, ensureWorkflowRunStateColumn, pauseWorkflowTask, resumeWorkflowTask, getRunningMarketplaceWorkflow, liveInviteTargetWorkflow, invitePacerSummary, parseWorkflowConfig, WORKFLOW_RUN_RUNNING } = require('./workflowTaskList');
+const { ensureSampleReviewTasks, attachSampleReviewFields, isSampleCenterReviewWorkflow } = require('./sampleCenterReview');
 let marketplaceInvite;
 const { getAppConfig, getAppSecretStatus } = require('./tiktokSecrets');
 
@@ -945,6 +946,11 @@ function agentPendingCount() {
 }
 
 function agentOverviewData() {
+  try {
+    ensureSampleReviewTasks(db, { scoreSample: (sample) => agentScoreSample(sample, {}), nowText });
+  } catch (error) {
+    console.error('[agent] ensure sample reviews failed:', error.message || error);
+  }
   const settings = getAgentSettings();
   const todayRange = shanghaiDayRange();
   const today = todayRange.day;
@@ -3566,7 +3572,11 @@ app.post('/api/agent/workflow/tasks/:id/confirm', async (req, res) => {
     const isSampleApplicationGate = taskRow?.task_type === 'sample_audit' && taskPayload.phase === 'sample_application_review';
     const status = decision === 'reject' ? 'admin_rejected' : (isSampleApplicationGate ? 'application_confirmed' : 'admin_approved');
     db.prepare('UPDATE agent_workflow_tasks SET status = ?, updated_at = ? WHERE id = ?').run(status, nowText(), id);
-    if (decision !== 'reject' && isSampleApplicationGate) {
+    const reviewWorkflow = taskRow?.workflow_id
+      ? db.prepare('SELECT * FROM agent_workflows WHERE id = ?').get(taskRow.workflow_id)
+      : null;
+    const sampleCenterReview = isSampleCenterReviewWorkflow(reviewWorkflow || {});
+    if (decision !== 'reject' && isSampleApplicationGate && !sampleCenterReview) {
       const sample = taskPayload.sample || {};
       const messageAudit = {
         score: taskRow.score || 0,
@@ -3583,7 +3593,7 @@ app.post('/api/agent/workflow/tasks/:id/confirm', async (req, res) => {
       );
       await executeWorkflow(taskRow.workflow_id);
     }
-    if (decision !== 'reject' && taskRow?.task_type === 'sample_audit' && taskPayload.phase === 'final_sample_review') {
+    if (decision !== 'reject' && taskRow?.task_type === 'sample_audit' && taskPayload.phase === 'final_sample_review' && !sampleCenterReview) {
       await executeWorkflow(taskRow.workflow_id);
     }
     recordLearningEvent({
@@ -4890,7 +4900,8 @@ app.get('/api/samples', (req, res) => {
 
   sql += ' ORDER BY s.applied_at DESC';
 
-  const rows = db.prepare(sql).all(...params);
+  ensureSampleReviewTasks(db, { scoreSample: (sample) => agentScoreSample(sample, {}), nowText });
+  const rows = attachSampleReviewFields(db, attachSampleInviteSources(db, db.prepare(sql).all(...params)));
   res.json(rows);
 });
 

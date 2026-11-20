@@ -9,6 +9,7 @@ let curPage = 'invite';
 let curTab = 'all';
 let sSearch = '';
 let sType = '';
+let sAgentReviewFilter = false;
 let samplePage = 1;
 let samplePageSize = 20;
 let lSearch = '';
@@ -191,6 +192,50 @@ function shopTagHtml(shop) {
   const s = shopInfo(shop);
   const cls = shop === 'oku' ? 'st-oku' : (shop === 'mir' ? 'st-mir' : 'st-both');
   return `<span class="shop-tag ${cls}">${s.name}</span>`;
+}
+function sampleTableColspan() {
+  return curStore === 'all' ? 17 : 16;
+}
+function inviteSourceTagHtml(s) {
+  const kind = s?.invite_source_kind;
+  if (kind !== 'workflow' && kind !== 'manual') return '';
+  const label = s?.invite_source_label || (kind === 'workflow' ? '自动化任务' : '人工邀约');
+  const detail = s?.invite_source_detail || '';
+  const cls = kind === 'workflow' ? 'src-workflow' : 'src-manual';
+  const title = esc(detail || label);
+  return `<span class="tag sample-source-tag ${cls}" title="${title}">${esc(label)}</span>`;
+}
+function agentReviewCellHtml(s) {
+  const score = s.agent_score;
+  const rec = workflowRecommendationLabel(s.agent_recommendation);
+  const scoreHtml = score == null || score === '' ? '-' : `${esc(String(score))} 分`;
+  const recHtml = s.agent_recommendation ? `<div class="cm">${esc(rec)}</div>` : '';
+  const reason = s.agent_reason ? ` title="${esc(s.agent_reason)}"` : '';
+  const actions = (s.agent_review_status === 'agent_review' && s.agent_review_task_id)
+    ? `<div class="abtns"><button class="abtn ok" onclick="confirmWorkflowTask(${Number(s.agent_review_task_id)}, 'approve')">确认</button><button class="abtn ng" onclick="confirmWorkflowTask(${Number(s.agent_review_task_id)}, 'reject')">拒绝</button></div>`
+    : (s.agent_review_status ? `<div class="cm">${esc(workflowTaskStatusLabel(s.agent_review_status))}</div>` : '');
+  return `<div${reason}>${scoreHtml}${recHtml}${actions}</div>`;
+}
+function setAgentReviewFilter(on) {
+  sAgentReviewFilter = Boolean(on);
+  samplePage = 1;
+  const box = document.getElementById('sample-agent-review-filter');
+  if (box) box.checked = sAgentReviewFilter;
+  if (curPage === 'sample') renderSampleTable();
+}
+function openSampleCenterPendingReview() {
+  sAgentReviewFilter = true;
+  curTab = 'all';
+  samplePage = 1;
+  if (curPage === 'sample') {
+    const box = document.getElementById('sample-agent-review-filter');
+    if (box) box.checked = true;
+    renderSamplePage();
+  } else {
+    showPage('sample');
+    const box = document.getElementById('sample-agent-review-filter');
+    if (box) box.checked = true;
+  }
 }
 function collabTagHtml(ct, id) {
   const label = collabLabel(ct);
@@ -771,7 +816,7 @@ function switchTab(tab) {
   samplePage = 1;
   renderTabs();
   const tbody = document.getElementById('sample-tbody');
-  if (tbody) tbody.innerHTML = '<tr><td colspan="15"><div class="empty-state"><div>正在加载...</div></div></td></tr>';
+  if (tbody) tbody.innerHTML = `<tr><td colspan="${sampleTableColspan()}"><div class="empty-state"><div>正在加载...</div></div></td></tr>`;
   renderSampleTable();
 }
 
@@ -786,7 +831,7 @@ async function renderSampleTable() {
   try {
     list = await api('/api/samples?' + params.toString());
   } catch (error) {
-    document.getElementById('sample-tbody').innerHTML = `<tr><td colspan="15"><div class="empty-state"><div>${esc(error.message || '样品列表加载失败')}</div></div></td></tr>`;
+    document.getElementById('sample-tbody').innerHTML = `<tr><td colspan="${sampleTableColspan()}"><div class="empty-state"><div>${esc(error.message || '样品列表加载失败')}</div></div></td></tr>`;
     return;
   }
   const showShop = curStore === 'all';
@@ -795,14 +840,14 @@ async function renderSampleTable() {
   if (showShop && !existing) {
     const th = document.createElement('th');
     th.className = 'th-shop'; th.textContent = '店铺';
-    thead.insertBefore(th, thead.children[10]);
+    thead.insertBefore(th, thead.querySelector('.th-collab') || thead.children[11]);
   } else if (!showShop && existing) {
     existing.remove();
   }
 
   const tbody = document.getElementById('sample-tbody');
   if (!list.length) {
-    tbody.innerHTML = `<tr><td colspan="${showShop ? 15 : 14}"><div class="empty-state"><div class="empty-icon">📭</div><div>暂无申请数据</div></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${sampleTableColspan()}"><div class="empty-state"><div class="empty-icon">📭</div><div>暂无申请数据</div></div></td></tr>`;
     document.getElementById('pager-info').innerHTML = pagerHtml('sample', { total: 0, page: 1, pageSize: samplePageSize, totalPages: 1 });
     return;
   }
@@ -824,7 +869,10 @@ async function renderSampleTable() {
   groups.sort((a, b) => {
     return String(b.items[0]?.applied_at || '').localeCompare(String(a.items[0]?.applied_at || ''));
   });
-  const pageMeta = paginate(groups, samplePage, samplePageSize);
+  const visibleGroups = sAgentReviewFilter
+    ? groups.filter((group) => group.items.some((item) => item.agent_review_status === 'agent_review'))
+    : groups;
+  const pageMeta = paginate(visibleGroups, samplePage, samplePageSize);
   samplePage = pageMeta.page;
   document.getElementById('pager-info').innerHTML = pagerHtml('sample', pageMeta);
 
@@ -871,11 +919,13 @@ async function renderSampleTable() {
       ${salesCell}
       ${salesCountCell}
       <td><div class="pc">${productThumb}<div><div class="pn">${productName}</div><div class="ps">${productSku}</div>${sampleExternalMeta(s)}</div></div></td>
+      <td>${inviteSourceTagHtml(s)}</td>
       ${showShop ? `<td>${shopTagHtml(s.shop_id)}</td>` : ''}
       <td class="metric-cell">${fmtCommission(s.commission_rate)}</td>
       <td class="remain-cell ${remainingClass}">${remainingDaysText(s.approve_expiration_at)}</td>
       <td onclick="openCollabModal(event,'${sid}')">${collabTagHtml(s.collab_type, sid)}</td>
       <td>${statusBadge(s.status)}</td>
+      <td>${agentReviewCellHtml(s)}</td>
       <td>${bdHtml}</td>
       <td>${actHtml}</td>
     </tr>`;
@@ -886,10 +936,10 @@ async function renderSampleTable() {
     }
   }).join('')).filter(Boolean).join('');
   try {
-  tbody.innerHTML = rowsHtml || `<tr><td colspan="${showShop ? 15 : 14}"><div class="empty-state"><div>暂无可显示数据</div></div></td></tr>`;
+  tbody.innerHTML = rowsHtml || `<tr><td colspan="${sampleTableColspan()}"><div class="empty-state"><div>暂无可显示数据</div></div></td></tr>`;
   } catch (error) {
     console.error('renderSampleTable failed', error);
-    tbody.innerHTML = `<tr><td colspan="${showShop ? 15 : 14}"><div class="empty-state"><div>列表渲染失败，请刷新后重试</div></div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${sampleTableColspan()}"><div class="empty-state"><div>列表渲染失败，请刷新后重试</div></div></td></tr>`;
   }
   if (badRows.length) toast(`有 ${badRows.length} 条数据暂时无法显示`);
 }
@@ -897,8 +947,10 @@ async function renderSampleTable() {
 function onSampleSearch(v) { sSearch = v.toLowerCase(); samplePage = 1; renderSampleTable(); }
 function setTypeFilter(v) { sType = v; samplePage = 1; renderSampleTable(); }
 function resetFilters() {
-  sSearch = ''; sType = ''; samplePage = 1;
+  sSearch = ''; sType = ''; sAgentReviewFilter = false; samplePage = 1;
   document.querySelectorAll('#page-sample .fi').forEach(el => { if (el.type === 'text') el.value = ''; else if (el.tagName === 'SELECT') el.selectedIndex = 0; });
+  const box = document.getElementById('sample-agent-review-filter');
+  if (box) box.checked = false;
   renderSampleTable();
 }
 function selAll(cb) { document.querySelectorAll('#sample-tbody .checkbox').forEach(c => c.checked = cb.checked); }
@@ -2166,7 +2218,7 @@ function agentSampleApplicationsPanel(rows) {
       </div></td>
     </tr>`).join('');
   return `<div class="module-panel" style="margin-bottom:12px">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>样品审核</h3><div class="module-meta">仅显示被 Agent 邀约或确认消息触达过的样品申请；新申请自动置顶并标记。</div></div><button class="btn btn-outline" onclick="renderAutomationCenter()">立即刷新</button></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>样品审核</h3><div class="module-meta">工作流相关申请仍可在此查看。全部来源（含人工邀约和未匹配申请）的审核台在样品中心。</div></div><button class="btn btn-outline" onclick="renderAutomationCenter()">立即刷新</button></div>
     <div class="table-wrap"><table><thead><tr><th>达人名称和 ID</th><th>店铺</th><th>样品</th><th>申请时间</th><th>达人评分</th><th>是否申请样品</th><th>是否能拍摄</th><th>Agent 判断分析</th><th>状态</th><th>操作</th></tr></thead><tbody>${body || '<tr><td colspan="10"><div class="empty-state">暂无 Agent 触达的样品申请</div></td></tr>'}</tbody></table></div>
     ${pagerHtml('agent-sample', meta)}
   </div>`;
@@ -2362,7 +2414,8 @@ async function generateWorkflowQueue() {
 async function confirmWorkflowTask(id, decision) {
   AGENT_WORKFLOW = await api(`/api/agent/workflow/tasks/${id}/confirm`, { method: 'POST', body: JSON.stringify({ decision }) });
   toast(decision === 'reject' ? '任务已拒绝' : '任务已确认');
-  if (curPage === 'automation') renderAutomationCenter();
+  if (curPage === 'sample') renderSamplePage();
+  else if (curPage === 'automation') renderAutomationCenter();
   else renderAgentCenter();
 }
 
@@ -2422,8 +2475,13 @@ async function renderAgentCenter() {
   const overviewHtml = () => {
     const flows = overview.flows || [];
     const flowCards = flows.map(flow => `<div class="agent-flow-card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><h3>${esc(flow.label)}</h3><button class="agent-switch ${flow.active ? 'on' : ''}" aria-label="${esc(flow.label)}启停" onclick="toggleAgentFlow('${flow.key}', ${!flow.active})"></button></div><div class="module-meta">按当前审核标准 v${esc(standard.version)} 执行</div><div class="agent-flow-meta">上次运行：${esc(flow.last_run_at || '-')}<br>上次结果：${esc(flow.last_result?.result || '-')}<br>下次运行：${esc(flow.next_run_at || '-')}</div><div class="agent-flow-actions"><button class="btn btn-outline" onclick="trialAgentFlow('${flow.key}')">试运行</button></div></div>`).join('');
-    const pending = (overview.pending_items || []).map(row => `<tr onclick="showPage('automation')" style="cursor:pointer"><td>${esc(row.task_type)}</td><td>${esc(row.creator_name || row.uid || '-')}</td><td>${esc(row.reason || '待确认')}</td></tr>`).join('');
-    return `<div class="agent-overview-head"><div><h2 style="margin:0 0 4px">Agent 概览</h2><div class="module-meta">只展示运行状态、今日动作和待处理事项</div></div><div class="agent-runtime"><span class="agent-runtime-status">${overview.runtime?.paused ? '已暂停' : '运行中'}</span><button class="btn ${overview.runtime?.paused ? 'btn-primary' : 'btn-outline'}" onclick="toggleAllAgents(${!overview.runtime?.paused})">${overview.runtime?.paused ? '恢复全部 Agent' : '一键暂停全部 Agent'}</button></div></div><div class="module-grid"><div class="module-panel"><h3>今日已发邀约数</h3><div class="module-num">${overview.today?.sent_invites || 0} <span style="font-size:14px;color:#697586">/ ${overview.today?.invite_limit || 0}</span></div><div class="module-meta">对比每日上限</div></div><div class="module-panel" onclick="showPage('automation')" style="cursor:pointer"><h3>待我确认事项数</h3><div class="module-num">${overview.pending_confirmations || 0}</div><div class="module-meta">点击进入处理队列</div></div><div class="module-panel"><h3>本月 AI 费用</h3><div class="module-num">¥${overview.month_ai_cost || 0} <span style="font-size:14px;color:#697586">/ ¥${overview.month_ai_cost_limit || 0}</span></div><div class="module-meta">当前未接入 AI，费用暂为 0</div></div></div><div class="agent-flow-grid">${flowCards || '<div class="agent-empty">暂无任务流</div>'}</div>${workflowListPanel({ showActions: false, nameHandler: 'openWorkflowFromTaskList', title: '任务列表', panelClass: 'agent-list-panel', meta: '所有自动化工作流任务，含历史任务。点击名称可进入工作流详情。可对单个任务暂停或重新启动。边搜边邀进度显示在对应任务下。', pacer: AGENT_INVITE_PACER })}<div class="agent-config-grid"><div class="agent-list-panel"><h3>待我确认</h3><table><thead><tr><th>类型</th><th>达人</th><th>说明</th></tr></thead><tbody>${pending || '<tr><td colspan="3"><div class="agent-empty">暂无待确认事项</div></td></tr>'}</tbody></table></div></div>`;
+    const pending = (overview.pending_items || []).map(row => {
+        const isSampleReview = row.task_type === 'sample_audit' || row.task_type === 'sample_message';
+        const typeLabel = isSampleReview ? workflowTaskTypeLabel(row.task_type, row) : (row.task_type || '-');
+        const click = isSampleReview ? 'openSampleCenterPendingReview()' : "showPage('automation')";
+        return `<tr onclick="${click}" style="cursor:pointer"><td>${esc(typeLabel)}</td><td>${esc(row.creator_name || row.uid || '-')}</td><td>${esc(row.reason || '待确认')}</td></tr>`;
+      }).join('');
+    return `<div class="agent-overview-head"><div><h2 style="margin:0 0 4px">Agent 概览</h2><div class="module-meta">只展示运行状态、今日动作和待处理事项</div></div><div class="agent-runtime"><span class="agent-runtime-status">${overview.runtime?.paused ? '已暂停' : '运行中'}</span><button class="btn ${overview.runtime?.paused ? 'btn-primary' : 'btn-outline'}" onclick="toggleAllAgents(${!overview.runtime?.paused})">${overview.runtime?.paused ? '恢复全部 Agent' : '一键暂停全部 Agent'}</button></div></div><div class="module-grid"><div class="module-panel"><h3>今日已发邀约数</h3><div class="module-num">${overview.today?.sent_invites || 0} <span style="font-size:14px;color:#697586">/ ${overview.today?.invite_limit || 0}</span></div><div class="module-meta">对比每日上限</div></div><div class="module-panel" onclick="openSampleCenterPendingReview()" style="cursor:pointer"><h3>待我确认事项数</h3><div class="module-num">${overview.pending_confirmations || 0}</div><div class="module-meta">点击进入样品中心待审核</div></div><div class="module-panel"><h3>本月 AI 费用</h3><div class="module-num">¥${overview.month_ai_cost || 0} <span style="font-size:14px;color:#697586">/ ¥${overview.month_ai_cost_limit || 0}</span></div><div class="module-meta">当前未接入 AI，费用暂为 0</div></div></div><div class="agent-flow-grid">${flowCards || '<div class="agent-empty">暂无任务流</div>'}</div>${workflowListPanel({ showActions: false, nameHandler: 'openWorkflowFromTaskList', title: '任务列表', panelClass: 'agent-list-panel', meta: '所有自动化工作流任务，含历史任务。点击名称可进入工作流详情。可对单个任务暂停或重新启动。边搜边邀进度显示在对应任务下。', pacer: AGENT_INVITE_PACER })}<div class="agent-config-grid"><div class="agent-list-panel"><h3>待我确认</h3><table><thead><tr><th>类型</th><th>达人</th><th>说明</th></tr></thead><tbody>${pending || '<tr><td colspan="3"><div class="agent-empty">暂无待确认事项</div></td></tr>'}</tbody></table></div></div>`;
   };
   const settingsHtml = `<div class="agent-settings-section module-panel"><h3>TikTok Shop 授权</h3><div class="module-meta" style="margin-bottom:10px">Redirect URI：${esc(auth.redirect_uri || '')}</div><div class="agent-list">${(auth.shops || []).map(shop => `<div class="agent-row"><div><strong>${esc(shop.name)}</strong><div class="agent-load">Access Token：${shop.has_access_token ? '已保存' : '缺失'} · Refresh Token：${shop.has_refresh_token ? '已保存' : '缺失'} · shop_cipher：${shop.has_shop_cipher ? '已保存' : '缺失'}</div><div class="agent-load">上次同步：${esc(shop.last_sync_at || '-')} ${esc(shop.last_sync_message || '')}</div></div><button class="btn ${shop.authorized ? 'btn-outline' : 'btn-primary'}" onclick="openTikTokAuth('${shop.id}')">${shop.authorized ? '重新授权' : '去授权'}</button></div>`).join('') || '<div class="agent-empty">暂无店铺</div>'}</div></div><div class="agent-settings-section module-panel"><div style="display:flex;justify-content:space-between;align-items:center"><h3>BD 成员</h3><button class="btn btn-outline" onclick="syncBDMembers()">同步员工名单</button></div><div class="agent-list">${BD_LIST.map(b => `<div class="agent-row"><div><strong>${esc(b.name)}</strong><div class="agent-load">系统员工 · 负责 ${b.load || 0} 个达人 · 企微 ${esc(b.wecom_userid || '未配置')}</div></div></div>`).join('') || '<div class="agent-empty">暂无 BD 成员</div>'}</div></div>${agentTemplateManagerHtml()}<div class="agent-config-grid"><div class="module-panel"><h3>话术模板</h3><div class="form-row"><label class="form-label">自动邀约话术</label><textarea class="bd-note-ta" id="agent-invite-template">${esc(settings.invite_template || '')}</textarea></div><div class="form-row"><label class="form-label">BD 跟进话术</label><textarea class="bd-note-ta" id="agent-followup-template">${esc(settings.followup_template || '')}</textarea></div></div><div class="module-panel"><h3>Agent 配置</h3><div class="form-row"><label class="form-label">复盘口径</label><textarea class="bd-note-ta" id="agent-review-rules">${esc(settings.review_rules || '')}</textarea></div><div class="form-row-2"><div class="form-row"><label class="form-label">邀约每日上限</label><input class="form-input" id="agent-invite-limit" type="number" min="1" value="${esc(settings.invite_daily_limit ?? 1000)}"></div><div class="form-row"><label class="form-label">跟进间隔（天）</label><input class="form-input" id="agent-followup-days" type="number" min="1" value="${esc(settings.followup_interval_days ?? 3)}"></div></div><div class="form-row"><label class="form-label">Agent 每日自动运行时间</label><input class="form-input" id="agent-daily-run-time" type="time" value="${String(settings.agent_daily_hour ?? 8).padStart(2, '0')}:${String(settings.agent_daily_minute ?? 30).padStart(2, '0')}"></div><div class="form-row"><label class="form-label">自动分配策略</label><textarea class="bd-note-ta" id="agent-assign-strategy">${esc(settings.assign_strategy || '')}</textarea></div><button class="btn btn-primary" onclick="saveAgentSettings()">保存 Agent 配置</button></div></div>`;
   const settingsExtrasHtml = `<div class="module-panel" style="margin-top:12px"><h3>运行参数</h3><div class="form-row-2"><div class="form-row"><label class="form-label">每天成功发送邀约目标（oku 默认 1000）</label><input class="form-input" id="agent-invite-target-count" type="number" min="1" value="${esc(settings.invite_target_count ?? 1000)}"></div><div class="form-row"><label class="form-label">样品申请每日巡检时间</label><input class="form-input" id="agent-sample-sync-time" type="time" value="${String(settings.sample_sync_hour ?? 7).padStart(2, '0')}:00"></div></div><div class="form-row-2"><div class="form-row"><label class="form-label">查找达人搜索间隔（秒，60-120）</label><input class="form-input" id="agent-marketplace-search-interval" type="number" min="60" max="120" value="${esc(Math.round((Number(settings.marketplace_search_interval_ms || 90000) / 1000)))}"></div><div class="form-row"><label class="form-label">邀约发送间隔（秒，默认 20）</label><input class="form-input" id="agent-marketplace-send-interval" type="number" min="1" value="${esc(Math.round((Number(settings.marketplace_invite_send_interval_ms || 20000) / 1000)))}"></div></div><div class="form-row"><label class="form-label">分店每日上限 JSON（mir 会再被官方周剩余额度封顶）</label><input class="form-input" id="agent-invite-limit-by-shop" value="${esc(settings.invite_daily_limit_by_shop || '{\"oku\":1000,\"mir\":1000}')}"></div><div class="form-row"><label class="form-label">开启查找达人全天匀速自动邀约</label><select class="form-input" id="agent-marketplace-autorun"><option value="1" ${String(settings.marketplace_search_invite_autorun ?? 1) !== '0' ? 'selected' : ''}>开启</option><option value="0" ${String(settings.marketplace_search_invite_autorun ?? 1) === '0' ? 'selected' : ''}>关闭</option></select></div></div>`;

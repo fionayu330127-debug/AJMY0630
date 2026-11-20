@@ -13,6 +13,7 @@ const {
   listWorkflowTasks,
   workflowCreatorSummaryQuery,
   listWorkflowCreatorSummary,
+  attachSampleInviteSources,
   creatorProfileUrl,
   ensureWorkflowRunStateColumn,
   listRunningWorkflows,
@@ -199,7 +200,7 @@ test('listWorkflowTasks aggregates unique sent, applicants, and confirmed review
   assert.equal(byId[1].display_name, '查找达人边搜边邀');
   assert.equal(byId[1].status, '进行中');
   assert.equal(byId[1].invited_count, 4); // u1,u2,u5,u6 — queued/cancelled/pending and confirmation excluded
-  assert.equal(byId[1].sample_applicant_count, 5); // u1,u2,u5 plus task-only u7 and pending-invite u8; u9 stays out
+  assert.equal(byId[1].sample_applicant_count, 3); // u1,u2,u5 post-invite same product; u7 task-only, u8 unsent invite, u9 uninvited excluded
   assert.equal(byId[1].confirmed_review_count, 2); // u1 application_confirmed, u2 admin_approved — 管理员已确认
   assert.equal(byId[1].admin_confirmed_review_count, 2);
   assert.equal(byId[1].agent_review_count, 4); // u1,u2,u5,u7 Agent reviewed sample_audit; invite-scored u6 excluded
@@ -266,7 +267,8 @@ test('creator summary kinds return sent, applicant, and confirmed unique creator
   const applicants = db.prepare(workflowCreatorSummaryQuery('applicants').sql).all(...workflowCreatorSummaryQuery('applicants').params(1));
   const confirmed = db.prepare(workflowCreatorSummaryQuery('confirmed').sql).all(...workflowCreatorSummaryQuery('confirmed').params(1));
   assert.equal(sent.length, 4);
-  assert.equal(applicants.length, 5);
+  assert.equal(applicants.length, 3);
+  assert.deepEqual(applicants.map((row) => row.uid).sort(), ['u1', 'u2', 'u5']);
   assert.equal(confirmed.length, 2);
   assert.ok(confirmed.every((row) => ['application_confirmed', 'admin_approved', 'executed'].includes(row.status)));
   db.close();
@@ -434,6 +436,95 @@ test('live invite progress attaches to the running marketplace task', () => {
   const fallback = liveInviteTargetWorkflow(after);
   assert.ok(fallback);
   assert.equal(fallback.status, '已暂停');
+  db.close();
+});
+
+
+test('sample applicant count requires a sent workflow invite, same product, and applied_at at or after the invite', () => {
+  const db = createFixtureDb();
+  db.prepare('INSERT INTO products (id, name) VALUES (?, ?), (?, ?)').run(9, 'Lumbar Belt', 36, 'Pull-up Bar');
+  db.prepare(`INSERT INTO agent_workflows (id, name, active, run_state, config_json, created_at, updated_at)
+    VALUES (9, '自动化工作流 2026/11/16 下午2:21:46', 1, 'paused', '{"source":"marketplace_search","shop":"oku","product_ids":[9]}', '2026-11-16 06:22:21', '2026-11-19 12:24:07')`).run();
+  const insertInvite = db.prepare(`INSERT INTO invitation_records
+    (shop_id, source, uid, creator_name, creator_handle, template_type, product_id, product_ids, status, created_at, sent_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const insertSample = db.prepare(`INSERT INTO samples (id, uid, shop_id, creator_name, creator_handle, status, product_id, applied_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+
+  // anko: invited for product 9, later applied for product 9 and 36 at the same time.
+  insertInvite.run('oku', 'workflow:9', 'anko', 'あんこ', 'anko_1974', 'collab', 9, '[9]', 'sent', '2026-11-19 13:43:50', '2026-11-19 13:43:50');
+  insertSample.run('s-anko-36', 'anko', 'oku', 'あんこ', 'anko_1974', 'pending', 36, '2026-11-20 05:43:52');
+  insertSample.run('s-anko-9', 'anko', 'oku', 'あんこ', 'anko_1974', 'pending', 9, '2026-11-20 05:43:52');
+  // gesshi: invited for product 9 after an older different-product application.
+  insertInvite.run('oku', 'workflow:9', 'gesshi', 'げっしるい', 'gesshi_rui', 'collab', 9, '[9]', 'sent', '2026-11-19 13:51:45', '2026-11-19 13:51:45');
+  insertSample.run('s-gesshi', 'gesshi', 'oku', 'げっしるい', 'gesshi_rui', 'published', 57, '2026-07-29 02:51:03');
+  // buixuan: invited for product 9 after older applications for other products.
+  insertInvite.run('oku', 'workflow:9', 'buixuan', 'Bùi Xuân Kiên', 'buixuankien', 'collab', 9, '[9]', 'sent', '2026-11-19 13:53:25', '2026-11-19 13:53:25');
+  insertSample.run('s-kien-50', 'buixuan', 'oku', 'Bùi Xuân Kiên', 'buixuankien', 'published', 50, '2026-07-18 10:02:31');
+  insertSample.run('s-kien-57', 'buixuan', 'oku', 'Bùi Xuân Kiên', 'buixuankien', 'cancelled', 57, '2026-07-20 10:02:24');
+  // Same product but applied before this workflow's invite.
+  insertInvite.run('oku', 'workflow:9', 'early', 'Early', 'early_user', 'collab', 9, '["9"]', 'sent', '2026-11-19 13:54:00', '2026-11-19 13:54:00');
+  insertSample.run('s-early', 'early', 'oku', 'Early', 'early_user', 'pending', 9, '2026-11-18 10:00:00');
+  // Same product, applied exactly at sent time, should count.
+  insertInvite.run('oku', 'workflow:9', 'same-time', 'Same', 'same_time', 'collab', 9, '[9]', 'sent', '2026-11-19 14:00:00', '2026-11-19 14:00:00');
+  insertSample.run('s-same-time', 'same-time', 'oku', 'Same', 'same_time', 'pending', 9, '2026-11-19 14:00:00');
+
+  const rows = listWorkflowTasks(db);
+  const workflow9 = rows.find((row) => Number(row.id) === 9);
+  assert.equal(workflow9.sample_applicant_count, 2); // anko + same-time; gesshi/buixuan/early excluded
+
+  const applicants = listWorkflowCreatorSummary(db, 9, 'applicants');
+  assert.deepEqual(applicants.map((row) => row.creator_handle).sort(), ['anko_1974', 'same_time']);
+  const anko = applicants.find((row) => row.creator_handle === 'anko_1974');
+  assert.equal(anko.product_name, 'Lumbar Belt');
+  assert.equal(anko.applied_at, '2026-11-20 05:43:52');
+  db.close();
+});
+
+test('sample center tags only ERP workflow and invitation-center sources', () => {
+  const db = createFixtureDb();
+  db.prepare('INSERT INTO products (id, name) VALUES (?, ?)').run(9, 'Lumbar Belt');
+  db.prepare(`INSERT INTO agent_workflows (id, name, active, run_state, config_json, created_at, updated_at)
+    VALUES (9, '自动化工作流 2026/11/16 下午2:21:46', 1, 'paused', '{"source":"marketplace_search"}', '2026-11-16 06:22:21', '2026-11-19 12:24:07')`).run();
+  const insertInvite = db.prepare(`INSERT INTO invitation_records
+    (shop_id, source, uid, creator_name, creator_handle, template_type, product_id, product_ids, status, created_at, sent_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+  const insertSample = db.prepare(`INSERT INTO samples (id, uid, shop_id, creator_name, creator_handle, status, product_id, applied_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+
+  insertInvite.run('oku', 'workflow:9', 'auto-uid', 'Auto', 'auto_user', 'collab', 9, '[9]', 'sent', '2026-11-19 13:00:00', '2026-11-19 13:00:00');
+  insertSample.run('s-auto', 'auto-uid', 'oku', 'Auto', 'auto_user', 'pending', 9, '2026-11-20 05:00:00');
+  insertSample.run('s-auto-other', 'auto-uid', 'oku', 'Auto', 'auto_user', 'pending', 36, '2026-11-20 05:00:00');
+
+  insertInvite.run('oku', 'shop_pool', 'manual-uid', 'Manual', 'manual_user', 'collab', 9, '["9"]', 'sent', '2026-11-18 08:00:00', '2026-11-18 08:00:00');
+  insertSample.run('s-manual', 'manual-uid', 'oku', 'Manual', 'manual_user', 'pending', 9, '2026-11-18 12:00:00');
+
+  insertInvite.run('oku', 'library', 'lib-uid', 'Lib', 'lib_user', 'collab', 9, '[9]', 'sent', '2026-11-17 08:00:00', '2026-11-17 08:00:00');
+  insertSample.run('s-lib', 'lib-uid', 'oku', 'Lib', 'lib_user', 'pending', 9, '2026-11-17 09:00:00');
+
+  insertSample.run('s-none', 'none-uid', 'oku', 'None', 'none_user', 'pending', 9, '2026-11-20 05:00:00');
+
+  // Both a manual invite and a later workflow invite; application after both -> latest (workflow) wins.
+  insertInvite.run('oku', 'shop_pool', 'both-uid', 'Both', 'both_user', 'collab', 9, '[9]', 'sent', '2026-11-18 08:00:00', '2026-11-18 08:00:00');
+  insertInvite.run('oku', 'workflow:9', 'both-uid', 'Both', 'both_user', 'collab', 9, '[9]', 'sent', '2026-11-19 13:00:00', '2026-11-19 13:00:00');
+  insertSample.run('s-both', 'both-uid', 'oku', 'Both', 'both_user', 'pending', 9, '2026-11-20 05:00:00');
+
+  const tagged = attachSampleInviteSources(db, db.prepare('SELECT * FROM samples WHERE id LIKE ?').all('s-%'));
+  const byId = Object.fromEntries(tagged.map((row) => [row.id, row]));
+
+  assert.equal(byId['s-auto'].invite_source_kind, 'workflow');
+  assert.equal(byId['s-auto'].invite_source_label, '自动化任务：自动化工作流 2026/11/16 下午2:21:46');
+  assert.equal(byId['s-auto'].invite_workflow_id, 9);
+  assert.equal(byId['s-auto-other'].invite_source_kind, null);
+  assert.equal(byId['s-auto-other'].invite_source_label, '');
+  assert.equal(byId['s-manual'].invite_source_kind, 'manual');
+  assert.equal(byId['s-manual'].invite_source_label, '人工邀约（邀约中心 · 达人池）');
+  assert.equal(byId['s-lib'].invite_source_kind, 'manual');
+  assert.equal(byId['s-lib'].invite_source_label, '人工邀约（邀约中心 · 合作达人库）');
+  assert.equal(byId['s-none'].invite_source_kind, null);
+  assert.equal(byId['s-none'].invite_source_label, '');
+  assert.equal(byId['s-both'].invite_source_kind, 'workflow');
+  assert.equal(byId['s-both'].invite_source_label, '自动化任务：自动化工作流 2026/11/16 下午2:21:46');
   db.close();
 });
 

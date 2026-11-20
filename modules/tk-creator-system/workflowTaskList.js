@@ -116,6 +116,192 @@ function laterText(left, right) {
   return rightDate.getTime() >= leftDate.getTime() ? right : left;
 }
 
+
+function sqlNormalizedInviteProductIds(inviteAlias) {
+  return `',' || REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(${inviteAlias}.product_ids, ''), ' ', ''), '"', ''), '[', ''), ']', '') || ','`;
+}
+
+function sqlInviteProductMatchesSample(inviteAlias, sampleAlias) {
+  return `(
+    ${sampleAlias}.product_id IS NOT NULL
+    AND (
+      CAST(${inviteAlias}.product_id AS TEXT) = CAST(${sampleAlias}.product_id AS TEXT)
+      OR instr(${sqlNormalizedInviteProductIds(inviteAlias)}, ',' || CAST(${sampleAlias}.product_id AS TEXT) || ',') > 0
+    )
+  )`;
+}
+
+// A sample counts for a workflow only when this workflow successfully invited
+// the same creator for the same product, and applied_at is at or after that
+// invite's sent time (sent_at, else created_at). Confirmation messages and
+// unsent invites do not count. The old sample_audit/sample_message fallback is
+// intentionally omitted so older or wrong-product applications are not attributed.
+function sqlSampleIsWorkflowApplicant(sampleAlias, sourceSql) {
+  const inviteAlias = `${sampleAlias}_wf_invite`;
+  return `EXISTS (
+    SELECT 1 FROM invitation_records ${inviteAlias}
+    WHERE ${inviteAlias}.source = ${sourceSql}
+      AND ${inviteAlias}.uid = ${sampleAlias}.uid
+      AND ${inviteAlias}.status = 'sent'
+      AND COALESCE(${inviteAlias}.template_type, '') NOT IN ('confirmation')
+      AND ${sqlInviteProductMatchesSample(inviteAlias, sampleAlias)}
+      AND datetime(${sampleAlias}.applied_at) >= datetime(COALESCE(${inviteAlias}.sent_at, ${inviteAlias}.created_at))
+  )`;
+}
+
+function inviteEventAt(row = {}) {
+  return row.sent_at || row.created_at || '';
+}
+
+function productIdsContain(raw, productId) {
+  if (productId == null || productId === '') return false;
+  const normalized = `,${String(raw || '').replace(/[ \]"\[]/g, '')},`;
+  return normalized.includes(`,${String(productId)},`);
+}
+
+function invitationMatchesSampleProduct(invite, sample) {
+  if (sample == null || sample.product_id == null || sample.product_id === '') return false;
+  const productId = String(sample.product_id);
+  if (invite.product_id != null && invite.product_id !== '' && String(invite.product_id) === productId) return true;
+  return productIdsContain(invite.product_ids, productId);
+}
+
+function invitationAppliesToSample(invite, sample) {
+  if (!invite || !sample) return false;
+  if (String(invite.uid || '') !== String(sample.uid || '')) return false;
+  if (String(invite.status || '') !== 'sent') return false;
+  if (String(invite.template_type || '') === 'confirmation') return false;
+  if (!invitationMatchesSampleProduct(invite, sample)) return false;
+  const appliedAt = String(sample.applied_at || '');
+  const invitedAt = String(inviteEventAt(invite));
+  if (!appliedAt || !invitedAt) return false;
+  return appliedAt >= invitedAt;
+}
+
+function workflowIdFromInviteSource(source) {
+  const match = String(source || '').match(/^workflow:(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function classifyInviteSource(source) {
+  const value = String(source || '');
+  if (!value) return 'unmatched';
+  if (value.startsWith('workflow_sample:')) return 'unmatched';
+  if (/^workflow:\d+$/.test(value)) return 'workflow';
+  return 'manual';
+}
+
+function manualInviteSourceLabel(source) {
+  const value = String(source || '');
+  if (value === 'shop_pool') return '人工邀约（邀约中心 · 达人池）';
+  if (value === 'library') return '人工邀约（邀约中心 · 合作达人库）';
+  if (value === 'import') return '人工邀约（邀约中心 · 导入）';
+  return '人工邀约（邀约中心）';
+}
+
+function pickLatestMatchingInvite(invites, sample) {
+  const matches = (invites || []).filter((invite) => invitationAppliesToSample(invite, sample));
+  matches.sort((left, right) => {
+    const leftAt = inviteEventAt(left);
+    const rightAt = inviteEventAt(right);
+    if (leftAt !== rightAt) return rightAt.localeCompare(leftAt);
+    return Number(right.id || 0) - Number(left.id || 0);
+  });
+  return matches[0] || null;
+}
+
+function attachSampleInviteSources(db, rows = []) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return list;
+  const uids = [...new Set(list.map((row) => row.uid).filter((uid) => uid != null && String(uid) !== ''))];
+  const invitesByUid = new Map();
+  const chunkSize = 200;
+  for (let offset = 0; offset < uids.length; offset += chunkSize) {
+    const chunk = uids.slice(offset, offset + chunkSize);
+    const placeholders = chunk.map(() => '?').join(',');
+    const invites = db.prepare(`
+      SELECT id, source, uid, product_id, product_ids, status, template_type, sent_at, created_at
+      FROM invitation_records
+      WHERE uid IN (${placeholders})
+        AND status = 'sent'
+        AND COALESCE(template_type, '') NOT IN ('confirmation')
+    `).all(...chunk);
+    for (const invite of invites) {
+      const key = String(invite.uid);
+      if (!invitesByUid.has(key)) invitesByUid.set(key, []);
+      invitesByUid.get(key).push(invite);
+    }
+  }
+
+  const workflowIds = new Set();
+  const chosen = list.map((sample) => pickLatestMatchingInvite(invitesByUid.get(String(sample.uid || '')) || [], sample));
+  chosen.forEach((invite) => {
+    const workflowId = workflowIdFromInviteSource(invite?.source);
+    if (workflowId) workflowIds.add(workflowId);
+  });
+  const workflowNames = new Map();
+  if (workflowIds.size) {
+    const ids = [...workflowIds];
+    const placeholders = ids.map(() => '?').join(',');
+    db.prepare(`SELECT id, name, active FROM agent_workflows WHERE id IN (${placeholders})`).all(...ids).forEach((row) => {
+      workflowNames.set(Number(row.id), workflowDisplayName(row));
+    });
+  }
+
+  return list.map((sample, index) => {
+    const invite = chosen[index];
+    if (!invite) {
+      return {
+        ...sample,
+        invite_source_kind: null,
+        invite_source_label: '',
+        invite_source_detail: '',
+        invite_source: null,
+        invite_workflow_id: null,
+        invite_workflow_name: null,
+        matched_invitation_record_id: null,
+      };
+    }
+    const kind = classifyInviteSource(invite.source);
+    if (kind !== 'workflow' && kind !== 'manual') {
+      return {
+        ...sample,
+        invite_source_kind: null,
+        invite_source_label: '',
+        invite_source_detail: '',
+        invite_source: null,
+        invite_workflow_id: null,
+        invite_workflow_name: null,
+        matched_invitation_record_id: null,
+      };
+    }
+    if (kind === 'workflow') {
+      const workflowId = workflowIdFromInviteSource(invite.source);
+      const workflowName = workflowNames.get(workflowId) || (workflowId ? `工作流 #${workflowId}` : '');
+      return {
+        ...sample,
+        invite_source_kind: 'workflow',
+        invite_source_label: workflowName ? `自动化任务：${workflowName}` : '自动化任务',
+        invite_source_detail: workflowName ? `由自动化工作流「${workflowName}」发送的邀约` : '由自动化工作流发送的邀约',
+        invite_source: invite.source,
+        invite_workflow_id: workflowId,
+        invite_workflow_name: workflowName || null,
+        matched_invitation_record_id: invite.id,
+      };
+    }
+    return {
+      ...sample,
+      invite_source_kind: 'manual',
+      invite_source_label: manualInviteSourceLabel(invite.source),
+      invite_source_detail: `ERP 邀约中心发出，来源标记为 ${invite.source || 'unknown'}`,
+      invite_source: invite.source,
+      invite_workflow_id: null,
+      invite_workflow_name: null,
+      matched_invitation_record_id: invite.id,
+    };
+  });
+}
+
 function mapWorkflowTaskRow(row, context = {}) {
   const active = Number(row.active) === 1;
   const runState = normalizeWorkflowRunState(row.run_state);
@@ -179,23 +365,9 @@ function listWorkflowTasks(db, options = {}) {
         WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS invited_count,
       (SELECT COUNT(DISTINCT r.uid) FROM invitation_records r
         WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS sent_invite_count,
-      (SELECT COUNT(DISTINCT uid) FROM (
-        SELECT s.uid AS uid
-        FROM samples s
-        JOIN invitation_records r
-          ON r.source = 'workflow:' || w.id
-         AND r.uid = s.uid
-         AND COALESCE(r.template_type, '') NOT IN ('confirmation')
+      (SELECT COUNT(DISTINCT s.uid) FROM samples s
         WHERE s.applied_at IS NOT NULL
-        UNION
-        SELECT t.uid
-        FROM agent_workflow_tasks t
-        JOIN samples s2 ON CAST(s2.id AS TEXT) = CAST(t.sample_id AS TEXT)
-        WHERE t.workflow_id = w.id
-          AND t.task_type IN ('sample_audit', 'sample_message')
-          AND IFNULL(t.uid, '') <> ''
-          AND s2.applied_at IS NOT NULL
-      )) AS sample_applicant_count,
+          AND ${sqlSampleIsWorkflowApplicant('s', "'workflow:' || w.id")}) AS sample_applicant_count,
       (SELECT COUNT(DISTINCT t4.uid) FROM agent_workflow_tasks t4
         WHERE t4.workflow_id = w.id
           AND t4.task_type = 'sample_audit'
@@ -253,6 +425,7 @@ function listWorkflowTasks(db, options = {}) {
       ) AS last_activity_at
     FROM agent_workflows w
     LEFT JOIN agent_workflow_tasks t ON t.workflow_id = w.id
+    WHERE IFNULL(json_extract(w.config_json, '$.source'), '') <> 'sample_center'
     GROUP BY w.id
   `).all();
 
@@ -533,6 +706,8 @@ function workflowCreatorSummaryQuery(kind) {
     };
   }
   if (kind === 'applicants') {
+    const applicantMatch = sqlSampleIsWorkflowApplicant('s', '?');
+    const latestMatch = sqlSampleIsWorkflowApplicant('s2', '?');
     return {
       sql: `
         SELECT s.uid, s.creator_name, s.creator_handle, s.shop_id, s.status AS sample_status,
@@ -540,24 +715,21 @@ function workflowCreatorSummaryQuery(kind) {
         FROM samples s
         LEFT JOIN products p ON p.id = s.product_id
         WHERE s.applied_at IS NOT NULL
-          AND (
-            EXISTS (
-              SELECT 1 FROM invitation_records r
-              WHERE r.source = ?
-                AND r.uid = s.uid
-                AND COALESCE(r.template_type, '') NOT IN ('confirmation')
-            )
-            OR EXISTS (
-              SELECT 1 FROM agent_workflow_tasks t
-              WHERE t.workflow_id = ?
-                AND t.task_type IN ('sample_audit', 'sample_message')
-                AND (t.uid = s.uid OR CAST(t.sample_id AS TEXT) = CAST(s.id AS TEXT))
-            )
+          AND ${applicantMatch}
+          AND s.id = (
+            SELECT s2.id FROM samples s2
+            WHERE s2.uid = s.uid
+              AND s2.applied_at IS NOT NULL
+              AND ${latestMatch}
+            ORDER BY datetime(s2.applied_at) DESC, s2.id DESC
+            LIMIT 1
           )
-        GROUP BY s.uid
         ORDER BY datetime(s.applied_at) DESC, s.id DESC
       `,
-      params: (workflowId) => [`workflow:${workflowId}`, workflowId],
+      params: (workflowId) => {
+        const source = `workflow:${Number(workflowId || 0)}`;
+        return [source, source];
+      },
     };
   }
   if (kind === 'agent') {
@@ -618,6 +790,13 @@ module.exports = {
   listWorkflowTasks,
   workflowCreatorSummaryQuery,
   listWorkflowCreatorSummary,
+  sqlInviteProductMatchesSample,
+  sqlSampleIsWorkflowApplicant,
+  invitationMatchesSampleProduct,
+  invitationAppliesToSample,
+  classifyInviteSource,
+  attachSampleInviteSources,
+  pickLatestMatchingInvite,
   creatorProfileUrl,
   mapCreatorReviewRow,
   ensureWorkflowRunStateColumn,
