@@ -11,6 +11,7 @@ const { Pool } = require('pg');
 const { ensureSyncSchema, syncAffiliateCreators, syncAffiliateOrders, syncMissingProductImages, syncProducts, syncSampleApplications, syncTikTokShop, normalizeAffiliateCreator } = require('./syncTikTok');
 const { tiktokRequest } = require('./tiktokApi');
 const { createMarketplaceSearchInvite, usesMarketplaceInviteSource, shanghaiDayRange } = require('./marketplaceSearchInvite');
+const { listWorkflowTasks, workflowCreatorSummaryQuery } = require('./workflowTaskList');
 let marketplaceInvite;
 const { getAppConfig, getAppSecretStatus } = require('./tiktokSecrets');
 
@@ -958,6 +959,7 @@ function agentOverviewData() {
     month_ai_cost_limit: Number(settings.monthly_ai_cost_limit || 0),
     standard: getReviewStandard(),
     marketplace_invite: marketplaceInvite ? marketplaceInvite.status() : null,
+    workflow_tasks: workflowList(),
   };
 }
 
@@ -2444,74 +2446,19 @@ async function executeWorkflow(workflowId = null, options = {}) {
 }
 
 function workflowList() {
-  return db.prepare(`
-    SELECT
-      w.*,
-      COUNT(t.id) AS task_count,
-      SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
-      (SELECT COUNT(DISTINCT r.uid) FROM invitation_records r WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS sent_invite_count,
-      (SELECT COUNT(DISTINCT t2.uid) FROM agent_workflow_tasks t2
-        JOIN samples s2 ON CAST(s2.id AS TEXT) = CAST(t2.sample_id AS TEXT)
-        WHERE t2.workflow_id = w.id AND t2.task_type = 'sample_audit' AND t2.status = 'agent_review'
-          AND EXISTS (
-            SELECT 1 FROM invitation_records wr2
-            WHERE wr2.source = 'workflow:' || w.id AND wr2.template_type = 'collab'
-              AND wr2.uid = s2.uid
-              AND (wr2.product_id = s2.product_id OR instr(COALESCE(wr2.product_ids, ''), '"' || s2.product_id || '"') > 0)
-          )) AS sample_pending_count,
-      (SELECT COUNT(DISTINCT t3.uid) FROM agent_workflow_tasks t3
-        JOIN samples s3 ON CAST(s3.id AS TEXT) = CAST(t3.sample_id AS TEXT)
-        WHERE t3.workflow_id = w.id AND t3.task_type = 'sample_audit' AND t3.status = 'agent_review'
-          AND t3.recommendation IN ('auto_pass', 'review_pass')
-          AND EXISTS (
-            SELECT 1 FROM invitation_records wr3
-            WHERE wr3.source = 'workflow:' || w.id AND wr3.template_type = 'collab'
-              AND wr3.uid = s3.uid
-              AND (wr3.product_id = s3.product_id OR instr(COALESCE(wr3.product_ids, ''), '"' || s3.product_id || '"') > 0)
-          )) AS sample_recommended_count,
-      (SELECT COUNT(DISTINCT s.uid) FROM samples s
-        JOIN invitation_records r ON r.source = 'workflow:' || w.id AND r.template_type = 'collab'
-          AND r.uid = s.uid
-          AND (r.product_id = s.product_id OR instr(COALESCE(r.product_ids, ''), '"' || s.product_id || '"') > 0)
-        WHERE s.applied_at IS NOT NULL) AS sample_applicant_count
-    FROM agent_workflows w
-    LEFT JOIN agent_workflow_tasks t ON t.workflow_id = w.id
-    WHERE w.active = 1
-    GROUP BY w.id
-    ORDER BY w.id DESC
-  `).all().map((row) => ({ ...row, config: parseJsonObject(row.config_json, {}) }));
+  const runtime = getAgentRuntime();
+  const autoInvite = getAgentFlowStates().find((flow) => flow.key === 'auto_invite');
+  return listWorkflowTasks(db, {
+    agentPaused: Boolean(runtime.paused),
+    autoInviteActive: autoInvite ? autoInvite.active !== false : true,
+  }).map((row) => ({ ...row, config: parseJsonObject(row.config_json, {}) }));
 }
 
 function workflowCreatorSummary(workflowId, kind) {
-  const workflow = getWorkflow(workflowId);
-  if (!workflow || !['sent', 'pending', 'recommended'].includes(kind)) return [];
-  if (kind === 'sent') {
-    return db.prepare(`
-      SELECT r.uid, r.creator_name, r.creator_handle, r.shop_id, r.status, r.sent_at, r.created_at
-      FROM invitation_records r
-      WHERE r.source = ? AND r.status = 'sent'
-      GROUP BY r.uid
-      ORDER BY datetime(COALESCE(r.sent_at, r.created_at)) DESC, r.id DESC
-    `).all(`workflow:${workflowId}`);
-  }
-  const recommendationFilter = kind === 'recommended' ? "AND t.recommendation IN ('auto_pass', 'review_pass')" : '';
-  return db.prepare(`
-    SELECT t.id AS task_id, t.uid, t.creator_name, t.creator_handle, t.shop_id,
-      t.sample_id, t.score, t.recommendation, t.reason, t.status, t.updated_at,
-      s.status AS sample_status, s.applied_at, p.name AS product_name
-    FROM agent_workflow_tasks t
-    LEFT JOIN samples s ON CAST(s.id AS TEXT) = CAST(t.sample_id AS TEXT)
-    LEFT JOIN products p ON p.id = s.product_id
-    WHERE t.workflow_id = ? AND t.task_type = 'sample_audit'
-      AND t.status = 'agent_review' ${recommendationFilter}
-      AND EXISTS (
-        SELECT 1 FROM invitation_records wr
-        WHERE wr.source = 'workflow:' || t.workflow_id AND wr.template_type = 'collab'
-          AND wr.uid = t.uid
-          AND (wr.product_id = s.product_id OR instr(COALESCE(wr.product_ids, ''), '"' || s.product_id || '"') > 0)
-      )
-    ORDER BY datetime(t.updated_at) DESC, t.id DESC
-  `).all(workflowId);
+  const exists = db.prepare('SELECT id FROM agent_workflows WHERE id = ?').get(Number(workflowId || 0));
+  if (!exists || !['sent', 'pending', 'recommended', 'applicants', 'confirmed'].includes(kind)) return [];
+  const query = workflowCreatorSummaryQuery(kind);
+  return db.prepare(query.sql).all(...query.params(Number(workflowId || 0)));
 }
 
 function sampleApplyLink(recordId) {
@@ -3403,7 +3350,7 @@ app.get('/api/agent/workflows', (req, res) => {
 app.get('/api/agent/workflows/:id/creator-summary', (req, res) => {
   try {
     const kind = String(req.query.kind || '');
-    if (!['sent', 'pending', 'recommended'].includes(kind)) {
+    if (!['sent', 'pending', 'recommended', 'applicants', 'confirmed'].includes(kind)) {
       return res.status(400).json({ error: '无效的达人统计类型' });
     }
     res.json({ kind, creators: workflowCreatorSummary(Number(req.params.id || 0), kind) });

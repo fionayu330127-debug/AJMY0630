@@ -1892,13 +1892,13 @@ async function renderAutomationCenter() {
   automationPage = pageMeta.page;
   if (!selectedWorkflow) {
     box.innerHTML = `
-      ${workflowListPanel()}
+      ${workflowListPanel({ showActions: true, nameHandler: 'selectWorkflow', title: '任务列表' })}
       ${agentSampleApplicationsPanel(agentSamples)}`;
     return;
   }
   box.innerHTML = `
     <div style="margin-bottom:12px"><button class="btn btn-outline" onclick="backToWorkflowList()">返回工作流清单</button></div>
-    ${workflowListPanel()}
+    ${workflowListPanel({ showActions: true, nameHandler: 'selectWorkflow', title: '任务列表' })}
     ${agentSampleApplicationsPanel(agentSamples)}
     ${automationWorkflowBlocks(selectedWorkflow, selectedTasks)}
     ${inboxPanel(inboxMessages, selectedWorkflow.id)}
@@ -1959,9 +1959,31 @@ function workflowProductIcons(workflow) {
 }
 
 function workflowSummaryCount(workflow, kind) {
-  if (kind === 'sent') return Number(workflow.sent_invite_count || 0);
+  if (kind === 'sent') return Number(workflow.invited_count ?? workflow.sent_invite_count ?? 0);
+  if (kind === 'applicants') return Number(workflow.sample_applicant_count || 0);
+  if (kind === 'confirmed') return Number(workflow.confirmed_review_count || 0);
   if (kind === 'pending') return Number(workflow.sample_pending_count || 0);
   return Number(workflow.sample_recommended_count || 0);
+}
+
+function workflowStatusBadge(status) {
+  const label = status || '-';
+  const cls = status === '进行中' ? 'task-status-running' : status === '已暂停' ? 'task-status-paused' : 'task-status-ended';
+  return `<span class="task-status ${cls}">${esc(label)}</span>`;
+}
+
+function workflowDateCell(workflow) {
+  const createdDate = workflow.created_date_shanghai || String(workflow.created_at_shanghai || workflow.created_at || '').slice(0, 10) || '-';
+  const last = workflow.last_activity_shanghai || workflow.last_activity_at || '';
+  const lastDate = String(last).slice(0, 10);
+  const showLast = last && lastDate && lastDate !== createdDate;
+  return `${esc(createdDate)}${showLast ? `<div class="module-meta">最近活动 ${esc(last)}</div>` : ''}`;
+}
+
+function openWorkflowFromTaskList(id) {
+  selectedWorkflowId = Number(id);
+  automationPage = 1;
+  showPage('automation');
 }
 
 function workflowSummaryRows(workflowId, kind, creators) {
@@ -1996,24 +2018,32 @@ async function toggleWorkflowSummary(workflowId, kind) {
   }
 }
 
-function workflowListPanel() {
+function workflowListPanel(options = {}) {
+  const showActions = options.showActions !== false;
+  const nameHandler = options.nameHandler || 'selectWorkflow';
+  const title = options.title || '任务列表';
+  const metaText = options.meta || '所有自动化工作流任务，含历史任务。进行中或新近活动优先。邀约人数为成功发出的去重达人数。';
+  const colCount = showActions ? 8 : 6;
   const meta = paginate(AGENT_WORKFLOWS, workflowListPage, workflowListPageSize);
   workflowListPage = meta.page;
-  const rows = meta.items.map(workflow => `
+  const rows = meta.items.map(workflow => {
+    const name = workflow.display_name || workflow.name || ('未命名工作流 #' + workflow.id);
+    return `
     <tr class="${Number(workflow.id) === Number(selectedWorkflowId) ? 'active-row' : ''}">
-      <td>${esc(workflow.updated_at || workflow.created_at || '-')}</td>
-      <td><button class="btn btn-ghost" onclick="selectWorkflow(${workflow.id})">${esc(workflow.name)}</button></td>
-      <td><div class="product-icon-list">${workflowProductIcons(workflow)}</div></td>
-      <td>${workflow.task_count || 0}<div class="module-meta">已发邀约 ${workflow.sent_invite_count || 0} · 已申请样品 ${workflow.sample_applicant_count || 0}</div></td>
+      <td><button class="btn btn-ghost" onclick="${nameHandler}(${workflow.id})">${esc(name)}</button></td>
+      <td>${workflowDateCell(workflow)}</td>
+      <td>${workflowStatusBadge(workflow.status || workflow.status_label)}</td>
       <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'sent')">${workflowSummaryCount(workflow, 'sent')}</button></td>
-      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'pending')">${workflowSummaryCount(workflow, 'pending')}</button></td>
-      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'recommended')">${workflowSummaryCount(workflow, 'recommended')}</button></td>
-      <td><div class="abtns"><button class="btn btn-outline" onclick="openEditWorkflowModal(${workflow.id})">编辑</button><button class="btn btn-outline" onclick="generateWorkflowQueueFor(${workflow.id})">刷新</button></div></td>
+      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'applicants')">${workflowSummaryCount(workflow, 'applicants')}</button></td>
+      <td><button class="btn btn-ghost workflow-count" onclick="toggleWorkflowSummary(${workflow.id}, 'confirmed')">${workflowSummaryCount(workflow, 'confirmed')}</button></td>
+      ${showActions ? `<td><div class="product-icon-list">${workflowProductIcons(workflow)}</div></td><td><div class="abtns"><button class="btn btn-outline" onclick="openEditWorkflowModal(${workflow.id})">编辑</button><button class="btn btn-outline" onclick="generateWorkflowQueueFor(${workflow.id})">刷新</button></div></td>` : ''}
     </tr>
-    <tr><td colspan="8" style="padding:0"><div id="workflow-summary-${workflow.id}-sent" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-pending" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-recommended" class="workflow-summary"></div></td></tr>`).join('');
-  return `<div class="module-panel" style="margin-bottom:12px">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>工作流清单</h3><div class="module-meta">最新任务优先，Agent 自动邀约；样品审核在下方统一处理。</div></div><button class="btn btn-primary" onclick="openWorkflowModal()">新增自动化工作流任务</button></div>
-    <div class="table-wrap"><table><thead><tr><th>任务时间</th><th>工作流</th><th>产品</th><th>任务数量</th><th>已发送</th><th>已申请（待确认）</th><th>已确认（Agent建议审核通过）</th><th>操作</th></tr></thead><tbody>${rows || '<tr><td colspan="8"><div class="empty-state">暂无工作流</div></td></tr>'}</tbody></table></div>
+    <tr><td colspan="${colCount}" style="padding:0"><div id="workflow-summary-${workflow.id}-sent" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-applicants" class="workflow-summary"></div><div id="workflow-summary-${workflow.id}-confirmed" class="workflow-summary"></div></td></tr>`;
+  }).join('');
+  const addButton = showActions ? '<button class="btn btn-primary" onclick="openWorkflowModal()">新增自动化工作流任务</button>' : '';
+  return `<div class="${options.panelClass || 'module-panel'}" style="margin-bottom:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px"><div><h3>${esc(title)}</h3><div class="module-meta">${esc(metaText)}</div></div>${addButton}</div>
+    <div class="table-wrap task-list-table"><table><thead><tr><th>名称</th><th>创建日期（北京时间）</th><th>状态</th><th>邀约人数</th><th>申请样品人数</th><th>已确认审核人数</th>${showActions ? '<th>产品</th><th>操作</th>' : ''}</tr></thead><tbody>${rows || `<tr><td colspan="${colCount}"><div class="empty-state">暂无任务。创建自动化工作流或开始边搜边邀后，会显示在这里。</div></td></tr>`}</tbody></table></div>
     ${pagerHtml('workflow-list', meta)}
   </div>`;
 }
@@ -2286,13 +2316,12 @@ async function renderAgentCenter() {
       auth_url: ''
     }))
   };
-  const [overview, bdList, auth, settings, reviewData, runLogs, optimization] = await Promise.all([
-    api('/api/agent/overview').catch(() => ({ runtime: { paused: false }, flows: [], today: {}, pending_confirmations: 0, pending_items: [], month_ai_cost: 0, month_ai_cost_limit: 0, standard: null })),
+  const [overview, bdList, auth, settings, reviewData, optimization] = await Promise.all([
+    api('/api/agent/overview').catch(() => ({ runtime: { paused: false }, flows: [], today: {}, pending_confirmations: 0, pending_items: [], month_ai_cost: 0, month_ai_cost_limit: 0, standard: null, workflow_tasks: [] })),
     api('/api/bd').catch(() => BD_LIST),
     api('/api/tiktok/auth/status').catch(() => fallbackAuth),
     api('/api/agent/settings').catch(() => AGENT_SETTINGS || {}),
     api('/api/agent/review-standards').catch(() => ({ standard: null })),
-    api('/api/agent/run-logs?limit=10').catch(() => []),
     api('/api/agent/optimization').catch(() => null),
   ]);
   BD_LIST = bdList;
@@ -2302,14 +2331,14 @@ async function renderAgentCenter() {
     api('/api/invitations/templates').catch(() => []),
     productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
   ]);
+  AGENT_WORKFLOWS = overview.workflow_tasks || [];
   const standard = reviewData.standard || { version: 1, sample_pass_line: 70, invite_pass_line: 50, orders_base: 200, views_base: 5000, conversion_base: 5, orders_weight: 30, views_weight: 30, conversion_weight: 30, fans_hard_limit: 1000, fans_score_1000: 3, fans_score_5000: 5, fans_score_50000: 8, fans_score_200000: 10, missing_data_action: '疑', zero_video_action: '第三项计0分，其余照常' };
   const tabs = [['overview', '概览'], ['templates', '模板与话术库'], ['review', '审核标准'], ['optimize', '优化建议'], ['settings', '设置']];
   const overviewHtml = () => {
     const flows = overview.flows || [];
     const flowCards = flows.map(flow => `<div class="agent-flow-card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><h3>${esc(flow.label)}</h3><button class="agent-switch ${flow.active ? 'on' : ''}" aria-label="${esc(flow.label)}启停" onclick="toggleAgentFlow('${flow.key}', ${!flow.active})"></button></div><div class="module-meta">按当前审核标准 v${esc(standard.version)} 执行</div><div class="agent-flow-meta">上次运行：${esc(flow.last_run_at || '-')}<br>上次结果：${esc(flow.last_result?.result || '-')}<br>下次运行：${esc(flow.next_run_at || '-')}</div><div class="agent-flow-actions"><button class="btn btn-outline" onclick="trialAgentFlow('${flow.key}')">试运行</button></div></div>`).join('');
-    const logs = (runLogs || []).map(row => `<tr><td>${esc(row.created_at)}</td><td>${esc(row.flow_label)}</td><td>${esc(row.mode === 'trial' ? '试运行' : '定时')}</td><td>${esc(row.summary?.result || row.status)}</td></tr>`).join('');
     const pending = (overview.pending_items || []).map(row => `<tr onclick="showPage('automation')" style="cursor:pointer"><td>${esc(row.task_type)}</td><td>${esc(row.creator_name || row.uid || '-')}</td><td>${esc(row.reason || '待确认')}</td></tr>`).join('');
-    return `<div class="agent-overview-head"><div><h2 style="margin:0 0 4px">Agent 概览</h2><div class="module-meta">只展示运行状态、今日动作和待处理事项</div></div><div class="agent-runtime"><span class="agent-runtime-status">${overview.runtime?.paused ? '已暂停' : '运行中'}</span><button class="btn ${overview.runtime?.paused ? 'btn-primary' : 'btn-outline'}" onclick="toggleAllAgents(${!overview.runtime?.paused})">${overview.runtime?.paused ? '恢复全部 Agent' : '一键暂停全部 Agent'}</button></div></div><div class="module-grid"><div class="module-panel"><h3>今日已发邀约数</h3><div class="module-num">${overview.today?.sent_invites || 0} <span style="font-size:14px;color:#697586">/ ${overview.today?.invite_limit || 0}</span></div><div class="module-meta">对比每日上限</div></div><div class="module-panel" onclick="showPage('automation')" style="cursor:pointer"><h3>待我确认事项数</h3><div class="module-num">${overview.pending_confirmations || 0}</div><div class="module-meta">点击进入处理队列</div></div><div class="module-panel"><h3>本月 AI 费用</h3><div class="module-num">¥${overview.month_ai_cost || 0} <span style="font-size:14px;color:#697586">/ ¥${overview.month_ai_cost_limit || 0}</span></div><div class="module-meta">当前未接入 AI，费用暂为 0</div></div></div><div class="agent-flow-grid">${flowCards || '<div class="agent-empty">暂无任务流</div>'}</div>${marketplaceInvitePanel(overview.marketplace_invite)}<div class="agent-config-grid"><div class="agent-list-panel"><h3>最近10条运行记录</h3><table><thead><tr><th>时间</th><th>任务流</th><th>类型</th><th>结果</th></tr></thead><tbody>${logs || '<tr><td colspan="4"><div class="agent-empty">暂无运行记录，试运行后会显示在这里</div></td></tr>'}</tbody></table></div><div class="agent-list-panel"><h3>待我确认</h3><table><thead><tr><th>类型</th><th>达人</th><th>说明</th></tr></thead><tbody>${pending || '<tr><td colspan="3"><div class="agent-empty">暂无待确认事项</div></td></tr>'}</tbody></table></div></div>`;
+    return `<div class="agent-overview-head"><div><h2 style="margin:0 0 4px">Agent 概览</h2><div class="module-meta">只展示运行状态、今日动作和待处理事项</div></div><div class="agent-runtime"><span class="agent-runtime-status">${overview.runtime?.paused ? '已暂停' : '运行中'}</span><button class="btn ${overview.runtime?.paused ? 'btn-primary' : 'btn-outline'}" onclick="toggleAllAgents(${!overview.runtime?.paused})">${overview.runtime?.paused ? '恢复全部 Agent' : '一键暂停全部 Agent'}</button></div></div><div class="module-grid"><div class="module-panel"><h3>今日已发邀约数</h3><div class="module-num">${overview.today?.sent_invites || 0} <span style="font-size:14px;color:#697586">/ ${overview.today?.invite_limit || 0}</span></div><div class="module-meta">对比每日上限</div></div><div class="module-panel" onclick="showPage('automation')" style="cursor:pointer"><h3>待我确认事项数</h3><div class="module-num">${overview.pending_confirmations || 0}</div><div class="module-meta">点击进入处理队列</div></div><div class="module-panel"><h3>本月 AI 费用</h3><div class="module-num">¥${overview.month_ai_cost || 0} <span style="font-size:14px;color:#697586">/ ¥${overview.month_ai_cost_limit || 0}</span></div><div class="module-meta">当前未接入 AI，费用暂为 0</div></div></div><div class="agent-flow-grid">${flowCards || '<div class="agent-empty">暂无任务流</div>'}</div>${marketplaceInvitePanel(overview.marketplace_invite)}${workflowListPanel({ showActions: false, nameHandler: 'openWorkflowFromTaskList', title: '任务列表', panelClass: 'agent-list-panel', meta: '所有自动化工作流任务，含历史任务。点击名称可进入工作流详情。' })}<div class="agent-config-grid"><div class="agent-list-panel"><h3>待我确认</h3><table><thead><tr><th>类型</th><th>达人</th><th>说明</th></tr></thead><tbody>${pending || '<tr><td colspan="3"><div class="agent-empty">暂无待确认事项</div></td></tr>'}</tbody></table></div></div>`;
   };
   const settingsHtml = `<div class="agent-settings-section module-panel"><h3>TikTok Shop 授权</h3><div class="module-meta" style="margin-bottom:10px">Redirect URI：${esc(auth.redirect_uri || '')}</div><div class="agent-list">${(auth.shops || []).map(shop => `<div class="agent-row"><div><strong>${esc(shop.name)}</strong><div class="agent-load">Access Token：${shop.has_access_token ? '已保存' : '缺失'} · Refresh Token：${shop.has_refresh_token ? '已保存' : '缺失'} · shop_cipher：${shop.has_shop_cipher ? '已保存' : '缺失'}</div><div class="agent-load">上次同步：${esc(shop.last_sync_at || '-')} ${esc(shop.last_sync_message || '')}</div></div><button class="btn ${shop.authorized ? 'btn-outline' : 'btn-primary'}" onclick="openTikTokAuth('${shop.id}')">${shop.authorized ? '重新授权' : '去授权'}</button></div>`).join('') || '<div class="agent-empty">暂无店铺</div>'}</div></div><div class="agent-settings-section module-panel"><div style="display:flex;justify-content:space-between;align-items:center"><h3>BD 成员</h3><button class="btn btn-outline" onclick="syncBDMembers()">同步员工名单</button></div><div class="agent-list">${BD_LIST.map(b => `<div class="agent-row"><div><strong>${esc(b.name)}</strong><div class="agent-load">系统员工 · 负责 ${b.load || 0} 个达人 · 企微 ${esc(b.wecom_userid || '未配置')}</div></div></div>`).join('') || '<div class="agent-empty">暂无 BD 成员</div>'}</div></div>${agentTemplateManagerHtml()}<div class="agent-config-grid"><div class="module-panel"><h3>话术模板</h3><div class="form-row"><label class="form-label">自动邀约话术</label><textarea class="bd-note-ta" id="agent-invite-template">${esc(settings.invite_template || '')}</textarea></div><div class="form-row"><label class="form-label">BD 跟进话术</label><textarea class="bd-note-ta" id="agent-followup-template">${esc(settings.followup_template || '')}</textarea></div></div><div class="module-panel"><h3>Agent 配置</h3><div class="form-row"><label class="form-label">复盘口径</label><textarea class="bd-note-ta" id="agent-review-rules">${esc(settings.review_rules || '')}</textarea></div><div class="form-row-2"><div class="form-row"><label class="form-label">邀约每日上限</label><input class="form-input" id="agent-invite-limit" type="number" min="1" value="${esc(settings.invite_daily_limit ?? 1000)}"></div><div class="form-row"><label class="form-label">跟进间隔（天）</label><input class="form-input" id="agent-followup-days" type="number" min="1" value="${esc(settings.followup_interval_days ?? 3)}"></div></div><div class="form-row"><label class="form-label">Agent 每日自动运行时间</label><input class="form-input" id="agent-daily-run-time" type="time" value="${String(settings.agent_daily_hour ?? 8).padStart(2, '0')}:${String(settings.agent_daily_minute ?? 30).padStart(2, '0')}"></div><div class="form-row"><label class="form-label">自动分配策略</label><textarea class="bd-note-ta" id="agent-assign-strategy">${esc(settings.assign_strategy || '')}</textarea></div><button class="btn btn-primary" onclick="saveAgentSettings()">保存 Agent 配置</button></div></div>`;
   const settingsExtrasHtml = `<div class="module-panel" style="margin-top:12px"><h3>运行参数</h3><div class="form-row-2"><div class="form-row"><label class="form-label">每天成功发送邀约目标（oku 默认 1000）</label><input class="form-input" id="agent-invite-target-count" type="number" min="1" value="${esc(settings.invite_target_count ?? 1000)}"></div><div class="form-row"><label class="form-label">样品申请每日巡检时间</label><input class="form-input" id="agent-sample-sync-time" type="time" value="${String(settings.sample_sync_hour ?? 7).padStart(2, '0')}:00"></div></div><div class="form-row-2"><div class="form-row"><label class="form-label">查找达人搜索间隔（秒，60-120）</label><input class="form-input" id="agent-marketplace-search-interval" type="number" min="60" max="120" value="${esc(Math.round((Number(settings.marketplace_search_interval_ms || 90000) / 1000)))}"></div><div class="form-row"><label class="form-label">邀约发送间隔（秒，默认 20）</label><input class="form-input" id="agent-marketplace-send-interval" type="number" min="1" value="${esc(Math.round((Number(settings.marketplace_invite_send_interval_ms || 20000) / 1000)))}"></div></div><div class="form-row"><label class="form-label">分店每日上限 JSON（mir 会再被官方周剩余额度封顶）</label><input class="form-input" id="agent-invite-limit-by-shop" value="${esc(settings.invite_daily_limit_by_shop || '{\"oku\":1000,\"mir\":1000}')}"></div><div class="form-row"><label class="form-label">开启查找达人全天匀速自动邀约</label><select class="form-input" id="agent-marketplace-autorun"><option value="1" ${String(settings.marketplace_search_invite_autorun ?? 1) !== '0' ? 'selected' : ''}>开启</option><option value="0" ${String(settings.marketplace_search_invite_autorun ?? 1) === '0' ? 'selected' : ''}>关闭</option></select></div></div>`;
