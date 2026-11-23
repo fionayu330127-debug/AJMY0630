@@ -644,6 +644,155 @@ test('pacer tick does not send for historical active workflows unless one is ind
 });
 
 
+
+test('daily limit does not inherit the task target, and the target is a hard stop', async () => {
+  const shop = { id: 'mir', name: 'MIR HOME', access_token: 't', shop_cipher: 'c' };
+  const records = [];
+  for (let i = 0; i < 100; i += 1) {
+    records.push({ uid: `sent-${i}`, status: 'sent', source: 'workflow:1', shop_id: 'mir', sent_at: '2026-11-23 02:00:00' });
+  }
+  const db = {
+    exec() {},
+    prepare(sql) {
+      return {
+        run() { return {}; },
+        get(...args) {
+          if (/COUNT\(DISTINCT uid\)/.test(sql) && /source = \?/.test(sql)) {
+            return { c: records.filter((row) => row.source === args[0] && row.status === 'sent').length };
+          }
+          if (/COUNT\(\*\)/.test(sql) && /invitation_records/.test(sql)) return { c: records.length };
+          if (/COUNT\(\*\)/.test(sql) && /agent_workflow_tasks/.test(sql)) return { c: 0 };
+          return null;
+        },
+        all() { return []; },
+      };
+    },
+  };
+  const workflow = { id: 1, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000, invite_target_count: 100 } };
+  const api = createMarketplaceSearchInvite({
+    db,
+    tiktokRequest: async () => ({ unlimited: true, quota_sum: 0, quota_use: 0 }),
+    getAgentSettings: () => ({ invite_daily_limit: 1000, invite_target_count: 1000, invite_daily_limit_by_shop: '{}' }),
+    getAgentRuntime: () => ({ paused: false }),
+    getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
+    nowText: () => '2026-11-23 13:00:00',
+  });
+  assert.equal(api.configuredDailyLimit(shop.id, workflow), 1000);
+  assert.equal(api.workflowTargetCount(workflow), 100);
+  assert.equal(api.workflowSentCount(workflow), 100);
+  assert.equal(api.workflowTargetRemain(workflow), 0);
+  const cap = await api.effectiveShopCap(shop, workflow, { force: true });
+  assert.equal(cap.remain, 0);
+  assert.match(cap.reason, /任务邀约人数已达上限/);
+});
+
+test('sendBatchForShop sends at most 50 creators in one official invitation group', async () => {
+  const shop = { id: 'mir', name: 'MIR HOME', access_token: 't', shop_cipher: 'c' };
+  const tasks = [];
+  for (let i = 0; i < 60; i += 1) {
+    tasks.push({
+      id: i + 1,
+      workflow_id: 1,
+      task_type: 'invite',
+      status: 'admin_approved',
+      shop_id: 'mir',
+      uid: `u${i}`,
+      payload_json: JSON.stringify({ candidate: { shop_id: 'mir', uid: `u${i}`, creator_open_id: `open-${i}` } }),
+    });
+  }
+  let sentBatch = null;
+  const db = {
+    exec() {},
+    prepare(sql) {
+      return {
+        run() { return {}; },
+        get(...args) {
+          if (/COUNT\(DISTINCT uid\)/.test(sql) && /source = \?/.test(sql)) return { c: 0 };
+          if (/COUNT\(\*\)/.test(sql) && /invitation_records/.test(sql)) return { c: 0 };
+          if (/COUNT\(\*\)/.test(sql) && /agent_workflow_tasks/.test(sql)) return { c: tasks.length };
+          return null;
+        },
+        all(...args) {
+          if (/FROM agent_workflow_tasks/.test(sql) && /admin_approved/.test(sql)) {
+            const shopId = args[1];
+            const limit = Number(args[2] || 0);
+            return tasks.filter((item) => item.shop_id === shopId).slice(0, limit);
+          }
+          return [];
+        },
+      };
+    },
+  };
+  const workflow = { id: 1, config: { source: 'marketplace_search', shop: 'mir', invite_daily_limit: 1000, invite_target_count: 1000 } };
+  const api = createMarketplaceSearchInvite({
+    db,
+    tiktokRequest: async () => ({ unlimited: true, quota_sum: 0, quota_use: 0 }),
+    sendWorkflowInvitations: async (batch) => {
+      sentBatch = batch;
+      return batch.map((task) => ({ task_id: task.id, status: 'sent' }));
+    },
+    getAgentSettings: () => ({ invite_daily_limit: 1000, invite_daily_limit_by_shop: '{"mir":1000}' }),
+    getAgentRuntime: () => ({ paused: false }),
+    getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
+    nowText: () => '2026-11-23 13:00:00',
+  });
+  const result = await api.sendBatchForShop(shop, workflow);
+  assert.equal(result.sent, 50);
+  assert.equal(sentBatch.length, 50);
+  assert.equal(sentBatch[0].uid, 'u0');
+  assert.equal(sentBatch[49].uid, 'u49');
+});
+
+test('tick pauses the workflow when its invite target is already reached', async () => {
+  const previousExecute = process.env.TK_INVITE_EXECUTE;
+  const previousAutorun = process.env.TK_MARKETPLACE_INVITE_AUTORUN;
+  process.env.TK_INVITE_EXECUTE = '1';
+  delete process.env.TK_MARKETPLACE_INVITE_AUTORUN;
+  try {
+    const running = { id: 11, config: { source: 'marketplace_search', shop: 'oku', invite_daily_limit: 1000, invite_target_count: 100 } };
+    const paused = [];
+    const db = {
+      exec() {},
+      prepare(sql) {
+        return {
+          run(...args) {
+            if (/UPDATE agent_workflows/.test(sql)) paused.push({ id: args[1], run_state: args[0] });
+            return {};
+          },
+          get(...args) {
+            if (/COUNT\(DISTINCT uid\)/.test(sql) && /source = \?/.test(sql)) return { c: 384 };
+            if (/COUNT\(\*\)/.test(sql)) return { c: 0 };
+            return null;
+          },
+          all() { return []; },
+        };
+      },
+    };
+    const api = createMarketplaceSearchInvite({
+      db,
+      getRunningMarketplaceWorkflow: () => running,
+      getAgentSettings: () => ({ marketplace_search_invite_autorun: 1, invite_daily_limit: 1000 }),
+      getAgentRuntime: () => ({ paused: false }),
+      getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
+      pauseWorkflowTask: (workflowId) => { paused.push({ id: workflowId, run_state: 'paused' }); },
+      sendWorkflowInvitations: async () => { throw new Error('should not send after the target is reached'); },
+      writeSyncLog: () => {},
+    });
+    const result = await api.tick();
+    assert.equal(result.skipped, true);
+    assert.match(result.reason, /任务邀约人数已达上限/);
+    assert.equal(result.paused, true);
+    assert.equal(paused.length, 1);
+    assert.equal(paused[0].id, 11);
+  } finally {
+    if (previousExecute === undefined) delete process.env.TK_INVITE_EXECUTE;
+    else process.env.TK_INVITE_EXECUTE = previousExecute;
+    if (previousAutorun === undefined) delete process.env.TK_MARKETPLACE_INVITE_AUTORUN;
+    else process.env.TK_MARKETPLACE_INVITE_AUTORUN = previousAutorun;
+  }
+});
+
+
 (async () => {
   let failed = 0;
   for (const item of tests) {

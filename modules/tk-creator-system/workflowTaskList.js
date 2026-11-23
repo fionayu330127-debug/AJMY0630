@@ -357,76 +357,111 @@ function sortWorkflowTasks(rows) {
 function listWorkflowTasks(db, options = {}) {
   ensureWorkflowRunStateColumn(db);
   const rows = db.prepare(`
+    WITH workflows AS (
+      SELECT * FROM agent_workflows
+      WHERE IFNULL(json_extract(config_json, '$.source'), '') <> 'sample_center'
+    ),
+    invited AS (
+      SELECT source, COUNT(DISTINCT uid) AS invited_count
+      FROM invitation_records
+      WHERE status = 'sent' AND source LIKE 'workflow:%'
+      GROUP BY source
+    ),
+    applicants AS (
+      SELECT r.source, COUNT(DISTINCT s.uid) AS sample_applicant_count
+      FROM invitation_records r
+      JOIN samples s ON s.uid = r.uid
+      WHERE r.status = 'sent'
+        AND r.source LIKE 'workflow:%'
+        AND s.applied_at IS NOT NULL
+        AND COALESCE(r.template_type, '') NOT IN ('confirmation')
+        AND ${sqlInviteProductMatchesSample('r', 's')}
+       
+        AND datetime(s.applied_at) >= datetime(COALESCE(r.sent_at, r.created_at))
+      GROUP BY r.source
+    ),
+    task_stats AS (
+      SELECT
+        workflow_id,
+        COUNT(id) AS task_count,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+        COUNT(DISTINCT CASE
+          WHEN task_type = 'sample_audit' AND status IN ('application_confirmed', 'admin_approved', 'executed')
+          THEN uid END) AS confirmed_review_count,
+        COUNT(DISTINCT CASE
+          WHEN task_type = 'sample_audit'
+            AND IFNULL(uid, '') <> ''
+            AND (
+              IFNULL(recommendation, '') <> ''
+              OR score IS NOT NULL
+              OR (
+                IFNULL(score_details_json, '') <> ''
+                AND lower(trim(score_details_json)) NOT IN ('[]', 'null')
+              )
+            )
+          THEN uid END) AS agent_review_count
+      FROM agent_workflow_tasks
+      GROUP BY workflow_id
+    ),
+    sample_pending AS (
+      SELECT t2.workflow_id, COUNT(DISTINCT t2.uid) AS sample_pending_count
+      FROM agent_workflow_tasks t2
+      JOIN samples s2 ON CAST(s2.id AS TEXT) = CAST(t2.sample_id AS TEXT)
+      WHERE t2.task_type = 'sample_audit' AND t2.status = 'agent_review'
+        AND EXISTS (
+          SELECT 1 FROM invitation_records wr2
+          WHERE wr2.source = 'workflow:' || t2.workflow_id AND wr2.template_type = 'collab'
+            AND wr2.uid = s2.uid
+            AND (wr2.product_id = s2.product_id OR instr(COALESCE(wr2.product_ids, ''), '"' || s2.product_id || '"') > 0)
+        )
+      GROUP BY t2.workflow_id
+    ),
+    sample_recommended AS (
+      SELECT t3.workflow_id, COUNT(DISTINCT t3.uid) AS sample_recommended_count
+      FROM agent_workflow_tasks t3
+      JOIN samples s3 ON CAST(s3.id AS TEXT) = CAST(t3.sample_id AS TEXT)
+      WHERE t3.task_type = 'sample_audit' AND t3.status = 'agent_review'
+        AND t3.recommendation IN ('auto_pass', 'review_pass')
+        AND EXISTS (
+          SELECT 1 FROM invitation_records wr3
+          WHERE wr3.source = 'workflow:' || t3.workflow_id AND wr3.template_type = 'collab'
+            AND wr3.uid = s3.uid
+            AND (wr3.product_id = s3.product_id OR instr(COALESCE(wr3.product_ids, ''), '"' || s3.product_id || '"') > 0)
+        )
+      GROUP BY t3.workflow_id
+    ),
+    last_invite AS (
+      SELECT source, MAX(COALESCE(sent_at, created_at)) AS ts
+      FROM invitation_records
+      WHERE source LIKE 'workflow:%'
+      GROUP BY source
+    ),
+    last_task AS (
+      SELECT workflow_id, MAX(COALESCE(updated_at, created_at)) AS ts
+      FROM agent_workflow_tasks
+      GROUP BY workflow_id
+    )
     SELECT
       w.*,
-      COUNT(t.id) AS task_count,
-      SUM(CASE WHEN t.status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
-      (SELECT COUNT(DISTINCT r.uid) FROM invitation_records r
-        WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS invited_count,
-      (SELECT COUNT(DISTINCT r.uid) FROM invitation_records r
-        WHERE r.source = 'workflow:' || w.id AND r.status = 'sent') AS sent_invite_count,
-      (SELECT COUNT(DISTINCT s.uid) FROM samples s
-        WHERE s.applied_at IS NOT NULL
-          AND ${sqlSampleIsWorkflowApplicant('s', "'workflow:' || w.id")}) AS sample_applicant_count,
-      (SELECT COUNT(DISTINCT t4.uid) FROM agent_workflow_tasks t4
-        WHERE t4.workflow_id = w.id
-          AND t4.task_type = 'sample_audit'
-          AND t4.status IN ('application_confirmed', 'admin_approved', 'executed')) AS confirmed_review_count,
-      (SELECT COUNT(DISTINCT t4.uid) FROM agent_workflow_tasks t4
-        WHERE t4.workflow_id = w.id
-          AND t4.task_type = 'sample_audit'
-          AND t4.status IN ('application_confirmed', 'admin_approved', 'executed')) AS admin_confirmed_review_count,
-      (SELECT COUNT(DISTINCT t5.uid) FROM agent_workflow_tasks t5
-        WHERE t5.workflow_id = w.id
-          AND t5.task_type = 'sample_audit'
-          AND IFNULL(t5.uid, '') <> ''
-          AND (
-            IFNULL(t5.recommendation, '') <> ''
-            OR t5.score IS NOT NULL
-            OR (
-              IFNULL(t5.score_details_json, '') <> ''
-              AND lower(trim(t5.score_details_json)) NOT IN ('[]', 'null')
-            )
-          )) AS agent_review_count,
-      (SELECT COUNT(DISTINCT t2.uid) FROM agent_workflow_tasks t2
-        JOIN samples s2 ON CAST(s2.id AS TEXT) = CAST(t2.sample_id AS TEXT)
-        WHERE t2.workflow_id = w.id AND t2.task_type = 'sample_audit' AND t2.status = 'agent_review'
-          AND EXISTS (
-            SELECT 1 FROM invitation_records wr2
-            WHERE wr2.source = 'workflow:' || w.id AND wr2.template_type = 'collab'
-              AND wr2.uid = s2.uid
-              AND (wr2.product_id = s2.product_id OR instr(COALESCE(wr2.product_ids, ''), '"' || s2.product_id || '"') > 0)
-          )) AS sample_pending_count,
-      (SELECT COUNT(DISTINCT t3.uid) FROM agent_workflow_tasks t3
-        JOIN samples s3 ON CAST(s3.id AS TEXT) = CAST(t3.sample_id AS TEXT)
-        WHERE t3.workflow_id = w.id AND t3.task_type = 'sample_audit' AND t3.status = 'agent_review'
-          AND t3.recommendation IN ('auto_pass', 'review_pass')
-          AND EXISTS (
-            SELECT 1 FROM invitation_records wr3
-            WHERE wr3.source = 'workflow:' || w.id AND wr3.template_type = 'collab'
-              AND wr3.uid = s3.uid
-              AND (wr3.product_id = s3.product_id OR instr(COALESCE(wr3.product_ids, ''), '"' || s3.product_id || '"') > 0)
-          )) AS sample_recommended_count,
-      COALESCE(
-        (
-          SELECT MAX(ts)
-          FROM (
-            SELECT MAX(COALESCE(r.sent_at, r.created_at)) AS ts
-            FROM invitation_records r
-            WHERE r.source = 'workflow:' || w.id
-            UNION ALL
-            SELECT MAX(COALESCE(tk.updated_at, tk.created_at))
-            FROM agent_workflow_tasks tk
-            WHERE tk.workflow_id = w.id
-          )
-        ),
-        w.updated_at,
-        w.created_at
-      ) AS last_activity_at
-    FROM agent_workflows w
-    LEFT JOIN agent_workflow_tasks t ON t.workflow_id = w.id
-    WHERE IFNULL(json_extract(w.config_json, '$.source'), '') <> 'sample_center'
-    GROUP BY w.id
+      COALESCE(ts.task_count, 0) AS task_count,
+      COALESCE(ts.failed_count, 0) AS failed_count,
+      COALESCE(inv.invited_count, 0) AS invited_count,
+      COALESCE(inv.invited_count, 0) AS sent_invite_count,
+      COALESCE(ap.sample_applicant_count, 0) AS sample_applicant_count,
+      COALESCE(ts.confirmed_review_count, 0) AS confirmed_review_count,
+      COALESCE(ts.confirmed_review_count, 0) AS admin_confirmed_review_count,
+      COALESCE(ts.agent_review_count, 0) AS agent_review_count,
+      COALESCE(sp.sample_pending_count, 0) AS sample_pending_count,
+      COALESCE(sr.sample_recommended_count, 0) AS sample_recommended_count,
+      COALESCE(li.ts, lt.ts, w.updated_at, w.created_at) AS last_activity_at
+    FROM workflows w
+    LEFT JOIN invited inv ON inv.source = 'workflow:' || w.id
+    LEFT JOIN applicants ap ON ap.source = 'workflow:' || w.id
+    LEFT JOIN task_stats ts ON ts.workflow_id = w.id
+    LEFT JOIN sample_pending sp ON sp.workflow_id = w.id
+    LEFT JOIN sample_recommended sr ON sr.workflow_id = w.id
+    LEFT JOIN last_invite li ON li.source = 'workflow:' || w.id
+    LEFT JOIN last_task lt ON lt.workflow_id = w.id
   `).all();
 
   const mapped = rows.map((row) => mapWorkflowTaskRow(row, options));

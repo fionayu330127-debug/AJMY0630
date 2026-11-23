@@ -883,6 +883,10 @@ try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN sales_currency TEXT'); 
 try { db.exec('ALTER TABLE affiliate_creators ADD COLUMN normalized_handle TEXT'); } catch (_) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_affiliate_creators_shop_sales ON affiliate_creators(shop_id, sales_count_30d)'); } catch (_) {}
 try { db.exec('CREATE INDEX IF NOT EXISTS idx_affiliate_creators_handle ON affiliate_creators(normalized_handle)'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_invitation_records_source_status_uid ON invitation_records(source, status, uid)'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_invitation_records_uid_status ON invitation_records(uid, status)'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_agent_workflow_tasks_workflow_type_status ON agent_workflow_tasks(workflow_id, task_type, status)'); } catch (_) {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_samples_uid_applied ON samples(uid, applied_at)'); } catch (_) {}
 try { db.exec("ALTER TABLE agent_workflows ADD COLUMN run_state TEXT NOT NULL DEFAULT 'paused'"); } catch (_) {}
 ensureWorkflowRunStateColumn(db);
 
@@ -946,11 +950,6 @@ function agentPendingCount() {
 }
 
 function agentOverviewData() {
-  try {
-    ensureSampleReviewTasks(db, { scoreSample: (sample) => agentScoreSample(sample, {}), nowText });
-  } catch (error) {
-    console.error('[agent] ensure sample reviews failed:', error.message || error);
-  }
   const settings = getAgentSettings();
   const todayRange = shanghaiDayRange();
   const today = todayRange.day;
@@ -2161,6 +2160,58 @@ function workflowInviteIntervalMsValue() {
 let workflowInviteSendChain = Promise.resolve();
 let workflowInviteLastStartedAt = 0;
 
+const TARGET_COLLABORATION_MAX_CREATORS = 50;
+
+function chunkItems(items, size) {
+  const chunks = [];
+  const limit = Math.max(1, Number(size || 1));
+  for (let i = 0; i < (items || []).length; i += limit) chunks.push(items.slice(i, i + limit));
+  return chunks;
+}
+
+function rejectedCreatorOpenIds(data, requestedIds = []) {
+  const rejected = new Set();
+  const buckets = [
+    data?.invalid_creator_user_open_ids,
+    data?.invalid_open_ids,
+    data?.conflict_creator_user_open_ids,
+    data?.conflict_open_ids,
+    data?.failed_creator_user_open_ids,
+    data?.failed_open_ids,
+    data?.target_collaboration?.invalid_creator_user_open_ids,
+    data?.target_collaboration?.conflict_creator_user_open_ids,
+    data?.data?.invalid_creator_user_open_ids,
+    data?.data?.conflict_creator_user_open_ids,
+  ];
+  for (const bucket of buckets) {
+    for (const item of Array.isArray(bucket) ? bucket : []) {
+      const id = typeof item === 'string'
+        ? item
+        : firstText(item?.creator_user_open_id, item?.open_id, item?.creator_open_id, item?.id);
+      if (id) rejected.add(String(id));
+    }
+  }
+  const successBuckets = [
+    data?.success_creator_user_open_ids,
+    data?.valid_creator_user_open_ids,
+    data?.accepted_creator_user_open_ids,
+    data?.target_collaboration?.success_creator_user_open_ids,
+    data?.data?.success_creator_user_open_ids,
+  ];
+  const successList = successBuckets.find((item) => Array.isArray(item));
+  if (successList) {
+    const ok = new Set(
+      successList
+        .map((item) => String(typeof item === 'string' ? item : firstText(item?.creator_user_open_id, item?.open_id, item?.creator_open_id, item?.id) || ''))
+        .filter(Boolean)
+    );
+    for (const id of requestedIds) {
+      if (id && !ok.has(String(id))) rejected.add(String(id));
+    }
+  }
+  return rejected;
+}
+
 function waitForWorkflowInviteSlot(send) {
   const run = workflowInviteSendChain.then(async () => {
     const waitMs = Math.max(0, workflowInviteIntervalMsValue() - (Date.now() - workflowInviteLastStartedAt));
@@ -2190,7 +2241,8 @@ async function sendWorkflowInvitations(tasks, workflow) {
     )
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const results = [];
+
+  const prepared = [];
   for (const task of tasks) {
     const creator = task.payload?.candidate || task.payload || {};
     const assignment = experimentVariant(config.experiment_id, creator.uid || task.uid);
@@ -2207,6 +2259,66 @@ async function sendWorkflowInvitations(tasks, workflow) {
       commission_rate: templateCommission,
       omit_sample_apply_link: selectedTemplate.type === 'collab' && config.send_mode === 'auto',
     });
+    prepared.push({
+      task,
+      creator,
+      shop,
+      selectedTemplate,
+      assignment,
+      message,
+      applyLink,
+      templateCommission,
+      openId: firstText(creator.creator_open_id),
+    });
+  }
+
+  const results = [];
+
+  function writeInvitation(item, sendResult, targetCollaborationId) {
+    const now = nowText();
+    const record = insertRecord.run(
+      item.shop?.id || item.task.shop_id || config.shop || null,
+      `workflow:${workflow.id}`,
+      item.task.uid,
+      item.task.creator_name,
+      item.task.creator_handle,
+      item.creator.creator_open_id || item.creator.uid || item.task.uid,
+      item.selectedTemplate.id,
+      item.selectedTemplate.type || 'dm',
+      products[0]?.id || null,
+      products.length ? JSON.stringify(products.map((product) => product.id)) : null,
+      item.templateCommission,
+      targetCollaborationId,
+      config.send_mode,
+      config.sample_approval_mode,
+      item.applyLink,
+      'im',
+      item.message,
+      sendResult.status,
+      sendResult.provider_message,
+      now,
+      sendResult.status === 'sent' ? now : null,
+      item.assignment?.experiment?.id || null,
+      item.assignment?.variant?.id || null
+    );
+    const recordId = Number(record.lastInsertRowid);
+    db.prepare(`
+      UPDATE agent_workflow_tasks
+      SET status = ?, invitation_record_id = ?, updated_at = ?, executed_at = ?
+      WHERE id = ?
+    `).run(sendResult.status === 'failed' ? 'failed' : 'executed', recordId, now, now, item.task.id);
+    const result = {
+      task_id: item.task.id,
+      record_id: recordId,
+      status: sendResult.status,
+      provider_message: sendResult.provider_message,
+      target_collaboration_id: targetCollaborationId || null,
+    };
+    results.push(result);
+    return result;
+  }
+
+  async function sendSingle(item) {
     let sendResult = { status: 'pending', provider_message: '工作流手动邀约模式：已生成记录，未自动发送 TikTok 私信' };
     let targetCollaborationId = null;
     if (config.send_mode === 'auto') {
@@ -2214,64 +2326,128 @@ async function sendWorkflowInvitations(tasks, workflow) {
         sendResult = await waitForWorkflowInviteSlot(async () => {
           let result = { status: 'pending', provider_message: '邀约尚未发送' };
           let cards = [];
-          if (selectedTemplate.type === 'collab') {
+          if (item.selectedTemplate.type === 'collab') {
             const target = await createTargetCollaboration({
-              shop,
-              creator,
+              shop: item.shop,
+              creator: item.creator,
               products,
-              message,
-              commissionRate: templateCommission,
+              message: item.message,
+              commissionRate: item.templateCommission,
               sampleApprovalMode: config.sample_approval_mode,
             });
             if (target.pending) {
               result = { status: 'pending', provider_message: target.pending };
             } else {
               targetCollaborationId = target.targetCollaborationId;
+              const rejected = rejectedCreatorOpenIds(target.response, target.creator_user_open_ids || [item.openId]);
+              if (item.openId && rejected.has(String(item.openId))) {
+                return { status: 'failed', provider_message: '官方返回无效或冲突达人，未计入成功邀约' };
+              }
               cards = [{ msg_type: 'TARGET_COLLABORATION_CARD', content: { target_collaboration_id: targetCollaborationId } }];
-              result = await sendTikTokInvitation({ shop, creator, message, cards });
+              try {
+                const imResult = await sendTikTokInvitation({ shop: item.shop, creator: item.creator, message: item.message, cards });
+                result = {
+                  status: 'sent',
+                  provider_message: imResult.status === 'sent'
+                    ? imResult.provider_message
+                    : `官方邀约已创建，私信未送达：${imResult.provider_message || imResult.status || ''}`,
+                };
+              } catch (imError) {
+                result = {
+                  status: 'sent',
+                  provider_message: `官方邀约已创建，私信未送达：${imError.message || 'TikTok 私信发送失败'}`,
+                };
+              }
             }
           } else {
-            result = await sendTikTokInvitation({ shop, creator, message, cards });
+            result = await sendTikTokInvitation({ shop: item.shop, creator: item.creator, message: item.message, cards });
           }
           return result;
         });
+        if (sendResult.targetCollaborationId && !targetCollaborationId) {
+          targetCollaborationId = sendResult.targetCollaborationId;
+        }
       } catch (error) {
         sendResult = { status: 'failed', provider_message: error.message || 'TikTok 私信发送失败' };
       }
     }
-    const now = nowText();
-    const record = insertRecord.run(
-      shop?.id || task.shop_id || config.shop || null,
-      `workflow:${workflow.id}`,
-      task.uid,
-      task.creator_name,
-      task.creator_handle,
-      creator.creator_open_id || creator.uid || task.uid,
-      selectedTemplate.id,
-      selectedTemplate.type || 'dm',
-      products[0]?.id || null,
-      products.length ? JSON.stringify(products.map((item) => item.id)) : null,
-      templateCommission,
-      targetCollaborationId,
-      config.send_mode,
-      config.sample_approval_mode,
-      applyLink,
-      'im',
-      message,
-      sendResult.status,
-      sendResult.provider_message,
-      now,
-      sendResult.status === 'sent' ? now : null,
-      assignment?.experiment?.id || null,
-      assignment?.variant?.id || null
-    );
-    const recordId = Number(record.lastInsertRowid);
-    db.prepare(`
-      UPDATE agent_workflow_tasks
-      SET status = ?, invitation_record_id = ?, updated_at = ?, executed_at = ?
-      WHERE id = ?
-    `).run(sendResult.status === 'failed' ? 'failed' : 'executed', recordId, now, now, task.id);
-    results.push({ task_id: task.id, record_id: recordId, status: sendResult.status });
+    writeInvitation(item, sendResult, targetCollaborationId);
+  }
+
+  async function sendCollabChunk(chunk) {
+    const shop = chunk[0].shop;
+    let target;
+    try {
+      target = await waitForWorkflowInviteSlot(() => createTargetCollaboration({
+        shop,
+        creators: chunk.map((item) => item.creator),
+        products,
+        message: chunk[0].message,
+        commissionRate: chunk[0].templateCommission,
+        sampleApprovalMode: config.sample_approval_mode,
+      }));
+    } catch (error) {
+      for (const item of chunk) {
+        writeInvitation(item, { status: 'failed', provider_message: error.message || 'TikTok 邀约发送失败' }, null);
+      }
+      return;
+    }
+    if (target.pending) {
+      for (const item of chunk) {
+        writeInvitation(item, { status: 'pending', provider_message: target.pending }, null);
+      }
+      return;
+    }
+    const targetCollaborationId = target.targetCollaborationId;
+    const rejected = rejectedCreatorOpenIds(target.response, target.creator_user_open_ids || chunk.map((item) => item.openId));
+    const cards = [{ msg_type: 'TARGET_COLLABORATION_CARD', content: { target_collaboration_id: targetCollaborationId } }];
+    for (const item of chunk) {
+      if (item.openId && rejected.has(String(item.openId))) {
+        writeInvitation(item, { status: 'failed', provider_message: '官方返回无效或冲突达人，未计入成功邀约' }, targetCollaborationId);
+        continue;
+      }
+      let providerMessage = JSON.stringify({
+        target_collaboration_id: targetCollaborationId,
+        creator_user_open_ids: target.creator_user_open_ids,
+      }).slice(0, 500);
+      try {
+        const imResult = await sendTikTokInvitation({ shop: item.shop, creator: item.creator, message: item.message, cards });
+        if (imResult.status === 'sent') providerMessage = imResult.provider_message;
+        else providerMessage = `官方邀约已创建，私信未送达：${imResult.provider_message || imResult.status || ''}`;
+      } catch (imError) {
+        providerMessage = `官方邀约已创建，私信未送达：${imError.message || 'TikTok 私信发送失败'}`;
+      }
+      writeInvitation(item, { status: 'sent', provider_message: providerMessage }, targetCollaborationId);
+    }
+  }
+
+  const batchableGroups = new Map();
+  const singles = [];
+  for (const item of prepared) {
+    const canBatch = config.send_mode === 'auto'
+      && (item.selectedTemplate.type || 'dm') === 'collab'
+      && item.openId;
+    if (!canBatch) {
+      singles.push(item);
+      continue;
+    }
+    const key = [
+      item.shop?.id || '',
+      item.selectedTemplate.id,
+      item.templateCommission,
+      String(config.sample_approval_mode || ''),
+    ].join('|');
+    if (!batchableGroups.has(key)) batchableGroups.set(key, []);
+    batchableGroups.get(key).push(item);
+  }
+
+  for (const group of batchableGroups.values()) {
+    for (const chunk of chunkItems(group, TARGET_COLLABORATION_MAX_CREATORS)) {
+      await sendCollabChunk(chunk);
+    }
+  }
+  for (const item of singles) {
+    await sendSingle(item);
   }
   return results;
 }
@@ -2314,6 +2490,7 @@ function initMarketplaceInvite() {
     normalizeAffiliateCreator,
     insertWorkflowTask,
     sendWorkflowInvitations,
+    pauseWorkflowTask: (workflowId, options) => pauseWorkflowTask(db, workflowId, options),
     getWorkflow,
     getRunningMarketplaceWorkflow: getRunnableMarketplaceWorkflow,
     getAgentSettings,
@@ -2600,11 +2777,14 @@ function sellerContactInfo() {
   };
 }
 
-async function createTargetCollaboration({ shop, creator, products, message, commissionRate, sampleApprovalMode }) {
+async function createTargetCollaboration({ shop, creator, creators, products, message, commissionRate, sampleApprovalMode }) {
+  const list = (Array.isArray(creators) && creators.length ? creators : [creator]).filter(Boolean);
+  const openIds = [...new Set(list.map((item) => firstText(item.creator_open_id)).filter(Boolean))]
+    .slice(0, TARGET_COLLABORATION_MAX_CREATORS);
   if (!shop?.access_token || !shop?.shop_cipher) {
     return { pending: '店铺未完成 TikTok 授权，已生成待发送记录' };
   }
-  if (!creator.creator_open_id) {
+  if (!openIds.length) {
     return { pending: '缺少 creator_open_id，已生成待后台私信发送记录' };
   }
   if (process.env.TK_INVITE_EXECUTE !== '1') {
@@ -2626,7 +2806,7 @@ async function createTargetCollaboration({ shop, creator, products, message, com
     message: message || '',
     end_time: targetCollaborationEndTime(),
     products: tiktokProducts,
-    creator_user_open_ids: [creator.creator_open_id],
+    creator_user_open_ids: openIds,
     seller_contact_info: sellerContactInfo(),
     free_sample_rule: {
       has_free_sample: true,
@@ -2645,7 +2825,7 @@ async function createTargetCollaboration({ shop, creator, products, message, com
   if (!targetCollaborationId) {
     throw new Error(`TikTok Target Collaboration 创建成功但未返回 target_collaboration_id：${JSON.stringify(data).slice(0, 300)}`);
   }
-  return { targetCollaborationId, response: data };
+  return { targetCollaborationId, response: data, creator_user_open_ids: openIds };
 }
 
 function pickConversationId(data) {

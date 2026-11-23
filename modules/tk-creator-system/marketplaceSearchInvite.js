@@ -9,7 +9,8 @@ const DEFAULT_DAILY_LIMIT = 1000;
 const DEFAULT_QUOTA_CACHE_MS = 10 * 60 * 1000;
 const MIN_QUOTA_CACHE_MS = 5 * 60 * 1000;
 const MAX_QUOTA_CACHE_MS = 15 * 60 * 1000;
-const QUEUE_BUFFER = 20;
+const QUEUE_BUFFER = 50;
+const OFFICIAL_INVITE_BATCH_SIZE = 50;
 const TICK_MS = 5000;
 const CREATOR_QUOTA_CODES = new Set([16030100, 16024049]);
 const QUERY_QUOTA_CODES = new Set([45101004]);
@@ -207,6 +208,7 @@ function createMarketplaceSearchInvite(deps = {}) {
     normalizeAffiliateCreator,
     insertWorkflowTask,
     sendWorkflowInvitations,
+    pauseWorkflowTask,
     getWorkflow,
     getRunningMarketplaceWorkflow,
     getAgentSettings,
@@ -326,9 +328,55 @@ function createMarketplaceSearchInvite(deps = {}) {
     const byShop = parseJsonValue(settings.invite_daily_limit_by_shop, {}) || {};
     const shopLimit = numberOr(byShop[shopId], 0);
     if (shopLimit > 0) return shopLimit;
-    const settingLimit = Math.max(1, numberOr(settings.invite_daily_limit || settings.invite_target_count, DEFAULT_DAILY_LIMIT));
-    const workflowLimit = Math.max(1, numberOr(workflow?.config?.invite_daily_limit || workflow?.config?.invite_target_count, settingLimit));
+    const settingLimit = Math.max(1, numberOr(settings.invite_daily_limit, DEFAULT_DAILY_LIMIT));
+    const workflowDaily = numberOr(workflow?.config?.invite_daily_limit, 0);
+    const workflowLimit = workflowDaily > 0 ? workflowDaily : settingLimit;
     return Math.max(1, Math.min(settingLimit, workflowLimit));
+  }
+
+  function workflowTargetCount(workflow) {
+    return Math.max(0, numberOr(workflow?.config?.invite_target_count, 0));
+  }
+
+  function workflowSentCount(workflow) {
+    if (!workflow?.id) return 0;
+    return Number(db.prepare(`
+      SELECT COUNT(DISTINCT uid) AS c
+      FROM invitation_records
+      WHERE source = ? AND status = 'sent'
+    `).get(`workflow:${workflow.id}`)?.c || 0);
+  }
+
+  function pendingQueueCountAll(workflowId) {
+    return Number(db.prepare(`
+      SELECT COUNT(*) AS c
+      FROM agent_workflow_tasks
+      WHERE workflow_id = ?
+        AND task_type = 'invite'
+        AND status = 'admin_approved'
+    `).get(workflowId)?.c || 0);
+  }
+
+  function workflowTargetRemain(workflow) {
+    const target = workflowTargetCount(workflow);
+    if (target <= 0) return Infinity;
+    return Math.max(0, target - workflowSentCount(workflow));
+  }
+
+  function pauseWorkflowIfTargetReached(workflow) {
+    if (!workflow?.id || workflowTargetRemain(workflow) > 0) {
+      return { paused: false, sent: workflow?.id ? workflowSentCount(workflow) : 0, target: workflowTargetCount(workflow) };
+    }
+    if (typeof pauseWorkflowTask === 'function') {
+      pauseWorkflowTask(workflow.id, { nowText });
+    } else {
+      db.prepare(`
+        UPDATE agent_workflows
+        SET run_state = 'paused', updated_at = ?
+        WHERE id = ? AND active = 1
+      `).run(nowText(), workflow.id);
+    }
+    return { paused: true, sent: workflowSentCount(workflow), target: workflowTargetCount(workflow), reason: '任务邀约人数已达上限' };
   }
 
   function autorunEnabled(settings = settingsBundle()) {
@@ -604,16 +652,28 @@ function createMarketplaceSearchInvite(deps = {}) {
     }
     const cached = quotaCache.get(shop.id);
     const quotaRemain = adjustedQuotaRemain(shop.id, quota, cached?.sentAtFetch);
-    const remain = quota.unlimited ? dailyRemain : Math.max(0, Math.min(dailyRemain, quotaRemain));
+    const target = workflowTargetCount(workflow);
+    const targetRemain = workflowTargetRemain(workflow);
+    const remain = Math.max(0, Math.min(
+      quota.unlimited ? dailyRemain : Math.min(dailyRemain, quotaRemain),
+      Number.isFinite(targetRemain) ? targetRemain : dailyRemain
+    ));
+    let reason = '';
+    if (remain <= 0) {
+      if (target > 0 && targetRemain <= 0) reason = '任务邀约人数已达上限';
+      else if (dailyRemain <= 0) reason = '今日额度已用完';
+      else reason = '官方周额度已用完';
+    }
     return {
       dailyLimit,
       sent,
       dailyRemain,
+      target,
+      targetSent: workflowSentCount(workflow),
+      targetRemain: Number.isFinite(targetRemain) ? targetRemain : null,
       quota,
       remain,
-      reason: remain <= 0
-        ? (dailyRemain <= 0 ? '今日额度已用完' : '官方周额度已用完')
-        : '',
+      reason,
     };
   }
 
@@ -699,6 +759,9 @@ function createMarketplaceSearchInvite(deps = {}) {
       return { shop_id: shop.id, queued: 0, skipped: 0, reason: '退避中', cap };
     }
     const pending = pendingQueueCount(workflow.id, shop.id);
+    const pendingAll = pendingQueueCountAll(workflow.id);
+    const targetRemain = Number.isFinite(cap.targetRemain) ? cap.targetRemain : cap.remain;
+    const enqueueRoom = Math.max(0, Math.min(cap.remain - pending, targetRemain - pendingAll));
     if (!force && pending >= Math.min(QUEUE_BUFFER, cap.remain)) {
       return { shop_id: shop.id, queued: 0, skipped: 0, reason: '队列仍有待发送', pending, cap };
     }
@@ -744,7 +807,7 @@ function createMarketplaceSearchInvite(deps = {}) {
     let skippedInvited = 0;
     let skippedInvalid = 0;
     let skippedScore = 0;
-    const room = Math.max(0, cap.remain - pending);
+    const room = enqueueRoom;
     for (const raw of page.creators) {
       if (queued >= room) break;
       const candidate = toCandidate(shop, raw);
@@ -825,6 +888,10 @@ function createMarketplaceSearchInvite(deps = {}) {
   }
 
   function nextApprovedTask(workflow, shopId) {
+    return nextApprovedTasks(workflow, shopId, 1)[0] || null;
+  }
+
+  function nextApprovedTasks(workflow, shopId, limit) {
     return db.prepare(`
       SELECT * FROM agent_workflow_tasks
       WHERE workflow_id = ?
@@ -832,46 +899,47 @@ function createMarketplaceSearchInvite(deps = {}) {
         AND status = 'admin_approved'
         AND shop_id = ?
       ORDER BY id ASC
-      LIMIT 1
-    `).get(workflow.id, shopId);
+      LIMIT ?
+    `).all(workflow.id, shopId, Math.max(1, Number(limit || 1)));
   }
 
   async function sendOneForShop(shop, workflow) {
+    return sendBatchForShop(shop, workflow);
+  }
+
+  async function sendBatchForShop(shop, workflow) {
     const cap = await effectiveShopCap(shop, workflow);
     if (cap.remain <= 0) {
-      if (!cap.quota?.unlimited && cap.dailyRemain > 0) bumpStats(shop.id, { skipped_quota: 1, last_error: cap.reason });
+      if (cap.reason === '任务邀约人数已达上限') pauseWorkflowIfTargetReached(workflow);
+      else if (!cap.quota?.unlimited && cap.dailyRemain > 0) bumpStats(shop.id, { skipped_quota: 1, last_error: cap.reason });
       return { shop_id: shop.id, sent: 0, reason: cap.reason, cap };
     }
     if (shopPaused(shop.id)) return { shop_id: shop.id, sent: 0, reason: '退避中', cap };
-    const row = nextApprovedTask(workflow, shop.id);
-    if (!row) return { shop_id: shop.id, sent: 0, reason: '没有待发送任务', cap };
-    const task = { ...row, payload: parseJsonValue(row.payload_json, {}) };
+    const batchSize = Math.min(OFFICIAL_INVITE_BATCH_SIZE, cap.remain);
+    const rows = nextApprovedTasks(workflow, shop.id, batchSize);
+    if (!rows.length) return { shop_id: shop.id, sent: 0, reason: '没有待发送任务', cap };
+    const tasks = rows.map((row) => ({ ...row, payload: parseJsonValue(row.payload_json, {}) }));
     try {
-      const results = await sendWorkflowInvitations([task], workflow);
-      const result = results[0] || {};
-      const record = result.record_id
-        ? db.prepare('SELECT status, provider_message FROM invitation_records WHERE id = ?').get(result.record_id)
-        : null;
-      const message = String(record?.provider_message || result.provider_message || result.status || '');
-      const status = record?.status || result.status;
-      if (status === 'sent') {
-        clearBackoff(shop.id);
-        bumpStats(shop.id, { sent_ok: 1, last_error: '' });
-        return { shop_id: shop.id, sent: 1, result, cap };
+      const results = await sendWorkflowInvitations(tasks, workflow);
+      const sent = results.filter((item) => item.status === 'sent').length;
+      const failed = results.filter((item) => item.status === 'failed').length;
+      const messages = results.map((item) => String(item.provider_message || item.status || '')).filter(Boolean);
+      const message = messages.join(' | ').slice(0, 300);
+      if (sent) clearBackoff(shop.id);
+      if (sent) bumpStats(shop.id, { sent_ok: sent, last_error: '' });
+      if (failed) bumpStats(shop.id, { sent_failed: failed, last_error: message || '发送失败' });
+      const pause = pauseWorkflowIfTargetReached(workflow);
+      if (results.some((item) => CREATOR_QUOTA_CODES.has(errorCode({ message: item.provider_message, payload: { code: item.code } })))) {
+        return { shop_id: shop.id, sent, skipped_creator: true, results, cap, paused: pause.paused };
       }
-      if (CREATOR_QUOTA_CODES.has(errorCode({ message, payload: { code: result.code } }))) {
-        bumpStats(shop.id, { sent_failed: 1, last_error: '单达人/层级额度用尽，已跳过' });
-        return { shop_id: shop.id, sent: 0, skipped_creator: true, result, cap };
+      if (results.some((item) => isRateLimitError({ message: item.provider_message, status: item.status }) || /rate limit|app-group|200 new groups/i.test(String(item.provider_message || '')))) {
+        markBackoff(shop.id, new Error(message || '频控或24小时邀约组上限'));
+        return { shop_id: shop.id, sent, rate_limited: true, results, cap, paused: pause.paused };
       }
-      if (isRateLimitError({ message, status: result.status }) || /rate limit|app-group/i.test(message)) {
-        markBackoff(shop.id, new Error(message));
-        return { shop_id: shop.id, sent: 0, rate_limited: true, result, cap };
-      }
-      bumpStats(shop.id, { sent_failed: status === 'failed' ? 1 : 0, last_error: message.slice(0, 300) });
-      return { shop_id: shop.id, sent: status === 'sent' ? 1 : 0, result, cap };
+      return { shop_id: shop.id, sent, results, cap, paused: pause.paused };
     } catch (error) {
       const code = errorCode(error);
-      if (isRateLimitError(error)) {
+      if (isRateLimitError(error) || /200 new groups/i.test(String(error.message || ''))) {
         markBackoff(shop.id, error);
         return { shop_id: shop.id, sent: 0, rate_limited: true, error: error.message, cap };
       }
@@ -906,11 +974,20 @@ function createMarketplaceSearchInvite(deps = {}) {
       if (!usesMarketplaceInviteSource(workflow.config?.source)) {
         return { skipped: true, reason: '当前工作流不是查找达人来源' };
       }
+      if (workflowTargetRemain(workflow) <= 0) {
+        const pause = pauseWorkflowIfTargetReached(workflow);
+        return { skipped: true, reason: '任务邀约人数已达上限', paused: pause.paused };
+      }
       const shops = workflowShops(workflow);
       const results = [];
       for (const shop of shops) {
+        if (workflowTargetRemain(workflow) <= 0) {
+          const pause = pauseWorkflowIfTargetReached(workflow);
+          results.push({ shop_id: shop.id, skipped: true, reason: '任务邀约人数已达上限', paused: pause.paused });
+          break;
+        }
         const refill = await replenishShop(shop, workflow);
-        const send = await sendOneForShop(shop, workflow);
+        const send = await sendBatchForShop(shop, workflow);
         results.push({ shop_id: shop.id, refill, send });
       }
       return { skipped: false, results };
@@ -970,6 +1047,8 @@ function createMarketplaceSearchInvite(deps = {}) {
       send_interval_ms: sendIntervalMs(settings),
       search_interval_ms: searchIntervalMs(settings),
       default_daily_limit: numberOr(settings.invite_daily_limit, DEFAULT_DAILY_LIMIT),
+      invite_target_count: workflow ? workflowTargetCount(workflow) : 0,
+      invite_target_sent: workflow ? workflowSentCount(workflow) : 0,
       shops: shops.map((shop) => {
         const capLimit = configuredDailyLimit(shop.id, workflow, settings);
         const sent = sentTodayCount(shop.id);
@@ -1021,12 +1100,17 @@ function createMarketplaceSearchInvite(deps = {}) {
     searchIntervalMs,
     sendIntervalMs,
     configuredDailyLimit,
+    workflowTargetCount,
+    workflowSentCount,
+    workflowTargetRemain,
     fetchCreatorOutreachQuota,
     effectiveShopCap,
     searchOnePage,
     replenishShop,
     replenishWorkflow,
+    nextApprovedTasks,
     sendOneForShop,
+    sendBatchForShop,
     tick,
     startPacer,
     stopPacer,
@@ -1057,4 +1141,5 @@ module.exports = {
   DEFAULT_DAILY_LIMIT,
   DEFAULT_SEND_INTERVAL_MS,
   DEFAULT_SEARCH_INTERVAL_MS,
+  OFFICIAL_INVITE_BATCH_SIZE,
 };
