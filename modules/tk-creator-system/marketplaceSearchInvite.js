@@ -16,7 +16,8 @@ const CREATOR_QUOTA_CODES = new Set([16030100, 16024049]);
 const QUERY_QUOTA_CODES = new Set([45101004]);
 
 const DEFAULT_BASE_BODY = {
-  affiliate_data: { not_invited_l90_days: true },
+  // 不再默认排除近90天已邀约达人：只要官方邀约消息接收数量未达上限即可发送。
+  affiliate_data: { not_invited_l90_days: false },
   data_groups: [
     'BASIC_CREATOR_INFORMATION',
     'CONTENT_PERFORMANCE',
@@ -38,6 +39,102 @@ const DEFAULT_FILTER_ROTATION = [
   { follower_demographics: { count_range: { count_ge: 50000, count_le: 200000 } } },
   { follower_demographics: { count_range: { count_ge: 200000, count_le: -1 } } },
 ];
+
+
+function parseProductIds(...values) {
+  const ids = [];
+  const add = (value) => {
+    if (value === undefined || value === null || value === '') return;
+    if (Array.isArray(value)) {
+      value.forEach(add);
+      return;
+    }
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (!text) return;
+      if (text.startsWith('[') || text.startsWith('{')) {
+        try {
+          add(JSON.parse(text));
+          return;
+        } catch (_) {}
+      }
+      if (text.includes(',')) {
+        text.split(',').forEach(add);
+        return;
+      }
+      if (!ids.includes(text)) ids.push(text);
+      return;
+    }
+    const text = String(value).trim();
+    if (text && !ids.includes(text)) ids.push(text);
+  };
+  values.forEach(add);
+  return ids;
+}
+
+function sharesAnyProduct(left, right) {
+  if (!left.length || !right.length) return false;
+  const set = new Set(left.map((id) => String(id)));
+  return right.some((id) => set.has(String(id)));
+}
+
+function isCreatorReceiveQuotaFailure(row) {
+  return row?.status === 'failed' && /16030100|16024049/.test(String(row.provider_message || ''));
+}
+
+function isTargetCollaborationConflict(row) {
+  const text = String(row?.provider_message || '');
+  return row?.status === 'failed' && /target_collaboration_conflicts|16024022|exist creator and product|conflict pair/i.test(text);
+}
+
+function shouldSkipCreatorRecord(row, workflowProductIds) {
+  if (isCreatorReceiveQuotaFailure(row)) return true;
+  const sameProduct = sharesAnyProduct(workflowProductIds, parseProductIds(row?.product_id, row?.product_ids));
+  if (!sameProduct) return false;
+  return ['sent', 'pending'].includes(row?.status) || isTargetCollaborationConflict(row);
+}
+
+function officialReceiveLimitReached(raw = {}, profile = {}) {
+  const sources = [
+    raw,
+    profile,
+    raw.collaboration,
+    raw.collaboration_info,
+    raw.invite_info,
+    raw.invitation_info,
+    profile.collaboration,
+    profile.collaboration_info,
+    profile.invite_info,
+    profile.invitation_info,
+  ].filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+  for (const src of sources) {
+    if (src.can_receive_invitation === false || src.can_receive_invite === false || src.can_be_invited === false) {
+      return true;
+    }
+    if (src.is_invitation_limit_reached === true || src.invitation_limit_reached === true || src.receive_limit_reached === true) {
+      return true;
+    }
+    for (const key of [
+      'invitation_remain',
+      'remaining_invitation_count',
+      'left_invitation_count',
+      'invite_message_remain',
+      'invitation_message_remain',
+    ]) {
+      if (src[key] !== undefined && src[key] !== null && src[key] !== '' && Number(src[key]) === 0) return true;
+    }
+    const received = numberOr(
+      src.invitation_received_count ?? src.received_invitation_count ?? src.invite_received_count ?? src.invitation_message_received_count,
+      NaN
+    );
+    const limit = numberOr(
+      src.invitation_limit ?? src.invitation_receive_limit ?? src.max_invitation_count ?? src.invitation_message_limit,
+      NaN
+    );
+    if (Number.isFinite(received) && Number.isFinite(limit) && limit > 0 && received >= limit) return true;
+  }
+  return false;
+}
 
 function usesMarketplaceInviteSource(source) {
   const value = String(source || 'marketplace_search');
@@ -316,7 +413,10 @@ function createMarketplaceSearchInvite(deps = {}) {
   function baseSearchBody(settings = settingsBundle()) {
     const envBody = parseJsonValue(process.env.TK_AFFILIATE_CREATOR_POOL_BODY, {});
     const settingBody = parseJsonValue(settings.marketplace_search_base_body, {});
-    return mergeSearchBody(mergeSearchBody(DEFAULT_BASE_BODY, envBody), settingBody);
+    const body = mergeSearchBody(mergeSearchBody(DEFAULT_BASE_BODY, envBody), settingBody);
+    // 强制关闭官方「近90天未邀约」筛选，避免配置覆盖后再次把可复邀达人滤掉。
+    body.affiliate_data = { ...(body.affiliate_data || {}), not_invited_l90_days: false };
+    return body;
   }
 
   function filterRotation(settings = settingsBundle()) {
@@ -448,7 +548,7 @@ function createMarketplaceSearchInvite(deps = {}) {
     `).get(workflowId, shopId)?.c || 0);
   }
 
-  function invitedKeySet(shopId) {
+  function invitedKeySet(shopId, workflow) {
     const set = new Set();
     const add = (...values) => {
       for (const value of values) {
@@ -456,23 +556,37 @@ function createMarketplaceSearchInvite(deps = {}) {
         if (text) set.add(text);
       }
     };
+    const productIds = parseProductIds(workflow?.config?.product_ids, workflow?.config?.product_id);
     db.prepare(`
-      SELECT uid, creator_open_id, creator_handle, status, provider_message
+      SELECT uid, creator_open_id, creator_handle, status, provider_message, product_id, product_ids
       FROM invitation_records
       WHERE shop_id = ?
     `).all(shopId).forEach((row) => {
-      const failedQuota = row.status === 'failed' && /16030100|16024049/.test(String(row.provider_message || ''));
-      if (['sent', 'pending'].includes(row.status) || failedQuota) {
+      if (shouldSkipCreatorRecord(row, productIds)) {
         add(row.uid, row.creator_open_id, row.creator_handle);
       }
     });
     db.prepare(`
-      SELECT uid, creator_handle
+      SELECT workflow_id, uid, creator_handle, payload_json, status
       FROM agent_workflow_tasks
       WHERE task_type = 'invite'
         AND shop_id = ?
         AND status IN ('admin_approved', 'agent_review', 'executed')
-    `).all(shopId).forEach((row) => add(row.uid, row.creator_handle));
+    `).all(shopId).forEach((row) => {
+      const sameWorkflow = Number(row.workflow_id || 0) === Number(workflow?.id || 0);
+      const payload = parseJsonValue(row.payload_json, {}) || {};
+      const taskProductIds = parseProductIds(
+        payload.product_ids,
+        payload.product_id,
+        payload.candidate?.product_ids,
+        payload.candidate?.product_id,
+        payload.config_snapshot?.product_ids,
+        payload.config_snapshot?.product_id
+      );
+      if (sameWorkflow || sharesAnyProduct(productIds, taskProductIds)) {
+        add(row.uid, row.creator_handle);
+      }
+    });
     return set;
   }
 
@@ -511,6 +625,7 @@ function createMarketplaceSearchInvite(deps = {}) {
       metrics_source: 'marketplace_search',
       has_invited_90d: Boolean(profile.has_invited_90d),
       is_creator_blocked: Boolean(profile.is_creator_blocked),
+      receive_limit_reached: officialReceiveLimitReached(raw, profile),
       raw,
     };
   }
@@ -525,7 +640,7 @@ function createMarketplaceSearchInvite(deps = {}) {
   function candidateAcceptable(candidate, workflow) {
     if (!candidate.creator_open_id) return { ok: false, reason: '缺少 creator_open_id' };
     if (candidate.is_creator_blocked) return { ok: false, reason: '达人已被屏蔽' };
-    if (candidate.has_invited_90d) return { ok: false, reason: '官方标记近90天已邀约' };
+    if (candidate.receive_limit_reached) return { ok: false, reason: '达人邀约消息接收数量已达上限' };
     const standard = getReviewStandard ? getReviewStandard() : {};
     const fansLimit = numberOr(standard.fans_hard_limit, 0);
     if (fansLimit && Number(candidate.fans || 0) < fansLimit) {
@@ -802,7 +917,7 @@ function createMarketplaceSearchInvite(deps = {}) {
       return { shop_id: shop.id, queued: 0, error: error.message, cap };
     }
 
-    const invited = invitedKeySet(shop.id);
+    const invited = invitedKeySet(shop.id, workflow);
     let queued = 0;
     let skippedInvited = 0;
     let skippedInvalid = 0;
@@ -1118,6 +1233,9 @@ function createMarketplaceSearchInvite(deps = {}) {
     totalDailyRemaining,
     workflowShops,
     sentTodayCount,
+    parseProductIds,
+    officialReceiveLimitReached,
+    shouldSkipCreatorRecord,
     DEFAULT_FILTER_ROTATION,
     DEFAULT_BASE_BODY,
     DEFAULT_DAILY_LIMIT,
@@ -1136,6 +1254,9 @@ module.exports = {
   nextBackoffMs,
   errorCode,
   isRateLimitError,
+  parseProductIds,
+  officialReceiveLimitReached,
+  shouldSkipCreatorRecord,
   DEFAULT_FILTER_ROTATION,
   DEFAULT_BASE_BODY,
   DEFAULT_DAILY_LIMIT,

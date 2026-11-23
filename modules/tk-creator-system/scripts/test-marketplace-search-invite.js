@@ -12,7 +12,11 @@ const {
   nextBackoffMs,
   errorCode,
   isRateLimitError,
+  parseProductIds,
+  officialReceiveLimitReached,
+  shouldSkipCreatorRecord,
   createMarketplaceSearchInvite,
+  DEFAULT_BASE_BODY,
 } = require('../marketplaceSearchInvite');
 
 const tests = [];
@@ -165,7 +169,7 @@ test('in-memory flow: one page enqueue, skip invited, stop when remain is 0', as
   const shops = [{ id: 'mir', name: 'MIR HOME', access_token: 't', shop_cipher: 'c' }];
   const tasks = [];
   const records = [
-    { uid: 'old-1', creator_open_id: 'old-1', creator_handle: 'old_handle', status: 'sent', provider_message: 'ok', shop_id: 'mir', sent_at: '2026-11-19 02:00:00' },
+    { uid: 'old-1', creator_open_id: 'old-1', creator_handle: 'old_handle', status: 'failed', provider_message: '16030100 invitation receive limit', shop_id: 'mir', sent_at: '2026-11-19 02:00:00' },
   ];
   const cursors = new Map();
   const stats = new Map();
@@ -792,6 +796,132 @@ test('tick pauses the workflow when its invite target is already reached', async
   }
 });
 
+
+
+test('product id parsing and skip rules prefer receive limits over prior invites', () => {
+  assert.deepEqual(parseProductIds([36], '36', '["36"]'), ['36']);
+  assert.equal(officialReceiveLimitReached({}, {}), false);
+  assert.equal(officialReceiveLimitReached({ profile: { has_invited_90d: true } }, { has_invited_90d: true }), false);
+  assert.equal(officialReceiveLimitReached({ can_receive_invitation: false }), true);
+  assert.equal(officialReceiveLimitReached({}, { invitation_remain: 0 }), true);
+  assert.equal(officialReceiveLimitReached({ invitation_received_count: 5, invitation_limit: 5 }), true);
+  assert.equal(officialReceiveLimitReached({ invitation_received_count: 2, invitation_limit: 5 }), false);
+
+  assert.equal(shouldSkipCreatorRecord({ status: 'failed', provider_message: 'error 16024049' }, ['36']), true);
+  assert.equal(shouldSkipCreatorRecord({
+    status: 'sent', product_id: 1, product_ids: '[1]', provider_message: 'ok',
+  }, ['36']), false);
+  assert.equal(shouldSkipCreatorRecord({
+    status: 'sent', product_id: 36, product_ids: '[36]', provider_message: 'ok',
+  }, ['36']), true);
+  assert.equal(shouldSkipCreatorRecord({
+    status: 'failed', product_id: 36, provider_message: 'TikTok Target Collaboration 创建成功但未返回 target_collaboration_id：{"target_collaboration_conflicts":[]}',
+  }, ['36']), true);
+  assert.equal(shouldSkipCreatorRecord({
+    status: 'failed', product_id: 1, provider_message: 'target_collaboration_conflicts',
+  }, ['36']), false);
+  assert.equal(DEFAULT_BASE_BODY.affiliate_data.not_invited_l90_days, false);
+});
+
+test('search enqueue allows previously invited creators unless receive limit or same-product conflict', async () => {
+  const shops = [{ id: 'oku', name: 'OKUYOSHI', access_token: 't', shop_cipher: 'c' }];
+  const tasks = [];
+  const records = [
+    { uid: 'other-1', creator_open_id: 'other-1', creator_handle: 'other_handle', status: 'sent', provider_message: 'ok', shop_id: 'oku', product_id: 1, product_ids: '[1]' },
+    { uid: 'same-1', creator_open_id: 'same-1', creator_handle: 'same_handle', status: 'failed', provider_message: 'target_collaboration_conflicts', shop_id: 'oku', product_id: 36, product_ids: '[36]' },
+    { uid: 'quota-1', creator_open_id: 'quota-1', creator_handle: 'quota_handle', status: 'failed', provider_message: '16030100', shop_id: 'oku' },
+  ];
+  const cursors = new Map();
+  const stats = new Map();
+  let searchBody = null;
+  const db = {
+    exec() {},
+    prepare(sql) {
+      return {
+        run(...args) {
+          if (/INSERT INTO marketplace_search_cursors/.test(sql)) {
+            cursors.set(args[0], {
+              shop_id: args[0], filter_index: args[1], filter_json: args[2], page_token: args[3],
+              search_key: args[4], page_count: args[5], empty_pages: args[6], cycle_count: args[7],
+            });
+          }
+          if (/INSERT INTO marketplace_invite_daily_stats/.test(sql)) {
+            stats.set(`${args[0]}:${args[1]}`, { shop_id: args[0], day: args[1] });
+          }
+        },
+        get(...args) {
+          if (/COUNT\(\*\)/.test(sql) && /invitation_records/.test(sql)) return { c: 0 };
+          if (/COUNT\(\*\)/.test(sql) && /agent_workflow_tasks/.test(sql)) return { c: 0 };
+          if (/marketplace_search_cursors/.test(sql)) return cursors.get(args[0]) || null;
+          if (/marketplace_invite_daily_stats/.test(sql)) return stats.get(`${args[0]}:${args[1]}`) || { shop_id: args[0], day: args[1] };
+          if (/FROM shops WHERE id/.test(sql)) return shops[0];
+          return null;
+        },
+        all(...args) {
+          if (/FROM invitation_records/.test(sql)) return records.filter((row) => row.shop_id === args[0]);
+          if (/FROM agent_workflow_tasks/.test(sql)) return tasks.filter((item) => item.shop_id === args[0]);
+          if (/FROM shops/.test(sql)) return shops;
+          return [];
+        },
+      };
+    },
+  };
+
+  const api = createMarketplaceSearchInvite({
+    db,
+    tiktokRequest: async ({ path, body }) => {
+      if (path.includes('creator_outreach/quota')) return { unlimited: true, quota_use: 0 };
+      searchBody = body;
+      return {
+        creators: [
+          { creator_open_id: 'other-1', username: 'other_handle', nickname: 'Other', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000, profile: { has_invited_90d: true } },
+          { creator_open_id: 'same-1', username: 'same_handle', nickname: 'Same', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000 },
+          { creator_open_id: 'quota-1', username: 'quota_handle', nickname: 'Quota', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000 },
+          { creator_open_id: 'limit-1', username: 'limit_handle', nickname: 'Limit', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000, can_receive_invitation: false },
+          { creator_open_id: 'fresh-1', username: 'fresh_handle', nickname: 'Fresh', follower_count: 8000, avgView: 5000, videos30d: 100, salesCount30d: 1000 },
+        ],
+        next_page_token: 'page-2',
+        search_key: 'key-1',
+      };
+    },
+    normalizeAffiliateCreator: (raw) => ({
+      uid: raw.creator_open_id,
+      creatorOpenId: raw.creator_open_id,
+      creatorName: raw.nickname,
+      creatorHandle: raw.username,
+      fans: raw.follower_count,
+      category: '',
+      fulfillmentRate: 0,
+      avgView: raw.avgView,
+      videos30d: raw.videos30d,
+      salesCount30d: raw.salesCount30d,
+      salesAmount30d: 10000,
+    }),
+    insertWorkflowTask: (_workflowId, _type, status, candidate) => {
+      tasks.push({ id: tasks.length + 1, shop_id: candidate.shop_id, uid: candidate.uid, status, workflow_id: 12 });
+    },
+    sendWorkflowInvitations: async () => [],
+    getWorkflow: () => ({ id: 12, config: { source: 'marketplace_search', shop: 'oku', product_ids: [36], invite_daily_limit: 1000, invite_target_count: 1000 } }),
+    getAgentSettings: () => ({
+      invite_daily_limit: 1000,
+      marketplace_search_invite_autorun: 1,
+      marketplace_search_base_body: JSON.stringify({ affiliate_data: { not_invited_l90_days: true } }),
+    }),
+    getAgentRuntime: () => ({ paused: false }),
+    getAgentFlowStates: () => [{ key: 'auto_invite', active: true }],
+    getReviewStandard: () => DEFAULT_REVIEW_STANDARD,
+    agentScoreCandidate: testScoreCandidate,
+    writeSyncLog: () => {},
+  });
+
+  const workflow = { id: 12, config: { source: 'marketplace_search', shop: 'oku', product_ids: [36], invite_daily_limit: 1000, invite_target_count: 1000 } };
+  const result = await api.replenishShop(shops[0], workflow, { force: true });
+  assert.equal(searchBody.affiliate_data.not_invited_l90_days, false);
+  assert.equal(result.queued, 2);
+  assert.equal(result.skipped_invited, 2);
+  assert.equal(result.skipped_invalid, 1);
+  assert.deepEqual(tasks.map((row) => row.uid), ['other-1', 'fresh-1']);
+});
 
 (async () => {
   let failed = 0;
