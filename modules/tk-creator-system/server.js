@@ -13,6 +13,7 @@ const { tiktokRequest } = require('./tiktokApi');
 const { createMarketplaceSearchInvite, usesMarketplaceInviteSource, shanghaiDayRange } = require('./marketplaceSearchInvite');
 const { listWorkflowTasks, workflowCreatorSummaryQuery, listWorkflowCreatorSummary, attachSampleInviteSources, ensureWorkflowRunStateColumn, pauseWorkflowTask, resumeWorkflowTask, getRunningMarketplaceWorkflow, liveInviteTargetWorkflow, invitePacerSummary, parseWorkflowConfig, WORKFLOW_RUN_RUNNING } = require('./workflowTaskList');
 const { ensureSampleReviewTasks, attachSampleReviewFields, isSampleCenterReviewWorkflow } = require('./sampleCenterReview');
+const { resolveInviteTemplate, applyProductTemplateOnSave } = require('./productInviteTemplates');
 let marketplaceInvite;
 const { getAppConfig, getAppSecretStatus } = require('./tiktokSecrets');
 
@@ -635,6 +636,7 @@ CREATE TABLE IF NOT EXISTS invitation_templates (
   shop_ids TEXT NOT NULL DEFAULT '[]',
   language TEXT NOT NULL DEFAULT 'zh',
   version INTEGER NOT NULL DEFAULT 1,
+  parent_template_id INTEGER,
   product_id INTEGER,
   content TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
@@ -845,6 +847,7 @@ try { db.exec('ALTER TABLE invitation_templates ADD COLUMN version INTEGER NOT N
 try { db.exec("UPDATE invitation_templates SET scene = CASE WHEN type = 'confirmation' THEN 'sample_followup' WHEN name LIKE '%复邀%' THEN 'reinvite' ELSE 'first_invite' END WHERE scene IS NULL OR scene = ''"); } catch (_) {}
 try { db.exec("UPDATE invitation_templates SET shop_ids = '[]' WHERE shop_ids IS NULL OR shop_ids = ''"); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_templates ADD COLUMN product_id INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE invitation_templates ADD COLUMN parent_template_id INTEGER'); } catch (_) {}
 try { db.exec("ALTER TABLE invitation_records ADD COLUMN template_type TEXT NOT NULL DEFAULT 'dm'"); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN product_id INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE invitation_records ADD COLUMN product_ids TEXT'); } catch (_) {}
@@ -1516,6 +1519,9 @@ function saveWorkflow(input = {}, createNew = false) {
   config.product_audit_rules = config.product_audit_rules && typeof config.product_audit_rules === 'object'
     ? config.product_audit_rules
     : {};
+  const finalized = applyProductTemplateOnSave(db, config, { now: nowText() });
+  Object.keys(config).forEach((key) => { if (!(key in finalized)) delete config[key]; });
+  Object.assign(config, finalized);
   const name = String(input.name || current?.name || '自动化工作流').trim();
   if (createNew || !current) {
     const now = nowText();
@@ -2225,8 +2231,7 @@ function waitForWorkflowInviteSlot(send) {
 
 async function sendWorkflowInvitations(tasks, workflow) {
   const config = workflow.config;
-  const templateId = Number(config.template_id || 0);
-  const template = db.prepare('SELECT * FROM invitation_templates WHERE id = ? AND active = 1').get(templateId);
+  const template = resolveInviteTemplate(db, config) || db.prepare('SELECT * FROM invitation_templates WHERE id = ? AND active = 1').get(Number(config.template_id || 0));
   if (!template) throw new Error('工作流未配置有效邀约模板');
   const productIds = (config.product_ids || []).map(Number).filter(Boolean);
   const productPlaceholders = productIds.map(() => '?').join(',');
@@ -4109,6 +4114,7 @@ function normalizeTemplateInput(body = {}) {
     language,
     shopIds,
     productId: body.product_id ? Number(body.product_id) : null,
+    parentTemplateId: body.parent_template_id ? Number(body.parent_template_id) : null,
     commissionRate,
   };
 }
@@ -4142,11 +4148,14 @@ app.get('/api/invitations/templates', (req, res) => {
   ensureInvitationTemplates();
   const stats = new Map(templateStats().map((row) => [Number(row.id), row]));
   const rows = db.prepare(`
-    SELECT t.id, t.name, t.channel, t.type, t.scene, t.shop_ids, t.language, t.version, t.product_id, t.content, t.active, COALESCE(a.commission_rate, 0) AS commission_rate
-    FROM invitation_templates
-    t LEFT JOIN agent_template_terms a ON a.template_id = t.id
-    WHERE active = 1
-    ORDER BY type, id
+    SELECT t.id, t.name, t.channel, t.type, t.scene, t.shop_ids, t.language, t.version, t.parent_template_id, t.product_id, t.content, t.active, COALESCE(a.commission_rate, 0) AS commission_rate,
+      p.name AS product_name, parent.name AS parent_template_name
+    FROM invitation_templates t
+    LEFT JOIN agent_template_terms a ON a.template_id = t.id
+    LEFT JOIN products p ON p.id = t.product_id
+    LEFT JOIN invitation_templates parent ON parent.id = t.parent_template_id
+    WHERE t.active = 1
+    ORDER BY CASE WHEN t.product_id IS NULL OR t.product_id = 0 THEN 0 ELSE 1 END, t.type, t.id
   `).all();
   res.json(rows.map((row) => ({ ...row, shop_ids: parseJsonObject(row.shop_ids, []), stats: stats.get(Number(row.id)) || { sent_count: 0, delivered_count: 0, reply_count: 0, accepted_count: 0, reply_rate: 0, accept_rate: 0 } })));
 });
@@ -4156,9 +4165,9 @@ app.post('/api/invitations/templates', (req, res) => {
   try { validateTemplateInput(input); } catch (error) { return res.status(400).json({ error: error.message }); }
   const now = nowText();
   const result = db.prepare(`
-    INSERT INTO invitation_templates (name, channel, type, scene, shop_ids, language, version, product_id, content, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?, ?)
-  `).run(input.name, input.channel, input.type, input.scene, JSON.stringify(input.shopIds), input.language, input.productId, input.content, now, now);
+    INSERT INTO invitation_templates (name, channel, type, scene, shop_ids, language, version, parent_template_id, product_id, content, active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?)
+  `).run(input.name, input.channel, input.type, input.scene, JSON.stringify(input.shopIds), input.language, input.parentTemplateId, input.productId, input.content, now, now);
   const templateId = Number(result.lastInsertRowid);
   if (input.commissionRate !== null) db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(templateId, input.commissionRate, now);
   db.prepare('INSERT INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(templateId, input.name, input.scene, JSON.stringify(input.shopIds), input.language, input.type, input.productId, input.content, input.commissionRate, now);
@@ -4177,9 +4186,9 @@ app.put('/api/invitations/templates/:id', (req, res) => {
   db.prepare('INSERT OR IGNORE INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, current.version || 1, current.name, current.scene || 'first_invite', current.shop_ids || '[]', current.language || 'zh', current.type || 'dm', current.product_id, current.content, oldCommission, current.updated_at || nowText());
   db.prepare(`
     UPDATE invitation_templates
-    SET name = ?, channel = ?, type = ?, scene = ?, shop_ids = ?, language = ?, version = ?, product_id = ?, content = ?, updated_at = ?
+    SET name = ?, channel = ?, type = ?, scene = ?, shop_ids = ?, language = ?, version = ?, parent_template_id = ?, product_id = ?, content = ?, updated_at = ?
     WHERE id = ?
-  `).run(input.name, input.channel, input.type, input.scene, JSON.stringify(input.shopIds), input.language, nextVersion, input.productId, input.content, nowText(), id);
+  `).run(input.name, input.channel, input.type, input.scene, JSON.stringify(input.shopIds), input.language, nextVersion, input.parentTemplateId, input.productId, input.content, nowText(), id);
   db.prepare('INSERT OR REPLACE INTO agent_template_terms (template_id, commission_rate, updated_at) VALUES (?, ?, ?)').run(id, input.commissionRate ?? 0, nowText());
   db.prepare('INSERT INTO invitation_template_versions (template_id, version, name, scene, shop_ids, language, type, product_id, content, commission_rate, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, nextVersion, input.name, input.scene, JSON.stringify(input.shopIds), input.language, input.type, input.productId, input.content, input.commissionRate, nowText());
   res.json({ success: true, version: nextVersion });

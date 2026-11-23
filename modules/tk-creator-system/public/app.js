@@ -30,6 +30,7 @@ let INVITE_CANDIDATES = [];
 let INVITE_SELECTED = new Set();
 let INVITE_IMPORTED = [];
 let INVITE_TEMPLATES = [];
+let TEMPLATE_PRODUCTS = [];
 let INVITE_PRODUCTS = [];
 let INVITE_PRODUCT_SELECTED = new Set();
 let INVITE_PRODUCT_SHOP = '';
@@ -540,6 +541,7 @@ function saveInviteProducts() {
   if (PRODUCT_PICKER_CONTEXT === 'workflow') {
     WORKFLOW_PRODUCT_SELECTED = new Set([...checks].map(el => String(el.value)));
     renderWorkflowProductSummary();
+    fillWorkflowInviteMessage(true);
   } else {
     INVITE_PRODUCT_SELECTED = new Set([...checks].map(el => String(el.value)));
     renderInviteProductSummary();
@@ -1425,7 +1427,8 @@ async function renderBDMgmt() {
 }
 
 function agentTemplateManagerHtml() {
-  const productOptions = '<option value="">发送时选择产品</option>' + INVITE_PRODUCTS.map(p => `<option value="${p.id}">${esc(p.emoji || '')} ${esc(p.name)}${p.sku ? ` · ${esc(p.sku)}` : ''}</option>`).join('');
+  const productOptions = '<option value="">不选则为通用模版</option>' + templateProductList().map(p => `<option value="${p.id}">${esc(p.emoji || '')} ${esc(p.name)}${p.sku ? ` · ${esc(p.sku)}` : ''}</option>`).join('');
+  const parentOptions = '<option value="">不指定所属通用模版</option>' + genericInviteTemplates().map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
   const sceneOptions = [['first_invite','首次邀约'],['reinvite','复邀老达人'],['publish_followup','催发布'],['sample_followup','询问样品收到'],['inquiry','回复咨询']].map(([v, label]) => `<option value="${v}">${label}</option>`).join('');
   const shopOptions = SHOPS.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
   const sceneLabels = { first_invite: '首次邀约', reinvite: '复邀老达人', publish_followup: '催发布', sample_followup: '询问样品收到', inquiry: '回复咨询', shipping_followup: '物流跟进' };
@@ -1445,20 +1448,76 @@ function agentTemplateManagerHtml() {
       </div>
       <div class="form-row"><label class="form-label">适用店铺（可多选，不选表示全部店铺）</label><select class="form-input" id="agent-template-shops" multiple size="${Math.min(4, Math.max(2, SHOPS.length))}">${shopOptions}</select></div>
       <div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="agent-template-commission" type="number" min="0" max="100" step="0.01" placeholder="合作邀约填写，任务创建时自动读取"></div>
-      <div class="form-row" id="agent-template-product-row" style="display:none"><label class="form-label">默认合作产品</label><select class="form-input" id="agent-template-product">${productOptions}</select></div>
+      <div class="form-row" id="agent-template-product-row"><label class="form-label">关联产品</label><select class="form-input" id="agent-template-product" onchange="onAgentTemplateProductChange()">${productOptions}</select><div class="module-meta">不选产品则保存为上面的通用模版；选择产品则保存到下方「产品邀约模版」，名称默认用产品名称。</div></div>
+      <div class="form-row" id="agent-template-parent-row" style="display:none"><label class="form-label">所属通用模版</label><select class="form-input" id="agent-template-parent">${parentOptions}</select></div>
       <div class="form-row"><label class="form-label">内容变量：{{commission}} {{product_name}} {{shop_name}} {{creator_name}}</label><div class="module-meta">兼容变量：{{creator_handle}} {{product_link}} {{sample_apply_link}}</div><textarea class="bd-note-ta" id="agent-template-content" style="min-height:100px" placeholder="输入模板内容"></textarea></div>
       <input type="hidden" id="agent-template-id">
       <div style="display:flex;gap:8px;margin-bottom:12px"><button class="btn btn-primary" onclick="saveInvitationTemplate()">保存模板</button><button class="btn btn-outline" onclick="previewInvitationTemplate()">预览</button><button class="btn btn-outline" onclick="clearInvitationTemplateForm()">清空</button></div>
+      <h3 style="margin:16px 0 8px">通用模版</h3>
+      <div class="module-meta" style="margin-bottom:8px">每个场景保留一套通用话术，没有产品固定模版时会使用这里的内容。</div>
       <div class="agent-list">
-        ${INVITE_TEMPLATES.map(t => { const st = t.stats || {}; return `<div class="agent-row"><div><strong>${esc(t.name)}</strong><div class="agent-load">${sceneLabels[t.scene] || '未分类'} · ${t.language === 'zh' ? '中文' : t.language === 'en' ? 'English' : '日本語'} · v${t.version || 1} · ${t.active ? '启用' : '停用'}</div><div class="agent-load">发送 ${st.sent_count || 0} · 回复 ${st.reply_count || 0}（${Math.round((st.reply_rate || 0) * 100)}%） · 接受 ${st.accepted_count || 0}（${Math.round((st.accept_rate || 0) * 100)}%）</div><div class="agent-load">${esc((t.content || '').slice(0, 80))}</div></div><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><button class="btn btn-outline" onclick="editInvitationTemplate(${t.id})">编辑</button><button class="btn btn-outline" onclick="previewInvitationTemplate(${t.id})">预览</button><button class="btn btn-outline" onclick="loadTemplateVersions(${t.id})">版本</button><button class="btn btn-ghost" onclick="deleteInvitationTemplate(${t.id})">停用</button></div></div>`; }).join('') || '<div class="empty-state">暂无模板</div>'}
+        ${templateCardListHtml(genericInviteTemplates(), sceneLabels) || '<div class="empty-state">暂无通用模版</div>'}
+      </div>
+      <h3 style="margin:22px 0 8px">产品邀约模版</h3>
+      <div class="module-meta" style="margin-bottom:8px">按产品名称区分。新建自动化任务时选择对应产品，会自动识别并带出这里的话术。</div>
+      <div class="agent-list">
+        ${templateCardListHtml(productInviteTemplates(), sceneLabels) || '<div class="empty-state">还没有产品固定模版。创建任务时自定义话术后，可勾选保存到这里。</div>'}
       </div>
     </div>`;
 }
 
+function templateProductList() {
+  return (TEMPLATE_PRODUCTS && TEMPLATE_PRODUCTS.length) ? TEMPLATE_PRODUCTS : INVITE_PRODUCTS;
+}
+
+function isGenericInviteTemplate(t) {
+  return !Number(t?.product_id || 0);
+}
+
+function genericInviteTemplates() {
+  return INVITE_TEMPLATES.filter(isGenericInviteTemplate);
+}
+
+function productInviteTemplates() {
+  return INVITE_TEMPLATES.filter(t => !isGenericInviteTemplate(t));
+}
+
+function templateCardListHtml(list, sceneLabels) {
+  return list.map(t => {
+    const st = t.stats || {};
+    const title = t.product_id ? (t.product_name || t.name) : t.name;
+    const parentNote = t.product_id && t.parent_template_name ? `基于「${esc(t.parent_template_name)}」 · ` : '';
+    return `<div class="agent-row"><div><strong>${esc(title)}</strong><div class="agent-load">${parentNote}${sceneLabels[t.scene] || '未分类'} · ${t.language === 'zh' ? '中文' : t.language === 'en' ? 'English' : '日本語'} · v${t.version || 1} · ${t.active ? '启用' : '停用'}</div><div class="agent-load">发送 ${st.sent_count || 0} · 回复 ${st.reply_count || 0}（${Math.round((st.reply_rate || 0) * 100)}%） · 接受 ${st.accepted_count || 0}（${Math.round((st.accept_rate || 0) * 100)}%）</div><div class="agent-load">${esc((t.content || '').slice(0, 80))}</div></div><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><button class="btn btn-outline" onclick="editInvitationTemplate(${t.id})">编辑</button><button class="btn btn-outline" onclick="previewInvitationTemplate(${t.id})">预览</button><button class="btn btn-outline" onclick="loadTemplateVersions(${t.id})">版本</button><button class="btn btn-ghost" onclick="deleteInvitationTemplate(${t.id})">停用</button></div></div>`;
+  }).join('');
+}
+
+function findProductInviteTemplateFor(productId, generic) {
+  const pid = Number(productId || 0);
+  if (!pid) return null;
+  const type = generic?.type || 'collab';
+  const scene = generic?.scene;
+  const parentId = Number(generic?.id || 0);
+  const rows = productInviteTemplates().filter(t => Number(t.product_id) === pid && (t.type || 'collab') === type);
+  const byParent = parentId ? rows.filter(t => Number(t.parent_template_id || 0) === parentId) : [];
+  const pool = byParent.length ? byParent : (scene ? rows.filter(t => t.scene === scene) : rows);
+  return (pool.length ? pool : rows)[0] || null;
+}
+
 function onAgentTemplateTypeChange() {
-  const type = document.getElementById('agent-template-type')?.value || 'dm';
-  const row = document.getElementById('agent-template-product-row');
-  if (row) row.style.display = type === 'collab' ? '' : 'none';
+  onAgentTemplateProductChange();
+}
+
+function onAgentTemplateProductChange() {
+  const productId = document.getElementById('agent-template-product')?.value || '';
+  const parentRow = document.getElementById('agent-template-parent-row');
+  if (parentRow) parentRow.style.display = productId ? '' : 'none';
+  const name = document.getElementById('agent-template-name');
+  if (!name || name.dataset.userNamed === '1') return;
+  if (!productId) return;
+  const currentId = document.getElementById('agent-template-id')?.value;
+  if (currentId) return;
+  const product = templateProductList().find(p => String(p.id) === String(productId));
+  if (product?.name) name.value = product.name;
 }
 
 function clearInvitationTemplateForm() {
@@ -1470,6 +1529,10 @@ function clearInvitationTemplateForm() {
   document.querySelectorAll('#agent-template-shops option').forEach(o => { o.selected = false; });
   const product = document.getElementById('agent-template-product');
   if (product) product.value = '';
+  const parent = document.getElementById('agent-template-parent');
+  if (parent) parent.value = '';
+  const name = document.getElementById('agent-template-name');
+  if (name) name.dataset.userNamed = '';
   onAgentTemplateTypeChange();
 }
 
@@ -1487,6 +1550,10 @@ function editInvitationTemplate(id) {
   document.getElementById('agent-template-commission').value = tpl.commission_rate ?? '';
   const product = document.getElementById('agent-template-product');
   if (product) product.value = tpl.product_id || '';
+  const parent = document.getElementById('agent-template-parent');
+  if (parent) parent.value = tpl.parent_template_id || '';
+  const name = document.getElementById('agent-template-name');
+  if (name) name.dataset.userNamed = '1';
   onAgentTemplateTypeChange();
 }
 
@@ -1499,10 +1566,15 @@ async function saveInvitationTemplate() {
     language: document.getElementById('agent-template-language')?.value || 'zh',
     shop_ids: Array.from(document.getElementById('agent-template-shops')?.selectedOptions || []).map(o => o.value),
     product_id: document.getElementById('agent-template-product')?.value || null,
+    parent_template_id: document.getElementById('agent-template-parent')?.value || null,
     commission_rate: document.getElementById('agent-template-commission')?.value || '',
     channel: 'im',
     content: document.getElementById('agent-template-content')?.value.trim() || '',
   };
+  if (!body.name && body.product_id) {
+    const product = templateProductList().find(p => String(p.id) === String(body.product_id));
+    if (product?.name) body.name = product.name;
+  }
   if (!body.name || !body.content) return toast('请填写模板名称和内容');
   try {
     await api(id ? `/api/invitations/templates/${id}` : '/api/invitations/templates', { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) });
@@ -1568,8 +1640,11 @@ function workflowPayloadFromForm() {
     config: {
       shop: document.getElementById('workflow-shop')?.value || curStore,
       template_id: Number(document.getElementById('workflow-template')?.value || 0),
+      base_template_id: Number(document.getElementById('workflow-template')?.value || 0),
       confirmation_template_id: Number(document.getElementById('workflow-confirmation-template')?.value || 0) || null,
       product_ids: selectedProductIds,
+      invite_message_content: document.getElementById('workflow-invite-message')?.value?.trim() || '',
+      save_as_product_template: Boolean(document.getElementById('workflow-save-product-template')?.checked),
       commission_rate: Number(document.getElementById('workflow-commission')?.value || 15),
       invite_target_count: Number(document.getElementById('workflow-invite-target')?.value || 1000),
       invite_daily_limit: Number(document.getElementById('workflow-invite-daily-limit')?.value || 1000),
@@ -1682,19 +1757,52 @@ function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 
 // limits remain server defaults and can be changed later without changing task setup.
 function workflowModalBodyHtml(config = {}, name = '自动化工作流', mode = 'create') {
   const shopOptions = SHOPS.map(s => `<option value="${s.id}" ${String(config.shop || curStore) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
-  const templateOptions = INVITE_TEMPLATES.filter(t => t.type === 'collab').map(t => `<option value="${t.id}" ${Number(config.template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
-  const confirmationTemplateOptions = INVITE_TEMPLATES.filter(t => t.type === 'confirmation').map(t => `<option value="${t.id}" ${Number(config.confirmation_template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+  const selectedGenericId = Number(config.base_template_id || (isGenericInviteTemplate(INVITE_TEMPLATES.find(t => Number(t.id) === Number(config.template_id)) || {}) ? config.template_id : 0) || config.template_id || 0);
+  const templateOptions = genericInviteTemplates().filter(t => t.type === 'collab').map(t => `<option value="${t.id}" ${selectedGenericId === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+  const confirmationTemplateOptions = genericInviteTemplates().filter(t => t.type === 'confirmation').map(t => `<option value="${t.id}" ${Number(config.confirmation_template_id) === Number(t.id) ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   return `
     <div class="form-row"><label class="form-label">任务名称</label><input class="form-input" id="workflow-name" value="${esc(name)}"></div>
     <div class="form-row"><label class="form-label">选择店铺</label><select class="form-input" id="workflow-shop" onchange="onWorkflowShopChange(this.value)">${shopOptions}</select></div>
     <div class="form-row"><label class="form-label">选择产品</label><div class="workflow-product-pick"><button class="btn btn-outline" type="button" id="workflow-product-button" onclick="openWorkflowProductModal()">选择产品</button><span class="invite-product-summary" id="workflow-product-summary"></span></div></div>
-    <div class="form-row"><label class="form-label">选择邀约模板</label><select class="form-input" id="workflow-template">${templateOptions || '<option value="">暂无合作邀约模板</option>'}</select><div class="module-meta">佣金比例和邀约话术由模板决定，任务创建时不再单独设置。</div></div>
+    <div class="form-row"><label class="form-label">选择邀约模板</label><select class="form-input" id="workflow-template" onchange="fillWorkflowInviteMessage(true)">${templateOptions || '<option value="">暂无合作邀约模板</option>'}</select><div class="module-meta">这里选择通用模版。选定产品后，若该产品已有固定邀约模版会自动带出，你也可以再添加或修改文字。</div></div>
+    <div class="form-row"><label class="form-label">邀约话术</label><textarea class="bd-note-ta" id="workflow-invite-message" style="min-height:120px" placeholder="先选择产品和通用模版，系统会自动带出话术"></textarea><div class="module-meta" id="workflow-invite-message-hint">请先选择产品，系统会自动识别该产品的邀约模版。</div></div>
+    <label class="agent-check" style="margin:0 0 12px"><input type="checkbox" id="workflow-save-product-template"><span>把这次自定义的话术保存为该产品的固定邀约模版</span></label>
     <div class="form-row"><label class="form-label">选择确认拍摄与发布模板</label><select class="form-input" id="workflow-confirmation-template">${confirmationTemplateOptions || '<option value="">使用系统默认话术</option>'}</select><div class="module-meta">管理员确认样品申请通过后，Agent 使用此模板确认是否能拍摄与发布。</div></div>
     <div class="form-row-2"><div class="form-row"><label class="form-label">本次成功发送邀约人数</label><input class="form-input" id="workflow-invite-target" type="number" min="1" value="${esc(config.invite_target_count ?? 1000)}"></div><div class="form-row"><label class="form-label">自动审核通过分数</label><input class="form-input" id="workflow-audit-min-score" type="number" min="0" max="100" value="${esc(config.audit_min_score ?? 70)}"></div></div>
     <div class="form-row-2"><div class="form-row"><label class="form-label">每日邀约上限</label><input class="form-input" id="workflow-invite-daily-limit" type="number" min="1" value="${esc(config.invite_daily_limit ?? 1000)}"></div><div class="form-row"><label class="form-label">每位达人最多邀约次数</label><input class="form-input" id="workflow-invite-max-per-creator" type="number" min="1" value="${esc(config.invite_max_per_creator ?? 1)}"></div></div>
     <div class="form-row-2"><div class="form-row"><label class="form-label">佣金比例 %</label><input class="form-input" id="workflow-commission" type="number" min="0" max="100" value="${esc(config.commission_rate ?? 15)}"></div><div class="form-row"><label class="form-label">BD 分配方式</label><select class="form-input" id="workflow-assign-mode"><option value="round_robin" ${config.assign_mode !== 'least_load' ? 'selected' : ''}>按顺序轮流分配</option><option value="least_load" ${config.assign_mode === 'least_load' ? 'selected' : ''}>按当前负载最少分配</option></select></div></div>
     <div class="form-row"><label class="form-label">参与分配 BD</label><div class="workflow-bd-select"><button class="form-input workflow-bd-trigger" type="button" onclick="toggleWorkflowBdDropdown()"><span id="workflow-bd-summary">请选择负责 BD</span><span>▾</span></button><div class="workflow-bd-menu" id="workflow-bd-menu">${BD_LIST.map(b => `<label class="workflow-bd-option"><input type="checkbox" class="workflow-bd-cb" value="${b.id}" ${new Set((config.bd_ids || []).map(Number)).has(Number(b.id)) ? 'checked' : ''} onchange="updateWorkflowBdSelection()"><span>${esc(b.name)}</span><em>当前 ${b.load || 0} 个</em></label>`).join('') || '<div class="empty-state">暂无 BD 成员</div>'}</div></div></div>
     <button class="btn btn-primary" style="width:100%" onclick="saveWorkflowFromModal()">${mode === 'edit' ? '保存并重新运行工作流' : '保存并创建工作流'}</button>`;
+}
+
+function fillWorkflowInviteMessage(force = false) {
+  const ta = document.getElementById('workflow-invite-message');
+  if (!ta) return;
+  const productIds = selectedWorkflowProductIds();
+  const genericId = Number(document.getElementById('workflow-template')?.value || 0);
+  const generic = INVITE_TEMPLATES.find(t => Number(t.id) === genericId) || genericInviteTemplates().find(t => t.type === 'collab');
+  const firstId = productIds[0];
+  const productTpl = findProductInviteTemplateFor(firstId, generic);
+  const product = INVITE_PRODUCTS.find(p => Number(p.id) === Number(firstId));
+  const productName = productTpl?.product_name || product?.name || '';
+  const hint = document.getElementById('workflow-invite-message-hint');
+  if (hint) {
+    if (!firstId) hint.textContent = '请先选择产品。有该产品的固定邀约模版时会自动带出，否则先套用通用模版，你可以再添加或修改文字。';
+    else if (productTpl) hint.textContent = `已识别「${productName}」的产品邀约模版，可在此基础上添加或修改文字。`;
+    else hint.textContent = `「${productName || '该产品'}」还没有固定模版，已套用通用模版，可自定义后再生成任务。`;
+  }
+  if (!force && ta.dataset.dirty === '1') return;
+  ta.value = productTpl?.content || generic?.content || '';
+  ta.dataset.dirty = '';
+}
+
+function initWorkflowInviteMessage(config = {}) {
+  const ta = document.getElementById('workflow-invite-message');
+  fillWorkflowInviteMessage(true);
+  if (ta && config.invite_message_content) ta.value = config.invite_message_content;
+  if (ta) {
+    ta.oninput = () => { ta.dataset.dirty = '1'; };
+  }
 }
 
 function workflowSelectedProducts() {
@@ -1758,6 +1866,7 @@ async function onWorkflowShopChange(shop) {
   WORKFLOW_PRODUCT_SELECTED.clear();
   INVITE_PRODUCTS = shop ? await api(`/api/products?shop=${shop}`).catch(() => []) : [];
   renderWorkflowProductSummary();
+  fillWorkflowInviteMessage(true);
 }
 
 async function openWorkflowModal() {
@@ -1780,6 +1889,7 @@ async function openWorkflowModal() {
   document.getElementById('m-workflow-body').innerHTML = workflowModalBodyHtml(config, `自动化工作流 ${new Date().toLocaleString()}`);
   renderWorkflowProductSummary();
   renderWorkflowBdSummary();
+  initWorkflowInviteMessage(config);
   document.getElementById('m-workflow').classList.add('show');
 }
 
@@ -1801,6 +1911,7 @@ async function openEditWorkflowModal(id) {
   document.getElementById('m-workflow-body').innerHTML = workflowModalBodyHtml(workflow.config || {}, workflow.name || '自动化工作流', 'edit');
   renderWorkflowProductSummary();
   renderWorkflowBdSummary();
+  initWorkflowInviteMessage(workflow.config || {});
   document.getElementById('m-workflow').classList.add('show');
 }
 
@@ -2464,9 +2575,10 @@ async function renderAgentCenter() {
   BD_LIST = bdList;
   AGENT_SETTINGS = settings;
   const productShop = curStore === 'all' ? (SHOPS[0]?.id || '') : curStore;
-  [INVITE_TEMPLATES, INVITE_PRODUCTS] = await Promise.all([
+  [INVITE_TEMPLATES, INVITE_PRODUCTS, TEMPLATE_PRODUCTS] = await Promise.all([
     api('/api/invitations/templates').catch(() => []),
     productShop ? api(`/api/products?shop=${productShop}`).catch(() => []) : Promise.resolve([]),
+    api('/api/products').catch(() => []),
   ]);
   AGENT_WORKFLOWS = overview.workflow_tasks || [];
   AGENT_INVITE_PACER = overview.invite_pacer || invitePacerFromStatus(overview.marketplace_invite, overview) || AGENT_INVITE_PACER || null;
